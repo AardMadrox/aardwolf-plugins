@@ -44,7 +44,7 @@
    purpose="Find the closest saved portal to a newly-entered chaos portal and show the speedwalk."
    date_written="2026-06-27"
    requires="4.73"
-   version="2.1"
+   version="2.2"
 >
 </plugin>
 
@@ -265,6 +265,9 @@ local function pv_show_record(r, with_header)
    pv_echo(C.hdr .. "Movements   : " .. C.num .. r.moves .. C.hdr .. " walk + " .. C.num .. "1"
            .. C.hdr .. " portal = " .. C.num .. (r.moves + 1))
    pv_echo(recall_line(r.recall_rooms, r.recall_sw, r.recall_msg))
+   if r.have_here then
+      pv_echo(C.hdr .. "PS          : " .. C.val .. "You already have a portal here!")
+   end
 end
 
 local function save_history()
@@ -310,17 +313,13 @@ local function compute_for_room(T, channel)
       return
    end
 
-   -- if you already have a portal straight to this room, no speedwalk is needed
-   local known = false
+   -- do you already have a portal straight to this room? We still compute the
+   -- next-best portal as if you didn't (portals to this room are ignored below),
+   -- and just add a gentle note at the end.
+   local have_portal_here = false
    for _ in db:nrows(string.format(
          "SELECT 1 AS x FROM exits WHERE fromuid IN ('*','**') AND touid=%s LIMIT 1", q(T))) do
-      known = true
-   end
-   if known then
-      db:close()
-      pv_echo(C.hdr .. "[PortalValue] " .. C.val
-              .. "You already have a portal to this room, why do you need another? Greed is destroying the world.")
-      return
+      have_portal_here = true
    end
 
    -- load ALL walking exits (incl. cexits) and build a reverse adjacency, so we
@@ -421,6 +420,9 @@ local function compute_for_room(T, channel)
               .. C.val .. esc(tname or "?") .. " " .. C.num .. "[" .. esc(T) .. "]" .. C.hdr
               .. " yet. (Explore the connecting rooms, or save a nearby portal.)")
       pv_echo(recall_line(recall_rooms, recall_sw, recall_msg))
+      if have_portal_here then
+         pv_echo(C.hdr .. "PS          : " .. C.val .. "You already have a portal here!")
+      end
       return
    end
 
@@ -442,6 +444,7 @@ local function compute_for_room(T, channel)
       recall_rooms = recall_rooms,
       recall_sw    = recall_sw,
       recall_msg   = recall_msg,
+      have_here    = have_portal_here,
    }
    table.insert(pv_history, rec)
    save_history()
@@ -454,7 +457,8 @@ local function compute_for_room(T, channel)
          .. C.num .. (walkmoves + 1) .. C.hdr .. " movements from " .. C.num .. best.portal.uid .. C.hdr .. "] ["
          .. C.num .. recall_disp .. C.hdr .. " portaless movements from recall" .. C.hdr .. "]"
       Send(channel .. " " .. summary)
-      pv_echo(C.hdr .. "[PortalValue] Sent summary to " .. C.val .. esc(channel) .. C.hdr .. ".")
+      pv_echo(C.hdr .. "[PortalValue] Sent summary to " .. C.val .. esc(channel) .. C.hdr .. "."
+              .. (have_portal_here and (C.hdr .. " (You already have a portal here!)") or ""))
       return
    end
 
