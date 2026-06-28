@@ -11,7 +11,6 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 | **PortalValue** | Finds the closest saved portal to a room and shows the value of a portal to it. |
 | **FHX** | Repeatedly casts `incomp` on yourself or others until healed. |
 | **PupPaths** | Step-by-step pup pathing with named, saved routes. |
-| **Pot_miniwindow** | Tracks your available potions in a small on-screen window. |
 | **ChaosCast** | Tracks chaos-portal casts (normal vs golden). |
 | **FractalReport** | Tracks Fractal run rewards and reports them to a channel. |
 | **TEDReport** | Times TED (Fury) runs and reports trains/gold/TP rewards. |

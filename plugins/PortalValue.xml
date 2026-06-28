@@ -2,12 +2,12 @@
 <!DOCTYPE muclient>
 
 <!-- PortalValue
-     Stand in the room you care about and type "pv". The plugin finds the closest
-     saved mapper portal (preferring one in the same area, but falling back to the
-     nearest portal anywhere if this area has none reachable), then shows the
-     speedwalk (using your saved exits + cexits) FROM that portal TO this room,
-     plus a movement count. It also reports the "recall walk": how many rooms it
-     is from your recall to this room using normal walking only (no portals).
+     Stand in the room you care about and type "pv". The plugin finds the
+     shortest-walk saved mapper portal across ALL areas (a portal in another area
+     can beat an in-area one), then shows the speedwalk (using your saved exits +
+     cexits) FROM that portal TO this room, plus a movement count. It also reports
+     the "recall walk": how many rooms it is from your recall to this room using
+     normal walking only (no portals).
 
      Movement rule:
        - taking the portal itself         = 1 movement
@@ -44,7 +44,7 @@
    purpose="Find the closest saved portal to a newly-entered chaos portal and show the speedwalk."
    date_written="2026-06-27"
    requires="4.73"
-   version="2.0"
+   version="2.1"
 >
 </plugin>
 
@@ -271,8 +271,8 @@ local function save_history()
    SetVariable("history", serialize.save_simple(pv_history))
 end
 
--- core: given a room uid, find the closest portal (same-area first, else anywhere)
--- and the no-portal walking distance from recall, then report.
+-- core: given a room uid, find the shortest-walk portal across ALL areas and the
+-- no-portal walking distance from recall, then report.
 -- If "channel" is given (e.g. "spo", "clan", "tell bob"), send a one-line summary
 -- to that channel instead of printing the full local report.
 local function compute_for_room(T, channel)
@@ -401,19 +401,20 @@ local function compute_for_room(T, channel)
       recall_sw, recall_rooms = build_speedwalk(path_dirs(recall_uid))
    end
 
-   -- nearest reachable portal, preferring ones in this same area
-   local best_in, best_any
+   -- shortest reachable portal by walking distance, across ALL areas (a portal in
+   -- another area can give a shorter total path than an in-area one). Ties break
+   -- toward a portal in this same area.
+   local best
    for _, pt in ipairs(portals) do
       if pt.uid ~= T and dist[pt.uid] ~= nil then
-         if (not best_any) or dist[pt.uid] < best_any.d then
-            best_any = { d = dist[pt.uid], portal = pt }
-         end
-         if pt.area == area and ((not best_in) or dist[pt.uid] < best_in.d) then
-            best_in = { d = dist[pt.uid], portal = pt }
+         local d = dist[pt.uid]
+         if (not best)
+            or d < best.d
+            or (d == best.d and pt.area == area and best.portal.area ~= area) then
+            best = { d = d, portal = pt }
          end
       end
    end
-   local best = best_in or best_any
 
    if not best then
       pv_echo(C.hdr .. "[PortalValue] No saved portal has a known walking path to "
