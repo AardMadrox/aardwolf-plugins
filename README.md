@@ -18,7 +18,19 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 | **MatronReporter** | Times Matron Dragon runs and reports rewards. |
 | **SKDReport** | Times SKD runs and reports trains/gold/TP/Repop Token/Sigil rewards. |
 
-## Installing a plugin
+## Easiest way to install & stay updated: the Plugin Manager
+
+Install **`Madrox_PluginManager.xml`** once (see steps below), then just type
+**`mpm`** in the MUD. You'll get a clickable list of all the plugins with
+**Install / Update / Reload / Remove** buttons and version indicators, so you can
+grab new ones and keep existing ones current without touching files by hand.
+
+- `mpm` — show the list
+- `mpm updateall` — update everything that's out of date
+- `mpm selfupdate` — update the manager itself
+- `mpm help` — full command list
+
+## Installing a plugin (manually)
 
 1. Download the `.xml` file you want from the [`plugins/`](plugins/) folder
    (open the file, then click **Download raw file** / the download icon).

@@ -1,0 +1,387 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="Madrox_PluginManager"
+   author="Eric"
+   id="d4e1a9f3c27b6085e3a1c9f2"
+   language="Lua"
+   purpose="Install/update/reload Madrox's plugins from GitHub"
+   save_state="y"
+   date_written="2026-06-27"
+   requires="4.00"
+   version="1.0"
+   >
+<description trim="y">
+<![CDATA[
+Madrox Plugin Manager (mpm) - keeps Madrox's Aardwolf plugins up to date from
+the GitHub repo at https://github.com/AardMadrox/aardwolf-plugins
+
+  mpm              - show the plugin list with install/update/reload buttons
+  mpm update <n>   - download and update plugin number <n>
+  mpm install <n>  - install plugin number <n>
+  mpm reload <n>   - reload plugin number <n>
+  mpm remove <n>   - remove (unload + delete) plugin number <n>
+  mpm updateall    - update every out-of-date plugin
+  mpm check        - re-read the list from GitHub
+  mpm selfupdate   - update this manager itself
+  mpm debug        - toggle debug messages
+  mpm help         - show this help
+
+Download/reload mechanics adapted from Kelaire's Self_PluginManager
+(epic_plugin_manager), which credits Crowley's self-update code.
+]]>
+</description>
+</plugin>
+
+<aliases>
+  <alias
+     script="mpmMain"
+     match="^mpm ?(.*)?$"
+     enabled="y"
+     regexp="y"
+     sequence="100"
+  >
+  </alias>
+</aliases>
+
+<script>
+<![CDATA[
+local LIST_URL = "https://raw.githubusercontent.com/AardMadrox/aardwolf-plugins/main/plugins.list"
+local SELF_RAW = "https://raw.githubusercontent.com/AardMadrox/aardwolf-plugins/main/Madrox_PluginManager.xml"
+
+local cache = {}          -- array of {url, file, name, ghver, id, localver, installed}
+local initialized = false
+local expected = 0        -- how many plugin files we are waiting on
+local received = 0        -- how many have come back
+local render_when_done = false
+local debug_on = false
+
+local function dbg(msg)
+   if debug_on then ColourNote("orange", "", "MPM debug: " .. tostring(msg)) end
+end
+
+local function info(msg) ColourNote("yellow", "", "MPM: " .. tostring(msg)) end
+local function err(msg)  ColourNote("white", "red", "MPM: " .. tostring(msg)) end
+
+local function get_async()
+   local ok, async = pcall(require, "async")
+   if not ok then
+      err("Could not load the 'async' library (it ships with the Aardwolf client package).")
+      return nil
+   end
+   return async
+end
+
+-- pull the plugin tag fields out of a downloaded .xml
+local function parse_field(page, field)
+   -- field on its own line, e.g.   version="1.0"
+   return page:match('[\r\n]%s*' .. field .. '%s*=%s*"([^"]+)"')
+end
+
+local function ver_num(v)
+   return tonumber((tostring(v):gsub("[^%d%.]", ""))) or 0
+end
+
+local function file_from_url(url)
+   return url:match("/([^/]+)$") or "unknown.xml"
+end
+
+-------------------------------------------------------------------------------
+-- Building the list (asynchronous)
+-------------------------------------------------------------------------------
+
+function mpm_on_plugin(retval, page, status, headers, full_status, request_url)
+   received = received + 1
+   if status == 200 and page then
+      local entry = {}
+      entry.url       = request_url
+      entry.file      = file_from_url(request_url)
+      entry.name      = parse_field(page, "[Nn][Aa][Mm][Ee]") or entry.file:gsub("%.xml$", "")
+      entry.ghver     = parse_field(page, "[Vv][Ee][Rr][Ss][Ii][Oo][Nn]") or "0"
+      entry.id        = parse_field(page, "[Ii][Dd]") or ""
+      entry.installed = entry.id ~= "" and IsPluginInstalled(entry.id) or false
+      entry.localver  = entry.installed and GetPluginInfo(entry.id, 19) or 0
+      table.insert(cache, entry)
+      dbg(entry.name .. " gh=" .. entry.ghver .. " local=" .. tostring(entry.localver) ..
+          " installed=" .. tostring(entry.installed))
+   else
+      err("Could not fetch " .. file_from_url(request_url or "?") ..
+          " (status " .. tostring(status) .. ")")
+   end
+
+   if received >= expected then
+      initialized = true
+      -- sort by name so numbering is stable
+      table.sort(cache, function(a, b) return a.name:lower() < b.name:lower() end)
+      info("Plugin list ready (" .. #cache .. " plugins).")
+      if render_when_done then
+         render_when_done = false
+         renderMenu()
+      end
+   end
+end
+
+function mpm_on_list(retval, page, status, headers, full_status, request_url)
+   if status ~= 200 or not page then
+      err("Could not read the plugin list from GitHub (status " .. tostring(status) .. ").")
+      return
+   end
+   local async = get_async()
+   if not async then return end
+
+   cache = {}
+   initialized = false
+   received = 0
+   expected = 0
+
+   local urls = {}
+   for line in (page .. "\n"):gmatch("(.-)\r?\n") do
+      line = line:gsub("^%s+", ""):gsub("%s+$", "")
+      if line ~= "" and not line:match("^#") then
+         table.insert(urls, line)
+      end
+   end
+   expected = #urls
+   dbg("list has " .. expected .. " entries")
+   if expected == 0 then
+      err("The plugin list was empty.")
+      return
+   end
+   for _, u in ipairs(urls) do
+      async.doAsyncRemoteRequest(u, mpm_on_plugin, "HTTPS")
+   end
+end
+
+function buildCache(render)
+   render_when_done = render and true or false
+   local async = get_async()
+   if not async then return end
+   info("Reading plugin list from GitHub...")
+   async.doAsyncRemoteRequest(LIST_URL, mpm_on_list, "HTTPS")
+end
+
+-------------------------------------------------------------------------------
+-- The menu
+-------------------------------------------------------------------------------
+
+function renderMenu()
+   if not initialized then
+      buildCache(true)
+      return
+   end
+   ColourNote("white", "slateblue", "      [ Madrox Plugin Manager ]      ")
+   ColourNote("cyan", "", "Click a plugin name for info, or a button to act.")
+   for i, e in ipairs(cache) do
+      local gh  = ver_num(e.ghver)
+      local loc = ver_num(e.localver)
+      if e.installed then
+         if loc >= gh then
+            ColourTell("cyan", "", " [", "green", "", "x", "cyan", "", "] ")
+         else
+            ColourTell("cyan", "", " [", "yellow", "", "!", "cyan", "", "] ")
+         end
+      else
+         ColourTell("cyan", "", " [ ] ")
+      end
+
+      Hyperlink("mpm info " .. i, string.format("%2d. %-20s", i, e.name),
+                "Plugin info", "skyblue", "black", 0, 1)
+      ColourTell("white", "", "v" .. tostring(e.ghver) .. " ")
+
+      if not e.installed then
+         Hyperlink("mpm install " .. i, "[Install]", "Install this plugin", "darkorange", "black", 0, 1)
+      elseif loc < gh then
+         Hyperlink("mpm update " .. i, "[Update]", "Download and update", "darkorange", "black", 0, 1)
+         Hyperlink("mpm remove " .. i, "[Remove]", "Unload and delete", "red", "black", 0, 1)
+      else
+         Hyperlink("mpm reload " .. i, "[Reload]", "Reload this plugin", "teal", "black", 0, 1)
+         Hyperlink("mpm remove " .. i, "[Remove]", "Unload and delete", "red", "black", 0, 1)
+      end
+      ColourNote("white", "", "")
+   end
+   ColourNote("cyan", "", "[x]=up to date  [!]=update available  [ ]=not installed")
+end
+
+-------------------------------------------------------------------------------
+-- Actions
+-------------------------------------------------------------------------------
+
+-- download a url synchronously, returns page, status
+local function download(url)
+   local async = get_async()
+   if not async then return nil, 0 end
+   local thread = async.request(url, "HTTPS")
+   local retval, page, status = thread:join()
+   return page, status
+end
+
+local function get_entry(n)
+   n = tonumber(n)
+   if not n or not cache[n] then
+      err("No plugin number " .. tostring(n) .. ". Type 'mpm' to see the list.")
+      return nil
+   end
+   return cache[n], n
+end
+
+function cmdInstall(n)
+   local e = get_entry(n); if not e then return end
+   if e.id ~= "" and IsPluginInstalled(e.id) then
+      info(e.name .. " is already installed. Use 'mpm reload' or 'mpm update'.")
+      return
+   end
+   info("Installing " .. e.name .. " ...")
+   local page, status = download(e.url)
+   if status ~= 200 or not page then err("Download failed (status " .. tostring(status) .. ").") return end
+   local path = GetInfo(60) .. e.file
+   local f = io.open(path, "w"); f:write(page); f:close()
+   LoadPlugin(path)
+   info(e.name .. " installed.")
+   buildCache(false)
+end
+
+function cmdUpdate(n)
+   local e = get_entry(n); if not e then return end
+   if not (e.id ~= "" and IsPluginInstalled(e.id)) then
+      info(e.name .. " is not installed. Use 'mpm install " .. tostring(n) .. "'.")
+      return
+   end
+   if ver_num(e.localver) >= ver_num(e.ghver) then
+      info(e.name .. " is already up to date (v" .. tostring(e.localver) .. ").")
+      return
+   end
+   info("Updating " .. e.name .. " to v" .. tostring(e.ghver) .. " ...")
+   local page, status = download(e.url)
+   if status ~= 200 or not page then err("Download failed (status " .. tostring(status) .. ").") return end
+   local path = GetPluginInfo(e.id, 6)
+   UnloadPlugin(e.id)
+   local f = io.open(path, "w"); f:write(page); f:close()
+   LoadPlugin(path)
+   info(e.name .. " updated.")
+   buildCache(false)
+end
+
+function cmdReload(n)
+   local e = get_entry(n); if not e then return end
+   if e.id ~= "" and IsPluginInstalled(e.id) then
+      info("Reloading " .. e.name .. " ...")
+      ReloadPlugin(e.id)
+   else
+      info(e.name .. " is not installed. Use 'mpm install " .. tostring(n) .. "'.")
+   end
+end
+
+function cmdRemove(n)
+   local e = get_entry(n); if not e then return end
+   if not (e.id ~= "" and IsPluginInstalled(e.id)) then
+      info(e.name .. " is not installed.")
+      return
+   end
+   local path = GetPluginInfo(e.id, 6)
+   UnloadPlugin(e.id)
+   local ok, rerr = os.remove(path)
+   if ok then info("Removed " .. e.name .. ".") else err("Could not delete file: " .. tostring(rerr)) end
+   buildCache(false)
+end
+
+function cmdUpdateAll()
+   if not initialized then info("List not ready yet - run 'mpm' first.") return end
+   local any = false
+   for i, e in ipairs(cache) do
+      if e.id ~= "" and IsPluginInstalled(e.id) and ver_num(e.localver) < ver_num(e.ghver) then
+         any = true
+         cmdUpdate(i)
+      end
+   end
+   if not any then info("Everything is already up to date.") end
+end
+
+-------------------------------------------------------------------------------
+-- Self update (adapted from Crowley via Kelaire)
+-------------------------------------------------------------------------------
+
+function mpm_self_check(retval, page, status, headers, full_status, request_url)
+   if status ~= 200 or not page then err("Self-update check failed (status " .. tostring(status) .. ").") return end
+   local raw_version = ver_num(parse_field(page, "[Vv][Ee][Rr][Ss][Ii][Oo][Nn]"))
+   local mine = ver_num(GetPluginInfo(GetPluginID(), 19))
+   if raw_version <= mine then
+      info("Madrox Plugin Manager is up to date (v" .. tostring(mine) .. ").")
+      return
+   end
+   info("Updating manager from v" .. tostring(mine) .. " to v" .. tostring(raw_version) .. " ...")
+   local f = io.open(GetPluginInfo(GetPluginID(), 6), "w"); f:write(page); f:close()
+   if "" == GetAlphaOption("script_prefix") then SetAlphaOption("script_prefix", "\\\\\\") end
+   Execute(GetAlphaOption("script_prefix") .. "DoAfterSpecial(1, \"ReloadPlugin('" .. GetPluginID() .. "')\", sendto.script)")
+   info("Manager updated - reloading.")
+end
+
+function cmdSelfUpdate()
+   local async = get_async(); if not async then return end
+   info("Checking for a manager update ...")
+   async.doAsyncRemoteRequest(SELF_RAW, mpm_self_check, "HTTPS")
+end
+
+-------------------------------------------------------------------------------
+-- Help + command dispatch
+-------------------------------------------------------------------------------
+
+function showInfo(n)
+   local e = get_entry(n); if not e then return end
+   ColourNote("white", "slateblue", e.name)
+   ColourNote("cyan", "", "  GitHub version: v" .. tostring(e.ghver))
+   ColourNote("cyan", "", "  Installed: " .. (e.installed and ("v" .. tostring(e.localver)) or "no"))
+   ColourNote("cyan", "", "  File: " .. e.file)
+end
+
+function showHelp()
+   ColourNote("white", "slateblue", "      Madrox Plugin Manager - help      ")
+   local lines = {
+      "mpm              - show the plugin list",
+      "mpm update <n>   - update plugin number <n>",
+      "mpm install <n>  - install plugin number <n>",
+      "mpm reload <n>   - reload plugin number <n>",
+      "mpm remove <n>   - unload and delete plugin <n>",
+      "mpm updateall    - update everything out of date",
+      "mpm check        - re-read the list from GitHub",
+      "mpm selfupdate   - update this manager",
+      "mpm debug        - toggle debug messages",
+      "mpm help         - this help",
+   }
+   for _, l in ipairs(lines) do ColourNote("cyan", "", "  " .. l) end
+end
+
+function mpmMain(name, line, wc)
+   local first, rest = (wc[1] or ""):match("(%S*)%s*(.*)")
+   if first == nil or first == "" then renderMenu(); return end
+   first = first:lower()
+
+   if     first == "help"      then showHelp()
+   elseif first == "check"     then buildCache(true)
+   elseif first == "list"      then renderMenu()
+   elseif first == "info"      then showInfo(rest)
+   elseif first == "install"   then cmdInstall(rest)
+   elseif first == "update"    then cmdUpdate(rest)
+   elseif first == "updateall" then cmdUpdateAll()
+   elseif first == "reload"    then cmdReload(rest)
+   elseif first == "remove"    then cmdRemove(rest)
+   elseif first == "selfupdate" then cmdSelfUpdate()
+   elseif first == "debug"     then
+      debug_on = not debug_on
+      info("debug " .. (debug_on and "ON" or "OFF"))
+   else
+      err("Unknown command '" .. first .. "'. Type 'mpm help'.")
+   end
+end
+
+function OnPluginInstall()
+   ColourNote("white", "slateblue", "Madrox Plugin Manager loaded. Type 'mpm' for the plugin list.")
+   buildCache(false)
+end
+
+function OnPluginEnable()
+   if not initialized then buildCache(false) end
+end
+]]>
+</script>
+</muclient>
