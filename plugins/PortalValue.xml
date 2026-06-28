@@ -44,7 +44,7 @@
    purpose="Find the closest saved portal to a newly-entered chaos portal and show the speedwalk."
    date_written="2026-06-27"
    requires="4.73"
-   version="2.2"
+   version="2.3"
 >
 </plugin>
 
@@ -453,8 +453,9 @@ local function compute_for_room(T, channel)
       -- one-line channel summary (no speedwalks). Recall shows N/A when there is
       -- no known no-portal walking route from recall to here.
       local recall_disp = (recall_rooms ~= nil) and tostring(recall_rooms) or "N/A"
-      local summary = C.hdr .. "Room " .. C.num .. T .. C.hdr .. ": ["
-         .. C.num .. (walkmoves + 1) .. C.hdr .. " movements from " .. C.num .. best.portal.uid .. C.hdr .. "] ["
+      local summary = C.val .. esc(area) .. " " .. esc(tname or "?") .. C.hdr .. " (" .. C.num .. T .. C.hdr .. "): ["
+         .. C.num .. (walkmoves + 1) .. C.hdr .. " movements from " .. C.val .. esc(best.portal.area or "?")
+         .. " " .. esc(best.portal.name or "?") .. C.hdr .. " (" .. C.num .. best.portal.uid .. C.hdr .. ")] ["
          .. C.num .. recall_disp .. C.hdr .. " portaless movements from recall" .. C.hdr .. "]"
       Send(channel .. " " .. summary)
       pv_echo(C.hdr .. "[PortalValue] Sent summary to " .. C.val .. esc(channel) .. C.hdr .. "."
