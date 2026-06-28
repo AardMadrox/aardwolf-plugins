@@ -1,0 +1,519 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<!-- PortalValue
+     Stand in the room you care about and type "pv". The plugin finds the closest
+     saved mapper portal in the same area, then shows the speedwalk (using your
+     saved exits + cexits) FROM that portal TO this room, plus a movement count.
+
+     Movement rule:
+       - taking the portal itself         = 1 movement
+       - each cardinal step (n/s/e/w/u/d)  = 1 movement
+       - each custom exit (e.g. "enter hole") = 1 movement
+       - open/close commands               = 0 movements (they never appear in
+                                             mapper paths, so this is automatic)
+
+     Commands:
+       pv  /  pvtest        - calculate for the room you're standing in
+       portalvalue help     - show usage
+       portalvaluehistory   - list every result found (persists across sessions)
+       portalvaluepurge     - clear the history
+       pvcheck              - verify setup on this client (mapper + database)
+       pvdebug              - toggle debug messages
+
+     Shareable: this plugin reads the mapper's own database name and the world
+     folder from the running client at install time, so it works for whoever
+     installs it against THEIR own mapper, rooms, and portals. The only
+     requirement is the standard Aardwolf client package (GMCP mapper + GMCP
+     handler), which use fixed plugin IDs identical on every install. On install
+     it runs pvcheck automatically and reports whether it's ready.
+-->
+
+<muclient>
+<plugin
+   name="PortalValue"
+   author="Eric"
+   id="e9f3a7c2b1d84605fa9c7e21"
+   language="Lua"
+   purpose="Find the closest saved portal to a newly-entered chaos portal and show the speedwalk."
+   date_written="2026-06-27"
+   requires="4.73"
+   version="1.0"
+>
+</plugin>
+
+<!-- ================= ALIASES ================= -->
+<aliases>
+
+  <alias
+   match="^pv$"
+   enabled="y"
+   regexp="y"
+   ignore_case="y"
+   script="pv_test"
+   sequence="100"
+  >
+  </alias>
+
+  <alias
+   match="^pvtest$"
+   enabled="y"
+   regexp="y"
+   ignore_case="y"
+   script="pv_test"
+   sequence="100"
+  >
+  </alias>
+
+  <alias
+   match="^portalvalue help$"
+   enabled="y"
+   regexp="y"
+   ignore_case="y"
+   script="pv_usage"
+   sequence="100"
+  >
+  </alias>
+
+  <alias
+   match="^portalvaluehistory$"
+   enabled="y"
+   regexp="y"
+   ignore_case="y"
+   script="pv_history"
+   sequence="100"
+  >
+  </alias>
+
+  <alias
+   match="^portalvaluepurge$"
+   enabled="y"
+   regexp="y"
+   ignore_case="y"
+   script="pv_purge"
+   sequence="100"
+  >
+  </alias>
+
+  <alias
+   match="^pvcheck$"
+   enabled="y"
+   regexp="y"
+   ignore_case="y"
+   script="pv_check"
+   sequence="100"
+  >
+  </alias>
+
+  <alias
+   match="^pvdebug$"
+   enabled="y"
+   regexp="y"
+   ignore_case="y"
+   script="pv_toggle_debug"
+   sequence="100"
+  >
+  </alias>
+
+</aliases>
+
+<!-- ================= SCRIPT ================= -->
+<script>
+<![CDATA[
+
+local MAPPER_ID = "b6eae87ccedd84f510b74714"
+local GMCP_ID   = "3e7dedbe37e44942dd46d264"
+
+-- theme colours
+local C = {
+   hdr = "@x099",   -- purple
+   val = "@x045",   -- cyan
+   num = "@W",      -- bright white
+   ok  = "@x048",   -- green
+   bad = "@R",      -- bright red (diagnostics)
+}
+
+-- state
+pv_history = pv_history or {}
+pv_debug   = pv_debug or false
+
+-- colour output (fall back to plain text if the colour lib isn't available)
+local have_colors = pcall(require, "aardwolf_colors")
+function pv_echo(s)
+   if have_colors then
+      AnsiNote(ColoursToANSI(s))
+   else
+      -- crude strip of @-codes
+      Note((s:gsub("@x%d%d?%d?", ""):gsub("@%a", "")))
+   end
+end
+
+-- escape user-supplied text so stray @ signs aren't read as colour codes
+local function esc(s)
+   return (tostring(s or ""):gsub("@", "@@"))
+end
+
+-- sql string-quote
+local function q(s)
+   return "'" .. tostring(s):gsub("'", "''") .. "'"
+end
+
+local CARDINALS = { n=true, s=true, e=true, w=true, u=true, d=true }
+
+-- turn an ordered list of step commands into a compressed speedwalk + a move count
+local function build_speedwalk(dirs)
+   local segs, run = {}, {}
+   local moves = 0
+   local function flush()
+      if #run > 0 then
+         local parts = {}
+         for _, rc in ipairs(run) do
+            parts[#parts+1] = ((rc.c > 1) and rc.c or "") .. rc.d
+         end
+         segs[#segs+1] = "run " .. table.concat(parts)
+         run = {}
+      end
+   end
+   for _, d in ipairs(dirs) do
+      moves = moves + 1
+      if CARDINALS[d] then
+         local last = run[#run]
+         if last and last.d == d then
+            last.c = last.c + 1
+         else
+            run[#run+1] = { d = d, c = 1 }
+         end
+      else
+         flush()
+         segs[#segs+1] = d   -- custom exit, verbatim
+      end
+   end
+   flush()
+   return table.concat(segs, ";"), moves
+end
+
+-- locate the mapper's database file on disk.
+-- Everything here is read from the running client at runtime, so it adapts to
+-- whatever world / character / install the plugin is loaded into:
+--   * the mapper's own "db_name" variable (the file it actually uses)
+--   * GetInfo(66) = this world's file folder (where the mapper keeps the db)
+-- Returns: path  (or)  nil, reason
+local function get_db_path()
+   if not IsPluginInstalled(MAPPER_ID) then
+      return nil, "the Aardwolf GMCP mapper plugin is not installed"
+   end
+   local db_name = GetPluginVariable(MAPPER_ID, "db_name")
+   if not db_name or db_name == "" then
+      -- fallback: replicate the mapper's own default = sanitize_filename(WorldName())
+      db_name = (WorldName() or ""):gsub("[^%w%s()_-]", "")
+      db_name = db_name:gsub("^%s+", ""):gsub("%s+$", "")   -- Trim
+   end
+   if db_name == "" then
+      return nil, "could not determine the mapper's database name"
+   end
+   local path = GetInfo(66) .. db_name .. ".db"
+   local f = io.open(path, "rb")
+   if not f then
+      return nil, "database file not found at: " .. path
+   end
+   f:close()
+   return path
+end
+
+-- pretty-print one result record
+local function pv_show_record(r, with_header)
+   if with_header then
+      pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue" .. C.hdr .. " ===================")
+   end
+   pv_echo(C.hdr .. "This room   : " .. C.val .. esc(r.newname) .. " " .. C.num .. "[" .. esc(r.newuid) .. "] "
+           .. C.hdr .. "(" .. C.val .. esc(r.area) .. C.hdr .. ")")
+   pv_echo(C.hdr .. "From portal : " .. C.val .. esc(r.pname) .. " " .. C.num .. "[" .. esc(r.puid) .. "]")
+   pv_echo(C.hdr .. "  command   : " .. C.ok .. esc(r.pcmd) .. " " .. C.hdr .. "(lvl " .. C.num .. esc(r.plevel) .. C.hdr .. ")")
+   pv_echo(C.hdr .. "Speedwalk   : " .. C.ok .. (r.sw ~= "" and esc(r.sw) or "(adjacent)"))
+   pv_echo(C.hdr .. "Movements   : " .. C.num .. r.moves .. C.hdr .. " walk + " .. C.num .. "1"
+           .. C.hdr .. " portal = " .. C.num .. (r.moves + 1))
+end
+
+local function save_history()
+   SetVariable("history", serialize.save_simple(pv_history))
+end
+
+-- core: given a room uid, find the closest same-area portal and report
+local function compute_for_room(T)
+   T = tostring(T)
+
+   local dbpath, why = get_db_path()
+   if not dbpath then
+      pv_echo(C.hdr .. "[PortalValue] " .. esc(why or "could not locate the mapper database")
+              .. ". Type " .. C.ok .. "pvcheck" .. C.hdr .. " for details.")
+      return
+   end
+
+   local ok_sql, sqlite3 = pcall(require, "sqlite3")
+   if not ok_sql then
+      pv_echo(C.hdr .. "[PortalValue] sqlite3 library unavailable.")
+      return
+   end
+
+   local db = sqlite3.open(dbpath)
+   if not db then
+      pv_echo(C.hdr .. "[PortalValue] Could not open the mapper database.")
+      return
+   end
+
+   -- landing room area + name
+   local area, tname
+   for row in db:nrows(string.format("SELECT area, name FROM rooms WHERE uid=%s", q(T))) do
+      area  = row.area
+      tname = row.name
+   end
+   if not area then
+      db:close()
+      pv_echo(C.hdr .. "[PortalValue] Landing room " .. C.num .. esc(T) .. C.hdr
+              .. " isn't mapped yet, so I can't compute a path.")
+      return
+   end
+
+   -- if you already have a portal straight to this room, no speedwalk is needed
+   local known = false
+   for _ in db:nrows(string.format(
+         "SELECT 1 AS x FROM exits WHERE fromuid IN ('*','**') AND touid=%s LIMIT 1", q(T))) do
+      known = true
+   end
+   if known then
+      db:close()
+      pv_echo(C.hdr .. "[PortalValue] " .. C.val
+              .. "You already have a portal to this room, why do you need another? Greed is destroying the world.")
+      return
+   end
+
+   -- load all walking exits whose BOTH endpoints are in this area (incl. cexits)
+   local radj = {}
+   local edge_q = string.format([[
+      SELECT e.fromuid AS f, e.touid AS t, e.dir AS d
+      FROM exits e
+      JOIN rooms r1 ON r1.uid = e.fromuid
+      JOIN rooms r2 ON r2.uid = e.touid
+      WHERE r1.area = %s AND r2.area = %s AND e.fromuid NOT IN ('*','**')
+   ]], q(area), q(area))
+   for row in db:nrows(edge_q) do
+      local t = tostring(row.t)
+      radj[t] = radj[t] or {}
+      table.insert(radj[t], { from = tostring(row.f), dir = row.d })
+   end
+
+   -- portals in this area
+   local portals = {}
+   local portal_q = string.format([[
+      SELECT e.touid AS t, e.dir AS d, e.level AS lv, r.name AS nm
+      FROM exits e
+      JOIN rooms r ON r.uid = e.touid
+      WHERE e.fromuid IN ('*','**') AND r.area = %s
+   ]], q(area))
+   for row in db:nrows(portal_q) do
+      table.insert(portals, {
+         uid   = tostring(row.t),
+         cmd   = row.d,
+         level = row.lv,
+         name  = row.nm,
+      })
+   end
+   db:close()
+
+   if #portals == 0 then
+      pv_echo(C.hdr .. "[PortalValue] No saved portals in this area (" .. C.val .. esc(area) .. C.hdr .. ").")
+      return
+   end
+
+   -- BFS backward from the landing room over reverse edges
+   local dist = { [T] = 0 }
+   local fwd  = {}            -- fwd[node] = { dir = , nxt = }  (forward step toward T)
+   local queue, head = { T }, 1
+   while head <= #queue do
+      local cur = queue[head]; head = head + 1
+      local d0 = dist[cur]
+      local preds = radj[cur]
+      if preds then
+         for _, pe in ipairs(preds) do
+            local p = pe.from
+            if dist[p] == nil then
+               dist[p]  = d0 + 1
+               fwd[p]   = { dir = pe.dir, nxt = cur }
+               queue[#queue+1] = p
+            end
+         end
+      end
+   end
+
+   -- nearest portal that can actually reach the landing room
+   local best
+   for _, pt in ipairs(portals) do
+      if pt.uid ~= T and dist[pt.uid] ~= nil then
+         if (not best) or dist[pt.uid] < best.d then
+            best = { d = dist[pt.uid], portal = pt }
+         end
+      end
+   end
+
+   if not best then
+      pv_echo(C.hdr .. "[PortalValue] Found portals in " .. C.val .. esc(area) .. C.hdr
+              .. ", but none have a known walking path to room " .. C.num .. esc(T) .. C.hdr
+              .. " yet. (Explore the connecting rooms first.)")
+      return
+   end
+
+   -- reconstruct the forward path: portal room -> landing room
+   local dirs, node = {}, best.portal.uid
+   while node ~= T do
+      local step = fwd[node]
+      if not step then break end
+      dirs[#dirs+1] = step.dir
+      node = step.nxt
+   end
+
+   local sw, walkmoves = build_speedwalk(dirs)
+
+   local rec = {
+      time    = os.date("%Y-%m-%d %H:%M"),
+      area    = area,
+      newname = tname or "?",
+      newuid  = T,
+      pname   = best.portal.name or "?",
+      puid    = best.portal.uid,
+      pcmd    = best.portal.cmd or "?",
+      plevel  = tostring(best.portal.level or 0),
+      sw      = sw,
+      moves   = walkmoves,
+   }
+   table.insert(pv_history, rec)
+   save_history()
+   pv_show_record(rec, true)
+end
+
+-- read the current room's vnum from GMCP, then run the calculation
+local function process_current_room()
+   local _, data = CallPlugin(GMCP_ID, "gmcpval", "room.info")
+   local room
+   pcall(function() room = assert(loadstring("return " .. (data or "nil")))() end)
+   if type(room) ~= "table" or not room.num then
+      pv_echo(C.hdr .. "[PortalValue] Couldn't read the current room from GMCP (try LOOK first).")
+      return
+   end
+   compute_for_room(tostring(room.num))
+end
+
+-- ===== alias entry points (must be global) =====
+
+function pv_test()
+   process_current_room()
+end
+
+function pv_history()
+   if #pv_history == 0 then
+      pv_echo(C.hdr .. "[PortalValue] History is empty.")
+      return
+   end
+   pv_echo(C.hdr .. "========= " .. C.num .. "PortalValue history (" .. #pv_history .. ")" .. C.hdr .. " =========")
+   for i, r in ipairs(pv_history) do
+      pv_echo(C.hdr .. string.format("%2d. ", i) .. C.val .. esc(r.newname) .. " " .. C.num .. "[" .. esc(r.newuid) .. "] "
+              .. C.hdr .. "<- " .. C.val .. esc(r.pname) .. " " .. C.num .. "[" .. esc(r.puid) .. "]")
+      pv_echo("     " .. C.ok .. (r.sw ~= "" and esc(r.sw) or "(adjacent)")
+              .. C.hdr .. "  (" .. C.num .. r.moves .. "+1" .. C.hdr .. " moves, "
+              .. C.val .. esc(r.area) .. C.hdr .. ", " .. esc(r.time) .. ")")
+   end
+end
+
+function pv_purge()
+   pv_history = {}
+   save_history()
+   pv_echo(C.hdr .. "[PortalValue] History cleared.")
+end
+
+function pv_toggle_debug()
+   pv_debug = not pv_debug
+   pv_echo(C.hdr .. "[PortalValue] Debug " .. C.num .. (pv_debug and "ON" or "OFF") .. C.hdr .. ".")
+end
+
+-- self-diagnostics: confirms the plugin can see this install's mapper + database.
+-- Safe to run on anyone's machine; tells them exactly what's missing if anything.
+function pv_check()
+   pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue check" .. C.hdr .. " ===================")
+
+   local has_mapper = IsPluginInstalled(MAPPER_ID)
+   pv_echo(C.hdr .. "Mapper plugin : " .. (has_mapper and (C.ok .. "found") or (C.bad .. "NOT installed")))
+
+   local has_gmcp = IsPluginInstalled(GMCP_ID)
+   pv_echo(C.hdr .. "GMCP handler  : " .. (has_gmcp and (C.ok .. "found") or (C.bad .. "NOT installed")))
+
+   local path, why = get_db_path()
+   if not path then
+      pv_echo(C.hdr .. "Database      : " .. C.bad .. esc(why or "not found"))
+      pv_echo(C.bad .. "Not ready. Make sure the Aardwolf mapper is installed and you have")
+      pv_echo(C.bad .. "looked at a room at least once so the mapper has built its database.")
+      return
+   end
+   pv_echo(C.hdr .. "Database      : " .. C.ok .. esc(path))
+
+   local ok_sql, sqlite3 = pcall(require, "sqlite3")
+   if not ok_sql then
+      pv_echo(C.hdr .. "SQLite        : " .. C.bad .. "library unavailable")
+      return
+   end
+   local db = sqlite3.open(path)
+   if not db then
+      pv_echo(C.hdr .. "SQLite        : " .. C.bad .. "could not open the database")
+      return
+   end
+   local nrooms, nportals = 0, 0
+   for row in db:nrows("SELECT count(*) AS c FROM rooms") do nrooms = row.c end
+   for row in db:nrows("SELECT count(*) AS c FROM exits WHERE fromuid IN ('*','**')") do nportals = row.c end
+   db:close()
+   pv_echo(C.hdr .. "Rooms mapped  : " .. C.num .. nrooms)
+   pv_echo(C.hdr .. "Saved portals : " .. C.num .. nportals)
+   if nportals == 0 then
+      pv_echo(C.ok .. "Ready, " .. C.hdr .. "but you have no saved mapper portals yet. Add some with the")
+      pv_echo(C.hdr .. "mapper's " .. C.val .. "'mapper portal <command>'" .. C.hdr .. " before " .. C.val .. "pv" .. C.hdr .. " can find anything.")
+   else
+      pv_echo(C.ok .. "Ready. Stand in a room and type " .. C.val .. "pv" .. C.ok .. ".")
+   end
+end
+
+function pv_usage()
+   pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue" .. C.hdr .. " ===================")
+   pv_echo(C.val .. "Stand in a room and find the nearest saved portal + speedwalk to it.")
+   pv_echo(C.hdr .. "  pv                 " .. C.val .. "- calculate for the room you're in")
+   pv_echo(C.hdr .. "  portalvaluehistory " .. C.val .. "- list all results")
+   pv_echo(C.hdr .. "  portalvaluepurge   " .. C.val .. "- clear the history")
+   pv_echo(C.hdr .. "  pvcheck            " .. C.val .. "- verify it's set up correctly on this client")
+end
+
+-- ===== lifecycle =====
+
+function OnPluginInstall()
+   require "serialize"
+   local saved = GetVariable("history")
+   if saved and saved ~= "" then
+      local ok, t = pcall(function() return assert(loadstring("return " .. saved))() end)
+      if ok and type(t) == "table" then
+         pv_history = t
+      else
+         pv_history = {}
+      end
+   else
+      pv_history = {}
+   end
+   pv_echo(C.hdr .. "[PortalValue] Loaded. " .. C.num .. #pv_history .. C.hdr .. " saved result(s). Type "
+           .. C.ok .. "portalvalue help" .. C.hdr .. " for help.")
+   -- Verify setup automatically so a new user knows immediately whether it works.
+   -- Deferred a couple seconds so it isn't fooled by plugin load order at startup
+   -- (the mapper may not have finished loading at our install moment).
+   DoAfterSpecial(2, "pv_check()", 12)   -- 12 = sendto.script
+end
+
+function OnPluginSaveState()
+   save_history()
+end
+
+]]>
+</script>
+</muclient>

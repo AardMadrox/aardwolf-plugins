@@ -1,0 +1,332 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<!-- Saved on Thursday, December 29, 2016, 11:46 PM -->
+<!-- MuClient version 0.00 -->
+<muclient>
+<plugin
+   name="FunnyFarmMadrox"
+   author="Eric"
+   id="2dd72cb110e7cdfbf8710b74"
+   language="Lua"
+   purpose="Plugin consisting of simple requests from Madrox"
+   date_written="2023-04-26 00:00:00"
+   save_state="y"
+   requires="0.00"
+   version="3.10"
+   >
+
+</plugin>
+
+<aliases>
+  <alias match="^farm$"                         enabled="y" regexp="y" sequence="100" script="cmd_help"></alias>
+  <alias match="^farm help$"                    enabled="y" regexp="y" sequence="100" script="cmd_help"></alias>
+  <alias match="^farm reset all$"               enabled="y" regexp="y" sequence="90"  script="cmd_reset"></alias>
+  <alias match="^farm reset (?<event>\w+)$"     enabled="y" regexp="y" sequence="100" script="cmd_reset"></alias>
+  <alias match="^farm set (?<event>\w+) (?<msg>.+)$" enabled="y" regexp="y" sequence="100" script="cmd_set"></alias>
+  <alias match="^farm test (?<event>\w+)$"      enabled="y" regexp="y" sequence="100" script="cmd_test"></alias>
+  <alias match="^farm channel (?<channel>\w+)$" enabled="y" regexp="y" sequence="100" script="cmd_channel"></alias>
+  <alias match="^farmshare(?: (?<channel>\w+))?$" enabled="y" regexp="y" sequence="100" script="cmd_share"></alias>
+</aliases>
+
+<triggers>
+  <!-- Trivia Point -->
+  <trigger name="tpgain" enabled="y" group="triviapoints" keep_evaluating="y" omit_from_output="n" regexp="y" sequence="100" script="process_trivia_point"
+   match="^You killed a Trivia Point bonus mob!! Trivia point added\.$" > </trigger>
+   <!-- Aardwords tile -->
+   <trigger name="aardwordgain" enabled="y" group="triviapoints" keep_evaluating="y" omit_from_output="n" regexp="y" sequence="100" script="process_aardword"
+   match="^You spot an AardWords \(TM\) tile in the corpse!$" > </trigger>
+   <!-- Aarch piece -->
+   <trigger name="aarchgain" enabled="y" group="triviapoints" keep_evaluating="y" omit_from_output="n" regexp="y" sequence="100" script="process_aarch"
+   match="^You find an \(Aarchaeology\) piece hidden in the corpse!$" > </trigger>
+   <!-- Poker face -->
+   <trigger name="pokergain" enabled="y" group="triviapoints" keep_evaluating="y" omit_from_output="n" regexp="y" sequence="100" script="process_poker"
+   match="^You find a \|P\[Poker Card\]P\| special item hidden in the corpse!$" > </trigger>
+  <!-- NoTeleport -->
+  <trigger name="noteleportcount" enabled="y" group="triviapoints" keep_evaluating="y" omit_from_output="n" regexp="y" sequence="100" script="process_noteleport"
+   match="^You are magically protected from being teleported.$" > </trigger>
+  <!-- Vorpals -->
+  <trigger name="novorpalcount" enabled="y" group="triviapoints" keep_evaluating="y" omit_from_output="n" regexp="y" sequence="100" script="process_vorpal"
+   match="^Vira's blessing protects you from (?<victim>.*)'s vorpal attack\.$" > </trigger>
+  <trigger name="vorpalcount" enabled="y" group="triviapoints" keep_evaluating="y" omit_from_output="n" regexp="y" sequence="100" script="process_vorpal"
+   match="^Your .* glows brightly and almost decapitates (?<victim>.*)\.$" > </trigger>
+</triggers>
+
+<!--  Get our standard constants -->
+
+<include name="constants.lua"/>
+
+<!--  Script  -->
+<script>
+<![CDATA[
+dofile(GetInfo(60) .. "aardwolf_colors.lua") -- Used to support Aard Colors for the cnote() function
+require 'serialize'
+
+Prepend = "@D[@yMadrox's Funny Farm@D]:@W "
+DEBUG = false
+
+function isDebug()
+  return DEBUG
+end
+-- cnote: echoes a string of Aardwolf @-colour codes locally, in colour.
+-- The SAME @x text is what gets Sent to the channel, so messages are authored once
+-- in Aard @x format and look right both in the help echo and on the channel.
+function cnote(string)
+  AnsiNote(stylesToANSI(ColoursToStyles(string)))
+end
+function dnote(string)
+  if isDebug() then
+    cnote( "@r[@RDEBUG@r]: @w" .. string )
+  end
+end
+
+-----------------------------------------------------------------------
+-- Events: the seven things we count.
+--   eventLabel = friendly name shown in the help menu
+--   tagLabel   = the red label used in the auto-appended tail
+-----------------------------------------------------------------------
+local eventOrder = { "tp", "poker", "aarch", "aardword", "noteleport", "vorpal", "novorpal" }
+local eventLabel = {
+  tp = "Trivia Point", poker = "Poker Card", aarch = "Aarch Piece",
+  aardword = "AardWord Tile", noteleport = "No Teleport",
+  vorpal = "Vorpal", novorpal = "No Vorpal",
+}
+local tagLabel = {
+  tp = "Triv Mob", poker = "Poker Card", aarch = "Aarch Piece",
+  aardword = "Aardword Piece", noteleport = "No Teleport",
+  vorpal = "Vorpal", novorpal = "No Vorp",
+}
+-- short labels used when sharing totals to a channel (farm spo / farm share)
+local shareLabel = {
+  tp = "TPs", poker = "Pokers", aarch = "Aarches", aardword = "Tiles",
+  noteleport = "NoTeles", vorpal = "Vorpals", novorpal = "NoVorps",
+}
+-- which events use the $victim placeholder in the body
+local usesVictim = { vorpal = true, novorpal = true }
+
+-----------------------------------------------------------------------
+-- Counters (totals) - stored in the "counters" save variable (unchanged)
+-----------------------------------------------------------------------
+function INIT_counters()
+  counter = {
+    tp = 0, noteleport = 0, vorpal = 0, novorpal = 0,
+    aarch = 0, aardword = 0, poker = 0
+  }
+end
+function SAVE_counters()
+  SetVariable("counters", serialize.save_simple(counter))
+end
+function LOAD_counters()
+  local temp_counters = GetVariable("counters")
+  if temp_counters and temp_counters ~= "" then
+    assert(loadstring("counter = "..temp_counters))()
+  else
+    INIT_counters()
+  end
+  for _, ev in ipairs(eventOrder) do
+    if counter[ev] == nil then counter[ev] = 0 end
+  end
+end
+
+-----------------------------------------------------------------------
+-- Message BODIES - stored in the "msgbodies" save variable (separate from
+-- counters). You only ever edit the body; the plugin always appends the tail:
+--      <space>@R<tagLabel> (@W#@D<count>@R)@w
+-- Placeholders usable in a body:  $victim = mob name (vorpal/novorpal),
+--                                 $count  = number (not needed; it's in the tail)
+-----------------------------------------------------------------------
+function DEFAULT_bodies()
+  return {
+    tp         = [[:@x231ha@x195s @x159foo@x123le@x81d an@x45other m@x39oron@x75 i@x69nto g@x99iving h@x105im@x141 more @x147TP f@x183or h@x189is bun@x225g@x255ho@x231le.]],
+    poker      = [[:@r@x231s@x195hu@x159ff@x123le@x81s t@x45he dec@x39k a@x75n@x69d pu@x99lls @x141out@x147 @x183an@x189ot@x225h@x231er @x195jo@x159ke@x123rs@x81 ca@x45rd.]],
+    aarch      = [[:@x231re@x195ac@x159he@x123s @x117i@x81nto@x45 the co@x39rpse@x75 @x69and f@x99inds a @x105s@x141trange @x147SAW@x183 lik@x189e game@x225p@x255ie@x231ce.]],
+    aardword   = [[:@x231re@x195ac@x159he@x123s @x81int@x45o the c@x39orp@x75se@x69 and@x99 prov@x105i@x141des@x147 @x183a.@x189..s@x255c@x231rabb@x195le@x159 t@x123il@x117e@x81? T@x45ada!]],
+    noteleport = [[:@x231la@x195ugh@x159s @x123li@x117k@x81e an@x45 f'n lu@x39natic@x75 @x69while @x99being @x141way @x147to@x183o @x189THIC@x255K@x231 to @x195fit@x159 in@x123 t@x81hat @x45hole.]],
+    novorpal   = [[@W$victim @x231cuts@x195 off M@x159adrox'@x123s hea@x117d.@x81 Madrox @x45says "Hey give me@x39 that back!@x75". @x69You watch in @x99horror as Ma@x105dr@x141ox's hea@x147dless@x183 body@x189 begins t@x255o s@x231crew his@x195 head @x159back on@x123. Dam@x117n@x81it, it's @x45backwards.]],
+    vorpal     = [[:@x231ta@x195kes@x159 th@x123e @x81head@x45 clean of@x39f of @W$victim@x75.@x69 He th@x99en wri@x141tes @x147th@x183eir@x189 na@x225m@x255e@x231 int@x195o t@x159he @Ggreen @x45book.]],
+  }
+end
+function INIT_bodies()
+  bodies = DEFAULT_bodies()
+end
+function SAVE_bodies()
+  SetVariable("msgbodies", serialize.save_simple(bodies))
+end
+function LOAD_bodies()
+  local saved = GetVariable("msgbodies")
+  if saved and saved ~= "" then
+    assert(loadstring("bodies = "..saved))()
+    local d = DEFAULT_bodies()
+    for k, v in pairs(d) do
+      if bodies[k] == nil then bodies[k] = v end
+    end
+  else
+    INIT_bodies()
+  end
+end
+
+-----------------------------------------------------------------------
+-- Channel - stored in "ff_channel" (default: spouse)
+-----------------------------------------------------------------------
+function LOAD_channel()
+  channel = GetVariable("ff_channel")
+  if not channel or channel == "" then channel = "spouse" end
+end
+
+-----------------------------------------------------------------------
+-- Building / firing a message
+-----------------------------------------------------------------------
+-- Function replacements so a victim name containing '%' can't corrupt the result.
+function formatMsg(template, count, victim)
+  local s = template:gsub("%$count", function() return tostring(count) end)
+  s = s:gsub("%$victim", function() return victim or "" end)
+  return s
+end
+
+-- The consistent tail every message ends with.
+function tailFor(event, count)
+  return (" @R%s (@W#@D%d@R)@w"):format(tagLabel[event] or "", count)
+end
+
+-- Full assembled message = body (placeholders filled, trailing space trimmed) + tail.
+function assemble(event, count, victim)
+  local body = formatMsg(bodies[event] or "", count, victim)
+  body = body:gsub("%s+$", "")
+  return body .. tailFor(event, count)
+end
+
+function fire(event, victim)
+  counter[event] = (counter[event] or 0) + 1
+  Send( channel .. " " .. assemble(event, counter[event], victim) )
+  SAVE_counters()
+end
+
+function process_trivia_point (name, line, args, styles) fire("tp") end
+function process_poker        (name, line, args, styles) fire("poker") end
+function process_aarch        (name, line, args, styles) fire("aarch") end
+function process_aardword     (name, line, args, styles) fire("aardword") end
+function process_noteleport   (name, line, args, styles) fire("noteleport") end
+function process_vorpal       (name, line, args, styles)
+  if name == "novorpalcount" then
+    fire("novorpal", args.victim)
+  elseif name == "vorpalcount" then
+    fire("vorpal", args.victim)
+  end
+end
+
+-----------------------------------------------------------------------
+-- Commands
+-----------------------------------------------------------------------
+local function knownEvent(ev) return bodies[ev] ~= nil end
+local function eventList() return table.concat(eventOrder, ", ") end
+
+function cmd_help (name, line, args)
+  cnote("")
+  cnote("@D===== @YMadrox's Funny Farm@D =====@w")
+  cnote("@wChannel: @C" .. channel .. "@w    @D(change with @Wfarm channel <name>@D)@w")
+  cnote("@wEvery message auto-ends with its tag: @D(space)@R<Label> (@W#@D<count>@R)@w")
+  cnote("@wSo @Wfarm set <event> <text>@w only sets the part BEFORE that tag.")
+  cnote("@wStart a body with @C:@w to make it a channel emote. Use @C$victim@w in vorpal/novorpal.")
+  cnote("")
+  for _, ev in ipairs(eventOrder) do
+    local extra = usesVictim[ev] and "  @D[uses @C$victim@D]@w" or ""
+    cnote(("@W%-11s@w @D(%s)@w  @wcount: @C%d@w   @D[tag: @R%s@D]@w%s"):format(
+      ev, eventLabel[ev] or ev, counter[ev] or 0, tagLabel[ev] or "", extra))
+    cnote("   @D(body)@w " .. (bodies[ev] or "") .. "@w")
+  end
+  cnote("")
+  cnote("@wCommands:@w")
+  cnote("  @Wfarm@w / @Wfarm help@w              show this menu")
+  cnote("  @Wfarm set <event> <text>@w      set the body (everything before the tag)")
+  cnote("  @Wfarm reset <event>@w           reset one body to default")
+  cnote("  @Wfarm reset all@w               reset every body to default")
+  cnote("  @Wfarm test <event>@w            preview the full message locally (does not send)")
+  cnote("  @Wfarm channel <name>@w          set the channel the event messages use")
+  cnote("  @Wfarmshare [channel]@w          share all totals to a channel  @D(e.g. @Wfarmshare spo@D)@w")
+  cnote("@D(events: @w" .. eventList() .. "@D)@w")
+  cnote("")
+end
+
+function cmd_set (name, line, args)
+  local ev = args.event:lower()
+  if not knownEvent(ev) then
+    cnote("@RUnknown event '@W" .. ev .. "@R'. Valid events: @w" .. eventList())
+    return
+  end
+  bodies[ev] = (args.msg):gsub("%s+$", "")
+  SAVE_bodies()
+  cnote("@G" .. ev .. " body set. Full message preview:@w")
+  local victim = usesVictim[ev] and "SomeMob" or nil
+  cnote("   " .. assemble(ev, counter[ev] or 0, victim))
+end
+
+function cmd_reset (name, line, args)
+  local d = DEFAULT_bodies()
+  if not args.event or args.event == "" or args.event:lower() == "all" then
+    bodies = d
+    SAVE_bodies()
+    cnote("@GAll message bodies reset to default.@w")
+    return
+  end
+  local ev = args.event:lower()
+  if d[ev] == nil then
+    cnote("@RUnknown event '@W" .. ev .. "@R'. Valid events: @w" .. eventList())
+    return
+  end
+  bodies[ev] = d[ev]
+  SAVE_bodies()
+  cnote("@G" .. ev .. " reset. Full message preview:@w")
+  local victim = usesVictim[ev] and "SomeMob" or nil
+  cnote("   " .. assemble(ev, counter[ev] or 0, victim))
+end
+
+function cmd_test (name, line, args)
+  local ev = args.event:lower()
+  if not knownEvent(ev) then
+    cnote("@RUnknown event '@W" .. ev .. "@R'. Valid events: @w" .. eventList())
+    return
+  end
+  local victim = usesVictim[ev] and "SomeMob" or nil
+  cnote("@wWould send to @C" .. channel .. "@w:")
+  cnote("   " .. channel .. " " .. assemble(ev, (counter[ev] or 0) + 1, victim))
+end
+
+function cmd_channel (name, line, args)
+  channel = args.channel
+  SetVariable("ff_channel", channel)
+  cnote("@GChannel set to @C" .. channel .. "@w")
+end
+
+-- Build the totals line: labels in @x099, numbers in @W.
+function buildTotals()
+  local parts = {}
+  for _, ev in ipairs(eventOrder) do
+    table.insert(parts, ("@x099%s: @W%d"):format(shareLabel[ev] or ev, counter[ev] or 0))
+  end
+  return table.concat(parts, " ") .. "@w"
+end
+
+function ShareTotals(chan)
+  Send( chan .. " " .. buildTotals() )
+end
+
+function cmd_share (name, line, args)
+  local chan = (args.channel and args.channel ~= "") and args.channel or channel
+  ShareTotals(chan)
+end
+
+-----------------------------------------------------------------------
+-- Lifecycle
+-----------------------------------------------------------------------
+function OnPluginEnable()
+  LOAD_counters()
+  LOAD_bodies()
+  LOAD_channel()
+end
+function OnPluginInstall()
+  OnPluginEnable()
+  cnote("@wMadrox's Funny Farm loaded. Type @Wfarm help@w for messages and commands.")
+end
+]]>
+
+</script>
+</muclient>

@@ -1,0 +1,669 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="PupPaths"
+   author="Eric"
+   id="f3a1c9d2e7b04f8a1c2d3e4f"
+   language="Lua"
+   purpose="Step-by-step pup pathing with named routes"
+   date_written="2026-06-14"
+   requires="4.40"
+   version="1.8"
+>
+<description trim="y">
+PupPaths: Walk named paths one room at a time. Type the path keyword to advance.
+Commands:
+  pp help                    - Show help
+  pp list                    - List all defined paths
+  pp add &lt;name&gt; &lt;dirs&gt;       - Add a path
+  pp del &lt;name&gt;              - Delete a path
+  pp reset &lt;name&gt;            - Reset position on a path to step 1
+  pp on / pp off             - Enable or disable PupPaths
+  pp &lt;name&gt;                  - Advance one step on that path (eg: pp skd)
+On the first clean run from step 1 to the end, the room numbers along a path are
+recorded via GMCP. After that, stepping off the path (eg backtracking a room) lets
+PupPaths recognize where you are and continue from that room instead of resetting.
+
+Path segments are separated by ';'. A run of direction letters/numbers is a
+speedwalk (eg 3e2s); anything else is a command (eg pull lever, enter portal).
+PupPaths auto-detects via GMCP whether a command moved you and advances either
+way, so you can just write the commands inline:
+  pp add temple 3n;pull lever;e2e;enter portal;2s;op d;d
+Optional prefixes force the behaviour if you ever need to (eg on a laggy MUD):
+  do:&lt;command&gt;   command that does NOT change rooms — advance at once (eg do:op d)
+  go:&lt;command&gt;   command that DOES move you — wait for the room to change
+</description>
+</plugin>
+
+<aliases>
+
+  <alias match="^pp on$" enabled="y" regexp="y" send_to="12" sequence="96">
+    <send>pp.on()</send>
+  </alias>
+
+  <alias match="^pp off$" enabled="y" regexp="y" send_to="12" sequence="96">
+    <send>pp.off()</send>
+  </alias>
+
+  <alias match="^pp help$" enabled="y" regexp="y" send_to="12" sequence="96">
+    <send>pp.help()</send>
+  </alias>
+
+  <alias match="^pp list$" enabled="y" regexp="y" send_to="12" sequence="96">
+    <send>pp.list()</send>
+  </alias>
+
+  <alias match="^pp del ([^ ]+)$" enabled="y" regexp="y" send_to="12" sequence="96">
+    <send>pp.del("%1")</send>
+  </alias>
+
+  <alias match="^pp reset ([^ ]+)$" enabled="y" regexp="y" send_to="12" sequence="96">
+    <send>pp.reset("%1")</send>
+  </alias>
+
+  <alias match="^pp add ([^ ]+) (.+)$" enabled="y" regexp="y" send_to="12" sequence="96">
+    <send>pp.add("%1", "%2")</send>
+  </alias>
+
+  <alias match="^ppcharge$" enabled="y" regexp="y" send_to="12" sequence="96">
+    <send>pp.charge()</send>
+  </alias>
+
+  <alias match="^pp ([^ ]+)$" enabled="y" regexp="y" send_to="12" sequence="500">
+    <send>pp.step("%1")</send>
+  </alias>
+
+</aliases>
+
+<script>
+<![CDATA[
+
+pp = {}
+
+local dataFile   = GetPluginInfo(GetPluginID(), 6) .. "PupPaths.dat"
+local configFile = GetPluginInfo(GetPluginID(), 6) .. "PupPathsConfig.dat"
+
+local paths     = {}
+local ppEnabled = true
+local ppMoving  = false
+local ppCharge  = false
+local ppCombat  = false
+local ppPending = nil   -- { pname, pos } waiting for room confirmation
+local currentRoom = nil -- last room number seen via GMCP room.info
+local ppSeq     = 0     -- step counter; lets a late auto-command timer detect staleness
+
+-- Theme palette (Eric's @x099 / @x045 / @W). The variable names are kept for the
+-- existing semantic usage; they now resolve to the themed colours:
+--   @x099 #875FFF (purple accent)  @x045 #00D7FF (cyan labels)  @W #FFFFFF (white values)
+local BG     = "black"
+local GREEN  = "#875FFF"   -- @x099 : plugin prefix, headers, "good" status
+local WHITE  = "#FFFFFF"   -- @W    : path names, primary text
+local CYAN   = "#00D7FF"   -- @x045 : labels and descriptive text
+local RED    = "#00FF87"   -- @x048 : step numbers/counts, notices, and [recording] state
+local YELLOW = "#875FFF"   -- @x099 : directions/commands to run, help placeholders
+
+local function CN(...) ColourNote(...) end
+local function Msg(...) CN(GREEN, BG, "[PupPaths] ", ...) end
+
+---------------------------------------------------------
+-- Direction expansion
+---------------------------------------------------------
+
+local dirMap = {
+    n = "n", s = "s",
+    e = "e", w = "w",
+    u = "u", d = "d",
+}
+
+local opCmds = {
+    ["op n"] = true, ["op s"] = true, ["op e"] = true,
+    ["op w"] = true, ["op u"] = true, ["op d"] = true,
+    ["op north"] = true, ["op south"] = true, ["op east"] = true,
+    ["op west"]  = true, ["op up"]    = true, ["op down"]  = true,
+}
+
+local function parseDirs(dirStr)
+    local result   = {}
+    local segments = {}
+    for seg in (dirStr .. ";"):gmatch("([^;]*);") do
+        table.insert(segments, seg)
+    end
+    for _, seg in ipairs(segments) do
+        seg = seg:match("^%s*(.-)%s*$")
+        local lower = seg:lower()
+        if #seg == 0 then
+            -- skip
+        elseif lower:match("^go:") then
+            -- command that MOVES us to a new room: wait for room.info confirm
+            local cmd = seg:sub(4):match("^%s*(.-)%s*$")
+            if #cmd > 0 then
+                table.insert(result, { type = "movecmd", cmd = cmd })
+            end
+        elseif lower:match("^do:") then
+            -- command that does NOT change rooms: advance immediately
+            local cmd = seg:sub(4):match("^%s*(.-)%s*$")
+            if #cmd > 0 then
+                table.insert(result, { type = "cmd", cmd = cmd })
+            end
+        elseif opCmds[lower] then
+            table.insert(result, { type = "cmd", cmd = lower })
+        elseif not lower:match("^[%dnsewud]+$") then
+            -- Not a pure speedwalk (has spaces or non-direction letters): a command.
+            -- Move-vs-stay is auto-detected at run time via GMCP. Original case kept.
+            table.insert(result, { type = "autocmd", cmd = seg })
+        else
+            local s = lower
+            local i = 1
+            while i <= #s do
+                local numStr = s:match("^(%d+)", i)
+                local count  = 1
+                if numStr then
+                    count = tonumber(numStr)
+                    i = i + #numStr
+                end
+                local ch = s:sub(i, i)
+                if dirMap[ch] then
+                    for _ = 1, count do
+                        table.insert(result, { type = "move", dir = dirMap[ch] })
+                    end
+                end
+                i = i + 1
+            end
+        end
+    end
+    return result
+end
+
+---------------------------------------------------------
+-- Persistence
+---------------------------------------------------------
+
+local function SaveConfig()
+    local f = io.open(configFile, "w")
+    if not f then return end
+    f:write("enabled=" .. (ppEnabled and "1" or "0") .. "\n")
+    f:write("charge=" .. (ppCharge and "1" or "0") .. "\n")
+    f:close()
+end
+
+local function LoadConfig()
+    local f = io.open(configFile, "r")
+    if not f then return end
+    for line in f:lines() do
+        local e = line:match("^enabled=([01])$")
+        if e then ppEnabled = (e == "1") end
+        local c = line:match("^charge=([01])$")
+        if c then ppCharge = (c == "1") end
+    end
+    f:close()
+end
+
+-- Data file format (one path per line):
+--   name|dirs|pos|recorded|idx-room,idx-room,...
+-- The trailing field is a comma list of "position-roomnumber" pairs captured
+-- while walking the path. Old 3-field lines (name|dirs|pos) still load.
+
+local function SaveData()
+    local f = io.open(dataFile, "w")
+    if not f then return end
+    for name, p in pairs(paths) do
+        local roomList = {}
+        if p.rooms then
+            for i, r in pairs(p.rooms) do
+                table.insert(roomList, i .. "-" .. r)
+            end
+        end
+        f:write(name .. "|" .. p.dirs .. "|" .. tostring(p.pos)
+            .. "|" .. (p.recorded and "1" or "0")
+            .. "|" .. table.concat(roomList, ",") .. "\n")
+    end
+    f:close()
+end
+
+local function LoadData()
+    paths = {}
+    local f = io.open(dataFile, "r")
+    if not f then return end
+    for line in f:lines() do
+        -- New 5-field format
+        local name, dirs, pos, rec, roomStr =
+            line:match("^([^|]+)|([^|]+)|(%d+)|([01])|(.*)$")
+        if name and dirs then
+            local p = {
+                dirs     = dirs,
+                pos      = tonumber(pos) or 1,
+                recorded = (rec == "1"),
+                rooms    = {},
+            }
+            for idx, rm in roomStr:gmatch("(%d+)%-(%-?%d+)") do
+                p.rooms[tonumber(idx)] = tonumber(rm)
+            end
+            paths[name] = p
+        else
+            -- Old 3-field format (pre-1.1): no rooms recorded yet
+            local oname, odirs, opos = line:match("^([^|]+)|([^|]+)|(%d+)$")
+            if oname and odirs then
+                paths[oname] = {
+                    dirs     = odirs,
+                    pos      = tonumber(opos) or 1,
+                    recorded = false,
+                    rooms    = {},
+                }
+            end
+        end
+    end
+    f:close()
+end
+
+-- True once every step position 1..total has a captured room number,
+-- i.e. the path has been walked cleanly from start to finish.
+local function recordingComplete(p, total)
+    if total <= 0 or not p.rooms then return false end
+    for i = 1, total do
+        if not p.rooms[i] then return false end
+    end
+    return true
+end
+
+-- Map room number -> earliest step position standing in that room.
+local function buildRoomIndex(p, total)
+    local idx = {}
+    if p.rooms then
+        for i = 1, total do
+            local r = p.rooms[i]
+            if r and not idx[r] then idx[r] = i end
+        end
+    end
+    return idx
+end
+
+-- Room each step is executed FROM, normalized for positioning. A stay-put command
+-- step (eg "op w") doesn't move you, so it shares the room of the next move. This
+-- collapses consecutive same-room steps and prevents a leading door step (whose
+-- recorded room could differ) from splitting step 1 and step 2 onto two rooms.
+local function buildEffectiveRooms(p, steps, total)
+    local eff = {}
+    local nextMoveRoom = nil
+    for i = total, 1, -1 do
+        local tok = steps[i]
+        local r = p.rooms and p.rooms[i]
+        if tok and tok.type == "cmd" then
+            eff[i] = nextMoveRoom or r   -- door/stay-put: inherit the next move's room
+        else
+            eff[i] = r                   -- move / movecmd / autocmd: its own room
+            if r then nextMoveRoom = r end
+        end
+    end
+    return eff
+end
+
+-- Reached the end of a path: announce, mark recorded if the run was clean, reset.
+local function reachedEnd(p, pname, total)
+    CN(RED, BG, "You have reached the end.")
+    if not p.recorded and recordingComplete(p, total) then
+        p.recorded = true
+        Msg(GREEN, BG, "Path '", WHITE, BG, pname,
+            GREEN, BG, "' fully recorded (", RED, BG, tostring(total),
+            GREEN, BG, " steps). It will now resume mid-path instead of resetting.")
+    end
+    p.pos = 1
+end
+
+---------------------------------------------------------
+-- pp.step — called only by a registered path alias
+---------------------------------------------------------
+
+function pp.step(pname)
+    if not ppEnabled then return end
+
+    pname = pname:lower()
+    local p = paths[pname]
+    if not p then return end
+
+    if ppCombat then
+        CN(RED, BG, "In Combat.")
+        return
+    end
+
+    -- We need to know the current room: to record step 1 of a new path, and to
+    -- position a recorded path from wherever you're standing. After a reload we
+    -- may not know it yet — ask the MUD, then have them retry.
+    if not currentRoom then
+        Execute("request room")
+        Msg(YELLOW, BG, "Getting your current room — press ",
+            WHITE, BG, "pp " .. pname, YELLOW, BG, " again.")
+        return
+    end
+
+    local steps = parseDirs(p.dirs)
+    local total = #steps
+
+    -- For a fully recorded path, your position follows the room you're actually in.
+    -- If you're already correctly placed for the room you're standing in, keep going
+    -- (so door/command steps that don't move you still advance). Otherwise jump to the
+    -- earliest step belonging to this room — letting you walk onto the path anywhere
+    -- and continue. Effective rooms collapse stay-put door steps with the move that
+    -- follows, so a leading "op w" can't strand you on the wrong step.
+    if p.recorded and currentRoom > 0 then
+        local eff = buildEffectiveRooms(p, steps, total)
+        if eff[p.pos] ~= currentRoom then
+            local target = nil
+            for i = 1, total do
+                if eff[i] == currentRoom then target = i break end
+            end
+            if target then
+                p.pos = target
+            else
+                Msg(YELLOW, BG, "You're not on a recorded room of path '",
+                    WHITE, BG, pname, YELLOW, BG, "'. Walk onto it and try again.")
+                return
+            end
+        end
+    end
+
+    if p.pos > total then
+        reachedEnd(p, pname, total)
+        SaveData()
+        return
+    end
+
+    local token = steps[p.pos]
+
+    -- Record the room we're standing in for this position (for mid-path resume)
+    if currentRoom and currentRoom > 0 then
+        p.rooms = p.rooms or {}
+        p.rooms[p.pos] = currentRoom
+    end
+
+    if token.type == "cmd" then
+        CN(GREEN, BG, "[PupPaths] ",
+           WHITE, BG, pname .. " ",
+           CYAN,  BG, "Step ",
+           RED,   BG, tostring(p.pos),
+           CYAN,  BG, "/",
+           RED,   BG, tostring(total),
+           CYAN,  BG, " -> ",
+           YELLOW,BG, "[" .. token.cmd .. "]")
+        ppMoving = false
+        -- cmd steps advance immediately since they don't move rooms
+        p.pos = p.pos + 1
+        Execute(token.cmd)
+    elseif token.type == "movecmd" then
+        CN(GREEN, BG, "[PupPaths] ",
+           WHITE, BG, pname .. " ",
+           CYAN,  BG, "Step ",
+           RED,   BG, tostring(p.pos),
+           CYAN,  BG, "/",
+           RED,   BG, tostring(total),
+           CYAN,  BG, " -> ",
+           YELLOW,BG, token.cmd)
+        -- Command that moves us — wait for GMCP room.info to confirm, like a direction
+        ppMoving  = true
+        ppPending = { pname = pname, total = total }
+        Execute(token.cmd)
+    elseif token.type == "autocmd" then
+        CN(GREEN, BG, "[PupPaths] ",
+           WHITE, BG, pname .. " ",
+           CYAN,  BG, "Step ",
+           RED,   BG, tostring(p.pos),
+           CYAN,  BG, "/",
+           RED,   BG, tostring(total),
+           CYAN,  BG, " -> ",
+           YELLOW,BG, token.cmd)
+        -- Command of unknown type: run it, then let GMCP decide. If a room.info
+        -- arrives it was a move (confirm branch advances); if not, the timer fires
+        -- and advances it as a non-moving command.
+        ppSeq     = ppSeq + 1
+        ppMoving  = true
+        ppPending = { pname = pname, total = total, seq = ppSeq }
+        Execute(token.cmd)
+        DoAfterSpecial(0.7, "pp._cmdTimeout(" .. ppSeq .. ")", 12)  -- 12 = sendto.script
+    else
+        local sendDir = ppCharge and ("charge " .. token.dir) or token.dir
+        CN(GREEN, BG, "[PupPaths] ",
+           WHITE, BG, pname .. " ",
+           CYAN,  BG, "Step ",
+           RED,   BG, tostring(p.pos),
+           CYAN,  BG, "/",
+           RED,   BG, tostring(total),
+           CYAN,  BG, " -> ",
+           YELLOW,BG, sendDir)
+        -- Don't advance pos yet — wait for GMCP room.info to confirm we moved
+        ppMoving  = true
+        ppPending = { pname = pname, total = total }
+        Execute(sendDir)
+    end
+
+    SaveData()
+end
+
+-- Called ~0.7s after an auto-detected command if NO room.info arrived,
+-- meaning the command did not move us — advance it as a non-moving step.
+function pp._cmdTimeout(seq)
+    seq = tonumber(seq)
+    if not (ppMoving and ppPending) then return end
+    if ppPending.seq ~= seq then return end   -- a newer step superseded this one
+
+    local pname = ppPending.pname
+    local total = ppPending.total
+    ppMoving  = false
+    ppPending = nil
+
+    local p = paths[pname]
+    if p then
+        p.pos = p.pos + 1
+        if p.pos > total then
+            reachedEnd(p, pname, total)
+        end
+        SaveData()
+    end
+end
+
+---------------------------------------------------------
+-- Commands
+---------------------------------------------------------
+
+function pp.help()
+    CN(GREEN,  BG, "PupPaths Help")
+    CN(WHITE,  BG, "pp help                  ", CYAN,   BG, "- Show this help")
+    CN(WHITE,  BG, "pp list                  ", CYAN,   BG, "- List all paths and current position")
+    CN(WHITE,  BG, "pp add ", YELLOW, BG, "<name> <dirs>", WHITE, BG, "      ", CYAN, BG, "- Add a path  eg: pp add skd 3e2s;op d;d2sw3s")
+    CN(WHITE,  BG, "pp del ", YELLOW, BG, "<name>", WHITE, BG, "             ", CYAN, BG, "- Delete a path")
+    CN(WHITE,  BG, "pp reset ", YELLOW, BG, "<name>", WHITE, BG, "           ", CYAN, BG, "- Reset position on a path back to step 1")
+    CN(WHITE,  BG, "pp on                    ", CYAN,   BG, "- Enable PupPaths")
+    CN(WHITE,  BG, "pp off                   ", CYAN,   BG, "- Disable PupPaths")
+    CN(WHITE,  BG, "ppcharge                 ", CYAN,   BG, "- Toggle charge mode on/off (prepends 'charge' to each direction)")
+    CN(YELLOW, BG, "pp <name>", WHITE, BG, "               ", CYAN, BG, "- Advance one step on that path  eg: pp skd")
+    CN(GREEN,  BG, "Records each path's rooms on the first full run; then resumes mid-path (eg after a backtrack) instead of resetting.")
+    CN(GREEN,  BG, "Commands in a path (eg pull lever, enter portal) just work — move-or-stay is auto-detected via GMCP.")
+    CN(GREEN,  BG, "Optional override prefixes: ", WHITE, BG, "do:<cmd>", GREEN, BG, " stays put; ", WHITE, BG, "go:<cmd>", GREEN, BG, " moves you.")
+    CN(GREEN,  BG, "Status: ", ppEnabled and GREEN or RED, BG, ppEnabled and "ENABLED" or "DISABLED")
+    CN(GREEN,  BG, "Charge: ", ppCharge  and GREEN or RED, BG, ppCharge  and "ENABLED" or "DISABLED")
+end
+
+function pp.list()
+    if next(paths) == nil then
+        Msg(WHITE, BG, "No paths defined. Use: pp add <name> <dirs>")
+        return
+    end
+    CN(GREEN, BG, "PupPaths — Defined Paths")
+    for pname, p in pairs(paths) do
+        local steps = parseDirs(p.dirs)
+        local total = #steps
+        CN(WHITE,  BG, pname .. "  ",
+           CYAN,   BG, "Step: ",
+           RED,    BG, tostring(p.pos),
+           CYAN,   BG, "/",
+           RED,    BG, tostring(total),
+           CYAN,   BG, "  ",
+           p.recorded and GREEN or RED, BG,
+           p.recorded and "[recorded]" or "[recording]",
+           CYAN,   BG, "  Dirs: ",
+           WHITE,  BG, p.dirs)
+    end
+end
+
+function pp.add(name, dirs)
+    local pname = name:lower():match("^%s*(.-)%s*$")
+    dirs = dirs:match("^%s*(.-)%s*$")
+
+    local steps = parseDirs(dirs)
+    if #steps == 0 then
+        Msg(RED, BG, "No valid directions found in: " .. dirs)
+        return
+    end
+
+    paths[pname] = { dirs = dirs, pos = 1, recorded = false, rooms = {} }
+    SaveData()
+
+    Msg(WHITE, BG, "Path '",
+        GREEN, BG, pname,
+        WHITE, BG, "' added with ",
+        RED,   BG, tostring(#steps),
+        WHITE, BG, " steps.")
+end
+
+function pp.del(name)
+    local pname = name:lower():match("^%s*(.-)%s*$")
+    if not paths[pname] then
+        Msg(RED, BG, "No path named '" .. pname .. "'.")
+        return
+    end
+    paths[pname] = nil
+    SaveData()
+    Msg(WHITE, BG, "Path '", GREEN, BG, pname, WHITE, BG, "' deleted.")
+end
+
+function pp.reset(name)
+    local pname = name:lower():match("^%s*(.-)%s*$")
+    if not paths[pname] then
+        Msg(RED, BG, "No path named '" .. pname .. "'.")
+        return
+    end
+    paths[pname].pos = 1
+    SaveData()
+    Msg(WHITE, BG, "Path '", GREEN, BG, pname, WHITE, BG, "' reset to step 1.")
+end
+
+function pp.charge()
+    ppCharge = not ppCharge
+    SaveConfig()
+    if ppCharge then
+        Msg(WHITE, BG, "Charge mode ", GREEN, BG, "ENABLED", WHITE, BG, ". Directions will be sent as 'charge <dir>'.")
+    else
+        Msg(WHITE, BG, "Charge mode ", RED, BG, "DISABLED", WHITE, BG, ". Directions will be sent normally.")
+    end
+end
+
+function pp.on()
+    ppEnabled = true
+    SaveConfig()
+    Msg(WHITE, BG, "PupPaths ", GREEN, BG, "ENABLED", WHITE, BG, ".")
+end
+
+function pp.off()
+    ppEnabled = false
+    SaveConfig()
+    Msg(WHITE, BG, "PupPaths ", RED, BG, "DISABLED", WHITE, BG, ".")
+end
+
+---------------------------------------------------------
+-- Lifecycle
+---------------------------------------------------------
+
+function OnPluginInstall()
+    LoadConfig()
+    LoadData()
+    pp.help()
+end
+
+function OnPluginConnect()
+    LoadConfig()
+    LoadData()
+end
+
+---------------------------------------------------------
+-- GMCP: detect room change not caused by plugin
+---------------------------------------------------------
+
+function OnPluginTelnetSubnegotiation(theType, data)
+    if theType ~= 201 then return end
+
+    local message = (data:match("^([%w%.%-_]+)") or ""):lower()
+
+    -- Track combat state
+    if message == "char.status" then
+        local st = data:match('"state"%s*:%s*(%d+)')
+        if st then
+            ppCombat = (tonumber(st) == 8)
+        end
+        return
+    end
+
+    if message ~= "room.info" then return end
+
+    -- Update where we are. num is -1 for unmappable rooms (clan rooms etc.);
+    -- we keep that value but never record or match on it.
+    local num = tonumber(data:match('"num"%s*:%s*(%-?%d+)'))
+    if num then
+        -- A room.info for the room we're already in (eg from 'look') is not a
+        -- move — ignore it so it can't reset or advance a path.
+        if num == currentRoom then return end
+        currentRoom = num
+    end
+
+    if ppMoving and ppPending then
+        -- Plugin caused this room change — confirmed move, now advance the step
+        ppMoving = false
+        local pname = ppPending.pname
+        local total = ppPending.total
+        ppPending   = nil
+
+        local p = paths[pname]
+        if p then
+            p.pos = p.pos + 1
+            if p.pos > total then
+                reachedEnd(p, pname, total)
+            end
+            SaveData()
+        end
+        return
+    end
+
+    -- ppMoving was set but no room change arrived (failed move) — clear pending
+    if ppMoving then
+        ppMoving  = false
+        ppPending = nil
+        return
+    end
+
+    -- Room changed but NOT by the plugin.
+    --   * Recorded paths: position is worked out from your room when you press pp,
+    --     so we leave them alone here — walk anywhere on the path and continue.
+    --   * Not-yet-recorded paths: any off-path move resets to step 1 (as before),
+    --     so recording needs one clean run from start to finish.
+    local anyChange = false
+    for pname, p in pairs(paths) do
+        if (not p.recorded) and p.pos > 1 then
+            p.pos = 1
+            anyChange = true
+            Msg(RED, BG, "Off-path movement on '", GREEN, BG, pname,
+                RED, BG, "' (not yet recorded) — reset to step 1.")
+        end
+    end
+
+    if anyChange then
+        SaveData()
+    end
+end
+
+function OnPluginSaveState()
+    SaveConfig()
+    SaveData()
+end
+
+]]>
+</script>
+
+</muclient>

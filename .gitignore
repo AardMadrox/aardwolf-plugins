@@ -1,0 +1,10 @@
+# MUSHclient writes per-user state files next to plugins; don't publish those.
+*.state
+*.bak
+*.removed
+*.tmp
+
+# OS / editor cruft
+Thumbs.db
+desktop.ini
+.DS_Store

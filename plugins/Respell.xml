@@ -1,0 +1,313 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="Respell"
+   author="Eric"
+   id="5e3a9c1f7b2d4086fa15c9e2"
+   language="Lua"
+   purpose="Run the su alias out of combat when protection good or inertial barrier drop"
+   date_written="2026-06-27"
+   requires="4.59"
+   version="1.4"
+   >
+</plugin>
+
+<!-- =====================  TRIGGERS  ===================== -->
+<triggers>
+
+  <!-- spells dropping -->
+  <trigger
+     script="onProtDrop"
+     match="^You no longer feel protected by the forces of shadow\.$"
+     enabled="y"
+     regexp="y"
+     sequence="100"
+    >
+  </trigger>
+
+  <trigger
+     script="onBarrierDrop"
+     match="^Your inertial barrier dissipates\.$"
+     enabled="y"
+     regexp="y"
+     sequence="100"
+    >
+  </trigger>
+
+  <!-- spells (re)casting -->
+  <trigger
+     script="onProtCast"
+     match="^You feel aligned with darkness\.$"
+     enabled="y"
+     regexp="y"
+     sequence="100"
+    >
+  </trigger>
+
+  <trigger
+     script="onBarrierCast"
+     match="^An inertial barrier forms around you\.$"
+     enabled="y"
+     regexp="y"
+     sequence="100"
+    >
+  </trigger>
+
+  <!-- Black Claw Crag start / end: pause respell while inside -->
+  <trigger
+     script="onBCCStart"
+     match="This can't be good\."
+     enabled="y"
+     regexp="y"
+     sequence="100"
+    >
+  </trigger>
+
+  <trigger
+     script="onBCCEnd"
+     match="you find yourself somewhere safe\."
+     enabled="y"
+     regexp="y"
+     sequence="100"
+    >
+  </trigger>
+
+  <!-- Global Quest join / end: pause respell while on a GQ -->
+  <trigger
+     script="onGQJoin"
+     match="^You have now joined Global Quest #"
+     enabled="y"
+     regexp="y"
+     sequence="100"
+    >
+  </trigger>
+
+  <trigger
+     script="onGQEnd"
+     match="^You were the first to complete this quest!$"
+     enabled="y"
+     regexp="y"
+     sequence="100"
+    >
+  </trigger>
+
+  <trigger
+     script="onGQEnd"
+     match="^You have finished this global quest\.$"
+     enabled="y"
+     regexp="y"
+     sequence="100"
+    >
+  </trigger>
+
+</triggers>
+
+<!-- =====================  ALIASES  ===================== -->
+<aliases>
+
+  <alias
+     script="aliasRespellToggle"
+     match="^respell (on|off)$"
+     enabled="y"
+     regexp="y"
+     sequence="100"
+    >
+  </alias>
+
+</aliases>
+
+<!-- =====================  SCRIPT  ===================== -->
+<script>
+<![CDATA[
+
+-- ----- configuration -----
+
+local READY_STATE  = 3     -- char.status state: fully active, able to receive commands
+local COMBAT_STATE = 8     -- char.status state: in combat
+local DEBOUNCE     = 0.5   -- seconds to wait after a drop before sending su, so two
+                           -- spells dropping together only trigger one su
+
+-- ----- live state -----
+
+local gNeedProt    = false   -- protection good needs to be (re)cast
+local gNeedBarrier = false   -- inertial barrier needs to be (re)cast
+local gSpellupSent = false   -- an "su" is in flight this out-of-combat period
+local gPending     = false   -- a debounced check is already scheduled
+local gInBCC       = false   -- inside Black Claw Crag; pause spellups
+local gOnGQ        = false   -- on a global quest; pause spellups
+local gManualOff   = false   -- manually turned off via "respell off"
+local gState       = 0
+local gPrevState   = 0
+
+-- ----- helpers -----
+
+local function needsSpellup ()
+  return gNeedProt or gNeedBarrier
+end
+
+local function isPaused ()
+  return gInBCC or gOnGQ or gManualOff
+end
+
+-- Run the "su" alias if we are out of combat and something still needs casting.
+-- force = true ignores the in-flight guard (used when we just left combat, so an
+-- interrupted spellup gets retried until both spells are back).
+local function trySpellup (force)
+  if not needsSpellup () then
+    return
+  end
+  if isPaused () then
+    return
+  end
+  if gState ~= READY_STATE then
+    return
+  end
+  if gSpellupSent and not force then
+    return
+  end
+
+  gSpellupSent = true
+  ColourNote ("dodgerblue", "", "[Respell] out of combat - running su")
+  Execute ("su")
+end
+
+-- Wait a moment after a drop before acting, so two spells dropping at once only
+-- queue a single su. Only one check is ever scheduled at a time.
+local function scheduleSpellup ()
+  if gPending then
+    return
+  end
+  gPending = true
+  if gState ~= READY_STATE then
+    ColourNote ("silver", "", "[Respell] spell dropped - will su when out of combat")
+  end
+  DoAfterSpecial (DEBOUNCE, "Respell_DoCheck ()", sendto.script)
+end
+
+-- Global so the debounce timer can call it.
+function Respell_DoCheck ()
+  gPending = false
+  trySpellup (false)
+end
+
+-- ----- GMCP capture (telnet option 201) -----
+
+function OnPluginTelnetSubnegotiation (theType, data)
+  if theType ~= 201 then
+    return
+  end
+
+  local message = string.match (data, "^([%w%.%-_]+)")
+  if not message then
+    return
+  end
+
+  if string.lower (message) == "char.status" then
+    local st = string.match (data, '"state"%s*:%s*(%d+)')
+    if st then
+      gPrevState = gState
+      gState = tonumber (st)
+
+      if gState == READY_STATE and gPrevState == COMBAT_STATE then
+        -- Just left combat: retry any spellup that was interrupted.
+        gSpellupSent = false
+        trySpellup (true)
+      elseif gState == READY_STATE then
+        trySpellup (false)
+      end
+    end
+  end
+end
+
+-- ----- trigger callbacks -----
+
+function onProtDrop (name, line, wildcards)
+  gNeedProt = true
+  scheduleSpellup ()
+end
+
+function onBarrierDrop (name, line, wildcards)
+  gNeedBarrier = true
+  scheduleSpellup ()
+end
+
+function onProtCast (name, line, wildcards)
+  gNeedProt = false
+  if not needsSpellup () then
+    gSpellupSent = false
+  end
+end
+
+function onBarrierCast (name, line, wildcards)
+  gNeedBarrier = false
+  if not needsSpellup () then
+    gSpellupSent = false
+  end
+end
+
+function onBCCStart (name, line, wildcards)
+  if not gInBCC then
+    gInBCC = true
+    ColourNote ("silver", "", "[Respell] paused - inside Black Claw Crag")
+  end
+end
+
+function onBCCEnd (name, line, wildcards)
+  if gInBCC then
+    gInBCC = false
+    ColourNote ("silver", "", "[Respell] resumed - left Black Claw Crag")
+    -- Catch up if a spell dropped while inside.
+    gSpellupSent = false
+    trySpellup (true)
+  end
+end
+
+function onGQJoin (name, line, wildcards)
+  if not gOnGQ then
+    gOnGQ = true
+    ColourNote ("silver", "", "[Respell] paused - on a global quest")
+  end
+end
+
+function onGQEnd (name, line, wildcards)
+  if gOnGQ then
+    gOnGQ = false
+    ColourNote ("silver", "", "[Respell] resumed - global quest over")
+    -- Catch up if a spell dropped during the GQ.
+    gSpellupSent = false
+    trySpellup (true)
+  end
+end
+
+-- ----- alias callbacks -----
+
+function aliasRespellToggle (name, line, wildcards)
+  if wildcards [1] == "off" then
+    gManualOff = true
+    ColourNote ("orange", "", "[Respell] manually OFF")
+  else
+    gManualOff = false
+    ColourNote ("orange", "", "[Respell] manually ON")
+    -- Catch up if a spell dropped while off.
+    gSpellupSent = false
+    trySpellup (true)
+  end
+end
+
+-- ----- lifecycle -----
+
+function OnPluginInstall ()
+  if IsConnected () then
+    Send ("protocols gmcp sendstatus")
+  end
+end
+
+function OnPluginEnable ()
+  OnPluginInstall ()
+end
+
+]]>
+</script>
+</muclient>

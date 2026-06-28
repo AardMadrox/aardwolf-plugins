@@ -1,0 +1,525 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="FHX"
+   author="Eric"
+   id="3F7A1C9E2B4D6058A1C3E5F7"
+   language="Lua"
+   purpose="Repeatedly cast 'incomp' on self or others until healed"
+   date_written="2026-06-21"
+   requires="4.94"
+   version="2.0"
+>
+
+<description>
+<![CDATA[
+FHX - repeatedly casts incomplete healing until the target is healed,
+you run low on mana, or you enter combat.
+
+  fhx              self-heal (cast 'c incomp' on yourself)
+  fhx <player>     heal another player ('c incomp <player>')
+  fhx low          heal the lowest-HP group member in the room
+  fhx stop         stop healing immediately
+  fhx help         show the help screen
+
+Stops automatically on:
+  - "You are almost fully healed."            (self)
+  - "<player> is almost fully healed."        (other)
+  - "<player> is already fully healed."       (other)
+  - "Your magic is wasted."                   (target already full)
+  - "You don't have enough mana to cast 'incomplete healing'."
+  - "You can't concentrate enough to cast 'incomplete healing'."
+  - you enter combat (GMCP char.status.state)
+
+'fhx low' uses GMCP group data, so you must be grouped with the target.
+It locks onto one target and will not jump to whoever later becomes the
+lowest - run it again to retarget.
+]]>
+</description>
+
+</plugin>
+
+<!-- ============================ TRIGGERS ============================ -->
+
+<triggers>
+   <!-- self-heal pacing: each heal-tick schedules the next self cast -->
+   <trigger
+      name="fhx_heal_tick"
+      enabled="y"
+      regexp="y"
+      match="You are .* healed by your magic touch\."
+      sequence="100"
+      send_to="12"
+   >
+   <send>HealTick()</send>
+   </trigger>
+
+   <!-- other-target pacing: each heal-tick schedules the next cast on that target -->
+   <trigger
+      name="fhx_other_heal_tick"
+      enabled="y"
+      regexp="y"
+      match="(\w+) is .* healed by your magic touch\."
+      sequence="100"
+      send_to="12"
+   >
+   <send>OtherHealTick("%1")</send>
+   </trigger>
+
+   <!-- self-heal done -->
+   <trigger
+      name="fhx_self_almost"
+      enabled="y"
+      regexp="y"
+      match="You are almost fully healed\."
+      sequence="90"
+      send_to="12"
+   >
+   <send>StopHealing("almost fully healed")</send>
+   </trigger>
+
+   <!-- other-target done -->
+   <trigger
+      name="fhx_other_almost"
+      enabled="y"
+      regexp="y"
+      match="(\w+) is almost fully healed\."
+      sequence="90"
+      send_to="12"
+   >
+   <send>OtherHealedStop("%1", "is almost fully healed")</send>
+   </trigger>
+
+   <trigger
+      name="fhx_other_already"
+      enabled="y"
+      regexp="y"
+      match="(\w+) is already fully healed\."
+      sequence="90"
+      send_to="12"
+   >
+   <send>OtherHealedStop("%1", "is already fully healed")</send>
+   </trigger>
+
+   <!-- cast landed on an already-full target -->
+   <trigger
+      name="fhx_magic_wasted"
+      enabled="y"
+      regexp="y"
+      match="Your magic is wasted\."
+      sequence="90"
+      send_to="12"
+   >
+   <send>StopHealing("target fully healed")</send>
+   </trigger>
+
+   <!-- interrupts -->
+   <trigger
+      name="fhx_no_mana"
+      enabled="y"
+      regexp="y"
+      match="You don't have enough mana to cast 'incomplete healing'\."
+      sequence="90"
+      send_to="12"
+   >
+   <send>StopHealing("out of mana")</send>
+   </trigger>
+
+   <trigger
+      name="fhx_cant_concentrate"
+      enabled="y"
+      regexp="y"
+      match="You can't concentrate enough to cast 'incomplete healing'\."
+      sequence="90"
+      send_to="12"
+   >
+   <send>StopHealing("can't concentrate")</send>
+   </trigger>
+</triggers>
+
+<!-- ============================= ALIASES ============================= -->
+
+<aliases>
+   <alias
+      name="fhx_help"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx help$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>ShowHelp()</send>
+   </alias>
+
+   <alias
+      name="fhx_stop"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx stop$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>StopHealing("manual stop")</send>
+   </alias>
+
+   <alias
+      name="fhx_low"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx low$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>StartHealLow()</send>
+   </alias>
+
+   <alias
+      name="fhx_self"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx$"
+      sequence="20"
+      send_to="12"
+   >
+   <send>StartSelfHeal()</send>
+   </alias>
+
+   <alias
+      name="fhx_player"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx ([A-Za-z]+)$"
+      sequence="50"
+      send_to="12"
+   >
+   <send>StartHealPlayer("%1")</send>
+   </alias>
+</aliases>
+
+<!-- ============================== SCRIPT ============================== -->
+
+<script>
+<![CDATA[
+
+-- FHX plugin
+-- Author: Eric
+--
+-- "fhx"          self-heals  (c incomp)        - paced by heal-tick lines
+-- "fhx <player>" heals another player          - paced by heal-tick lines
+-- "fhx low"      heals lowest-HP group member in the room
+-- "fhx stop"     stops immediately
+-- "fhx help"     shows the help screen
+
+require "gmcphelper"
+
+local GMCP_ID = "3e7dedbe37e44942dd46d264"
+
+-- ---- tunables ----------------------------------------------------------
+-- Both self-heal and healing-others use the SAME pacing: cast, wait for the
+-- heal-tick line, then resend after FHX_CAST_DELAY. The watchdog stops things
+-- if no heal-tick is seen within FHX_WATCHDOG seconds.
+local FHX_CAST_DELAY = 1     -- pause after each heal-tick before resending
+local FHX_WATCHDOG   = 10    -- stop if no heal-tick seen within this long
+local SENDTO_SCRIPT  = 12    -- "execute as script" send-to code
+
+-- Diagnostics: flip to true to print [FHX dbg] lines while troubleshooting.
+local FHX_DEBUG = false
+local function dbg (s) if FHX_DEBUG then ColourNote ("yellow", "", "[FHX dbg] " .. s) end end
+
+-- ---- colour helper (renders @x### and @-letter codes as a Note) --------
+local function xterm_to_hex (n)
+  n = tonumber (n)
+  if not n then return "#aaaaaa" end
+  if n < 16 then
+    local base = {[0]="#000000","#800000","#008000","#808000","#000080",
+                  "#800080","#008080","#c0c0c0","#808080","#ff0000","#00ff00",
+                  "#ffff00","#0000ff","#ff00ff","#00ffff","#ffffff"}
+    return base[n] or "#aaaaaa"
+  elseif n >= 232 then
+    local g = (n - 232) * 10 + 8
+    return string.format ("#%02x%02x%02x", g, g, g)
+  else
+    n = n - 16
+    local r = math.floor (n / 36); n = n % 36
+    local g = math.floor (n / 6);  local b = n % 6
+    local lvl = {[0]=0, 95, 135, 175, 215, 255}
+    return string.format ("#%02x%02x%02x", lvl[r], lvl[g], lvl[b])
+  end
+end
+
+local letter = {
+  k="#000000", r="#aa0000", g="#00aa00", y="#aa5500", b="#0000aa",
+  m="#aa00aa", c="#00aaaa", w="#aaaaaa",
+  K="#555555", R="#ff5555", G="#55ff55", Y="#ffff55", B="#5555ff",
+  M="#ff55ff", C="#55ffff", W="#ffffff",
+}
+
+-- Parse a string with @x### / @<letter> colour codes and print it as one line.
+function cnote (s)
+  local colour = "#aaaaaa"
+  local buf, i, n = "", 1, #s
+  local function flush () if buf ~= "" then ColourTell (colour, "", buf); buf = "" end end
+  while i <= n do
+    local ch = s:sub (i, i)
+    if ch == "@" then
+      local nxt = s:sub (i + 1, i + 1)
+      if nxt == "x" then
+        local digits = s:sub (i + 2):match ("^%d%d?%d?") or ""
+        flush (); colour = xterm_to_hex (digits); i = i + 2 + #digits
+      elseif nxt == "@" then
+        buf = buf .. "@"; i = i + 2
+      elseif nxt ~= "" then
+        flush (); colour = letter[nxt] or "#aaaaaa"; i = i + 2
+      else
+        buf = buf .. "@"; i = i + 1
+      end
+    else
+      buf = buf .. ch; i = i + 1
+    end
+  end
+  flush ()
+  Note ("")   -- terminate the line
+end
+
+local tag = "@x099[@WFHX@x099]:@w "
+
+-- ---- state -------------------------------------------------------------
+healing_active = false
+heal_mode      = "self"    -- "self" or "other"
+heal_target    = ""
+heal_gen       = 0         -- bumped on every start/stop to cancel stale resend timers
+heal_watch_id  = 0         -- bumped on every watchdog re-arm so stale watchdogs are ignored
+heal_cast_count = 0
+
+-- ======================================================================
+-- WATCHDOG (shared by both modes): stop if no heal-tick seen in time
+-- ======================================================================
+function ArmWatchdog ()
+  heal_watch_id = heal_watch_id + 1
+  DoAfterSpecial (FHX_WATCHDOG, "Watchdog(" .. heal_watch_id .. ")", SENDTO_SCRIPT)
+end
+
+function Watchdog (id)
+  id = tonumber (id)
+  -- only the most-recently-armed watchdog is valid; earlier stacked ones are stale
+  if healing_active and id == heal_watch_id then
+    StopHealing ("watchdog - no heal in " .. FHX_WATCHDOG .. "s")
+  end
+end
+
+-- ======================================================================
+-- SELF HEAL  (paced by "You are X healed by your magic touch.")
+-- ======================================================================
+function StartSelfHeal ()
+  heal_gen = heal_gen + 1
+  healing_active  = true
+  heal_mode       = "self"
+  heal_target     = ""
+  heal_cast_count = 1
+  cnote (tag .. "@x045self-heal started@w - sending '@Wc incomp@w'.")
+  dbg ("self cast #1 -> 'c incomp'")
+  ArmWatchdog ()
+  Send ("c incomp")
+end
+
+-- Fired by the "You are X healed by your magic touch." trigger
+function HealTick ()
+  if healing_active and heal_mode == "self" then
+    ArmWatchdog ()
+    DoAfterSpecial (FHX_CAST_DELAY, "SelfCast(" .. heal_gen .. ")", SENDTO_SCRIPT)
+  end
+end
+
+function SelfCast (gen)
+  gen = tonumber (gen)
+  if healing_active and heal_mode == "self" and gen == heal_gen then
+    heal_cast_count = heal_cast_count + 1
+    dbg ("self cast #" .. heal_cast_count .. " -> 'c incomp'")
+    Send ("c incomp")
+  end
+end
+
+-- ======================================================================
+-- HEAL ANOTHER PLAYER
+-- Paced exactly like self-heal, but off "<who> is X healed by your magic
+-- touch." for the current target.
+-- ======================================================================
+function StartHealPlayer (who)
+  who = tostring (who or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
+  if who == "" then return end
+  BeginOtherHeal (who)
+end
+
+function BeginOtherHeal (name)
+  heal_gen = heal_gen + 1
+  healing_active  = true
+  heal_mode       = "other"
+  heal_target     = name
+  heal_cast_count = 1
+  dbg ("BeginOtherHeal: target='" .. name .. "'  gen=" .. heal_gen)
+  cnote (tag .. "@x045healing @W" .. name .. "@x045 - casting '@Wc incomp " .. name .. "@x045' until healed.")
+  dbg ("cast #1 -> 'c incomp " .. name .. "'")
+  ArmWatchdog ()
+  Send ("c incomp " .. name)
+end
+
+-- Fired by the "<who> is X healed by your magic touch." trigger
+function OtherHealTick (who)
+  -- "<name> is ... healed by your magic touch." only ever appears from OUR cast,
+  -- and we heal one target at a time, so any such line means our heal landed.
+  -- We deliberately do NOT name-match: the game line is prefixed with the
+  -- target's title ("Sqrrlchasr Sletch is ..."), and the user may target by a
+  -- partial name ("zarg" -> "Zargulis").
+  if healing_active and heal_mode == "other" then
+    dbg ("heal-tick (" .. tostring (who) .. ") -> next cast in " .. FHX_CAST_DELAY .. "s")
+    ArmWatchdog ()
+    DoAfterSpecial (FHX_CAST_DELAY, "OtherResend(" .. heal_gen .. ")", SENDTO_SCRIPT)
+  end
+end
+
+function OtherResend (gen)
+  gen = tonumber (gen)
+  if healing_active and heal_mode == "other" and gen == heal_gen then
+    heal_cast_count = heal_cast_count + 1
+    dbg ("cast #" .. heal_cast_count .. " -> 'c incomp " .. heal_target .. "'")
+    Send ("c incomp " .. heal_target)
+  end
+end
+
+-- Fired by the "<who> is almost/already fully healed." triggers
+function OtherHealedStop (who, reason)
+  -- Same reasoning as OtherHealTick: one active target, so any "is almost/already
+  -- fully healed." line during a heal is our target. Don't name-match.
+  if healing_active and heal_mode == "other" then
+    StopHealing (tostring (who) .. " " .. reason)
+  end
+end
+
+-- ======================================================================
+-- HEAL LOWEST-HP GROUP MEMBER IN THE ROOM
+-- ======================================================================
+function FindLowestGroupMember ()
+  local g = gmcp ("group")
+  if type (g) ~= "table" or type (g.members) ~= "table" then
+    dbg ("FindLowestGroupMember: no group data (type=" .. type (g) .. "). Is group GMCP on / are you grouped?")
+    return nil
+  end
+
+  local myname = ""
+  local base = gmcp ("char.base")
+  if type (base) == "table" and base.name then
+    myname = string.lower (tostring (base.name))
+  end
+
+  local best, best_ratio = nil, 2
+  for _, m in ipairs (g.members) do
+    local info = m.info
+    if type (info) == "table" then
+      local here = tostring (info.here) == "1"
+      local hp   = tonumber (info.hp)
+      local mhp  = tonumber (info.mhp)
+      local isme = string.lower (tostring (m.name or "")) == myname
+      if here and not isme and hp and mhp and mhp > 0 then
+        local ratio = hp / mhp
+        dbg ("  candidate " .. tostring (m.name) .. ": hp=" .. hp .. "/" .. mhp ..
+             " (" .. string.format ("%.0f%%", ratio * 100) .. ")")
+        if ratio < 1 and ratio < best_ratio then
+          best_ratio = ratio
+          best = m.name
+        end
+      end
+    end
+  end
+  return best
+end
+
+function StartHealLow ()
+  local target = FindLowestGroupMember ()
+  dbg ("fhx low picked: " .. (target or "nobody"))
+  if not target then
+    cnote (tag .. "@x045no hurt group member found in the room@w. (Are you grouped, and is group GMCP on?)")
+    return
+  end
+  BeginOtherHeal (target)
+end
+
+-- ======================================================================
+-- STOP
+-- ======================================================================
+function StopHealing (reason)
+  if healing_active then
+    dbg ("StopHealing: reason='" .. reason .. "' after " .. heal_cast_count .. " cast(s)")
+    healing_active = false
+    heal_gen = heal_gen + 1   -- invalidate any pending timers
+    local what = (heal_mode == "other" and heal_target ~= "")
+                 and ("healing " .. heal_target) or "self-heal"
+    cnote (tag .. "@x045stopped@w @x099(" .. what .. ")@w - @W" .. reason .. ".")
+  end
+end
+
+-- ======================================================================
+-- COMBAT DETECTION (stop healing when we enter a fight)
+-- ======================================================================
+function OnPluginBroadcast (msg, id, name, text)
+  if id == GMCP_ID and text == "char.status" and healing_active then
+    local st = gmcp ("char.status")
+    local state = (type (st) == "table") and tostring (st.state) or "?"
+    if state == "8" then
+      dbg ("char.status state=8 -> stopping for combat")
+      StopHealing ("entered combat")
+    end
+  end
+end
+
+-- ======================================================================
+-- HELP
+-- ======================================================================
+function ShowHelp ()
+  Note ("")
+  cnote ("@x099===== @WFHX Help@x099 =====@w")
+  cnote ("@x099Repeatedly casts incomplete healing until the target is healed,")
+  cnote ("@x099you run low on mana, or you enter combat.@w")
+  Note ("")
+  cnote ("@x099Commands:@w")
+  cnote ("  @Wfhx@x045             @x099 self-heal (cast '@Wc incomp@x099' on yourself)")
+  cnote ("  @Wfhx <player>@x045    @x099 heal another player ('@Wc incomp <player>@x099')")
+  cnote ("  @Wfhx low@x045         @x099 heal the lowest-HP group member in the room")
+  cnote ("  @Wfhx stop@x045        @x099 stop healing right now")
+  cnote ("  @Wfhx help@x045        @x099 this screen")
+  Note ("")
+  cnote ("@x099Healing stops automatically when:@w")
+  cnote ("  @x045-@x099 the target is almost / already / fully healed")
+  cnote ("  @x045-@x099 you don't have enough mana, or can't concentrate")
+  cnote ("  @x045-@x099 you enter combat")
+  Note ("")
+  cnote ("@x099Notes:@w")
+  cnote ("  @x045-@x099 '@Wfhx low@x099' locks onto one target and will @Wnot@x099 jump to")
+  cnote ("       whoever later becomes the lowest - run it again to retarget.")
+  cnote ("  @x045-@x099 '@Wfhx low@x099' reads group HP via GMCP, so you must be grouped")
+  cnote ("       with the target.")
+  Note ("")
+end
+
+-- ======================================================================
+-- LOAD
+-- ======================================================================
+function FHXLoaded ()
+  -- ask Aardwolf to start streaming group data over GMCP (needed for 'fhx low')
+  pcall (function () Send_GMCP_Packet ("group on") end)
+  cnote (tag .. "@x045loaded@w @x099(v2.0)@w - type '@Wfhx help@w' for commands.")
+end
+
+DoAfterSpecial (2, "FHXLoaded()", SENDTO_SCRIPT)
+
+]]>
+</script>
+
+</muclient>
