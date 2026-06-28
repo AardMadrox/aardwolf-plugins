@@ -18,6 +18,9 @@
 
      Commands:
        pv  /  pvtest        - calculate for the room you're standing in
+       pv <channel>         - post a one-line summary to a channel, e.g. "pv spo"
+                             sends: <channel> Room <n>: [<x> movements from <p>]
+                             [<y> portaless movements from recall]
        portalvalue help     - show usage
        portalvaluehistory   - list every result found (persists across sessions)
        portalvaluepurge     - clear the history
@@ -41,7 +44,7 @@
    purpose="Find the closest saved portal to a newly-entered chaos portal and show the speedwalk."
    date_written="2026-06-27"
    requires="4.73"
-   version="1.0"
+   version="2.0"
 >
 </plugin>
 
@@ -54,6 +57,16 @@
    regexp="y"
    ignore_case="y"
    script="pv_test"
+   sequence="100"
+  >
+  </alias>
+
+  <alias
+   match="^pv (.+)$"
+   enabled="y"
+   regexp="y"
+   ignore_case="y"
+   script="pv_channel"
    sequence="100"
   >
   </alias>
@@ -259,8 +272,10 @@ local function save_history()
 end
 
 -- core: given a room uid, find the closest portal (same-area first, else anywhere)
--- and the no-portal walking distance from recall, then report
-local function compute_for_room(T)
+-- and the no-portal walking distance from recall, then report.
+-- If "channel" is given (e.g. "spo", "clan", "tell bob"), send a one-line summary
+-- to that channel instead of printing the full local report.
+local function compute_for_room(T, channel)
    T = tostring(T)
 
    local dbpath, why = get_db_path()
@@ -429,11 +444,25 @@ local function compute_for_room(T)
    }
    table.insert(pv_history, rec)
    save_history()
+
+   if channel then
+      -- one-line channel summary (no speedwalks). Recall shows N/A when there is
+      -- no known no-portal walking route from recall to here.
+      local recall_disp = (recall_rooms ~= nil) and tostring(recall_rooms) or "N/A"
+      local summary = C.hdr .. "Room " .. C.num .. T .. C.hdr .. ": ["
+         .. C.num .. (walkmoves + 1) .. C.hdr .. " movements from " .. C.num .. best.portal.uid .. C.hdr .. "] ["
+         .. C.num .. recall_disp .. C.hdr .. " portaless movements from recall" .. C.hdr .. "]"
+      Send(channel .. " " .. summary)
+      pv_echo(C.hdr .. "[PortalValue] Sent summary to " .. C.val .. esc(channel) .. C.hdr .. ".")
+      return
+   end
+
    pv_show_record(rec, true)
 end
 
--- read the current room's vnum from GMCP, then run the calculation
-local function process_current_room()
+-- read the current room's vnum from GMCP, then run the calculation.
+-- channel (optional) routes a one-line summary to that channel instead.
+local function process_current_room(channel)
    local _, data = CallPlugin(GMCP_ID, "gmcpval", "room.info")
    local room
    pcall(function() room = assert(loadstring("return " .. (data or "nil")))() end)
@@ -441,13 +470,23 @@ local function process_current_room()
       pv_echo(C.hdr .. "[PortalValue] Couldn't read the current room from GMCP (try LOOK first).")
       return
    end
-   compute_for_room(tostring(room.num))
+   compute_for_room(tostring(room.num), channel)
 end
 
 -- ===== alias entry points (must be global) =====
 
 function pv_test()
    process_current_room()
+end
+
+-- "pv <channel>" -> post a one-line summary to that channel
+function pv_channel(name, line, wc)
+   local channel = (wc[1] or ""):gsub("^%s+", ""):gsub("%s+$", "")
+   if channel == "" then
+      process_current_room()
+   else
+      process_current_room(channel)
+   end
 end
 
 function pv_history()
@@ -526,6 +565,7 @@ function pv_usage()
    pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue" .. C.hdr .. " ===================")
    pv_echo(C.val .. "Stand in a room and find the nearest saved portal + speedwalk to it.")
    pv_echo(C.hdr .. "  pv                 " .. C.val .. "- calculate for the room you're in")
+   pv_echo(C.hdr .. "  pv <channel>       " .. C.val .. "- post a one-line summary to a channel (e.g. pv spo)")
    pv_echo(C.hdr .. "  portalvaluehistory " .. C.val .. "- list all results")
    pv_echo(C.hdr .. "  portalvaluepurge   " .. C.val .. "- clear the history")
    pv_echo(C.hdr .. "  pvcheck            " .. C.val .. "- verify it's set up correctly on this client")
