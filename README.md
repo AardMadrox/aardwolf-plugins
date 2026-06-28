@@ -8,12 +8,8 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 
 | Plugin | What it does |
 | --- | --- |
-| **PortalValue** | Finds the closest saved portal to a chaos portal you just entered and shows the speedwalk to it. |
 | **FHX** | Repeatedly casts `incomp` on yourself or others until healed. |
 | **PupPaths** | Step-by-step pup pathing with named, saved routes. |
-| **Respell** | Re-runs your `su` (spell-up) alias out of combat when protection or inertial barrier drops. |
-| **FunnyFarmMadrox** (`madroxfunnyfarm.xml`) | A grab-bag of small quality-of-life helpers. |
-| **Auto_Caster** | Auto-casts a configurable list of spells. |
 | **Pot_miniwindow** | Tracks your available potions in a small on-screen window. |
 
 ## Installing a plugin
