@@ -11,7 +11,7 @@
    purpose="Repeatedly cast 'incomp' on self or others until healed"
    date_written="2026-06-21"
    requires="4.94"
-   version="2.1"
+   version="2.2"
 >
 
 <description>
@@ -109,11 +109,11 @@ lowest - run it again to retarget.
       name="fhx_magic_wasted"
       enabled="y"
       regexp="y"
-      match="Your magic is wasted\."
+      match="Your magic is wasted"
       sequence="90"
       send_to="12"
    >
-   <send>StopHealing("target fully healed")</send>
+   <send>StopHealing("already fully healed")</send>
    </trigger>
 
    <!-- target left the room -->
@@ -526,7 +526,7 @@ end
 function FHXLoaded ()
   -- ask Aardwolf to start streaming group data over GMCP (needed for 'fhx low')
   pcall (function () Send_GMCP_Packet ("group on") end)
-  cnote (tag .. "@x045loaded@w @x099(v2.1)@w - type '@Wfhx help@w' for commands.")
+  cnote (tag .. "@x045loaded@w @x099(v2.2)@w - type '@Wfhx help@w' for commands.")
 end
 
 DoAfterSpecial (2, "FHXLoaded()", SENDTO_SCRIPT)
