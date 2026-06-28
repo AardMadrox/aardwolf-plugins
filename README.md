@@ -11,6 +11,11 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 | **FHX** | Repeatedly casts `incomp` on yourself or others until healed. |
 | **PupPaths** | Step-by-step pup pathing with named, saved routes. |
 | **Pot_miniwindow** | Tracks your available potions in a small on-screen window. |
+| **ChaosCast** | Tracks chaos-portal casts (normal vs golden). |
+| **FractalReport** | Tracks Fractal run rewards and reports them to a channel. |
+| **TEDReport** | Times TED (Fury) runs and reports trains/gold/TP rewards. |
+| **MatronReporter** | Times Matron Dragon runs and reports rewards. |
+| **SKDReport** | Times Spectre of the Deep (SKD) fights and reports trains/gold/TP/Repop Token/Sigil rewards. |
 
 ## Installing a plugin
 

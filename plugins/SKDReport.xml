@@ -1,0 +1,780 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="SKDReport"
+   author="Eric"
+   id="a4f29c8e1d3b5f7a9c2e4b6d"
+   language="Lua"
+   purpose="Times Spectre of the Deep (SKD) fights and reports trains/gold/TP/Repop Token/Sigil rewards"
+   date_written="2026-06-21"
+   requires="4.71"
+   version="1.0"
+   save_state="y"
+   >
+</plugin>
+
+<!--  Triggers  -->
+
+<triggers>
+
+  <trigger
+     name="skd_start"
+     enabled="y"
+     regexp="y"
+     match="^Spectre of the Deep says 'Best to avoid his attention completely if you are able, lest you draw his ire\.'$"
+     sequence="100"
+     script="StartSKDTimer"
+     >
+  </trigger>
+
+  <trigger
+     name="skd_parting_gift"
+     enabled="y"
+     regexp="y"
+     match="^Spectre of the Deep says, &quot;A parting gift - at least until the brat gets up again\.&quot;$"
+     sequence="100"
+     script="EndSKDTimerStartRecording"
+     >
+  </trigger>
+
+  <trigger
+     name="skd_trains_gold"
+     enabled="y"
+     regexp="y"
+     match="^You are awarded ([\d,]+) trains and ([\d,]+) gold\.$"
+     sequence="100"
+     script="CaptureTrainsGold"
+     >
+  </trigger>
+
+  <trigger
+     name="skd_sigil"
+     enabled="y"
+     regexp="y"
+     match="^You receive Sigil of the Catacombs from Spectre of the Deep\.$"
+     sequence="100"
+     script="CaptureSigil"
+     >
+  </trigger>
+
+  <trigger
+     name="skd_tp"
+     enabled="y"
+     regexp="y"
+     match="^You receive Sea King's Trivia Point Token from Spectre of the Deep\.$"
+     sequence="100"
+     script="CaptureTP"
+     >
+  </trigger>
+
+  <trigger
+     name="skd_ocean_death"
+     enabled="y"
+     regexp="y"
+     match="^You receive \{\{ Ocean Death \}\} from Spectre of the Deep\.$"
+     sequence="100"
+     script="CaptureRepop"
+     >
+  </trigger>
+
+  <trigger
+     name="skd_ocean_life"
+     enabled="y"
+     regexp="y"
+     match="^You receive \{\{ Ocean Life \}\} from Spectre of the Deep\.$"
+     sequence="100"
+     script="CaptureRepop"
+     >
+  </trigger>
+
+  <trigger
+     name="skd_qp"
+     enabled="y"
+     regexp="y"
+     match="^You receive (\d+) quest points\.$"
+     sequence="100"
+     script="CaptureQP"
+     >
+  </trigger>
+
+  <trigger
+     name="skd_farewell"
+     enabled="y"
+     regexp="y"
+     match="^Spectre of the Deep says, &quot;Farewell\.&quot;$"
+     sequence="100"
+     script="FinishSKD"
+     >
+  </trigger>
+
+</triggers>
+
+<!--  Aliases (typed commands)  -->
+
+<aliases>
+
+  <alias
+     name="skd_channel"
+     enabled="y"
+     regexp="y"
+     match="^skdreport channel\s*(.*)$"
+     sequence="100"
+     script="SetSKDChannel"
+     >
+  </alias>
+
+  <alias
+     name="skd_reset"
+     enabled="y"
+     regexp="y"
+     match="^skdreport reset$"
+     sequence="100"
+     script="ResetSKDCommand"
+     >
+  </alias>
+
+  <alias
+     name="skd_help"
+     enabled="y"
+     regexp="y"
+     match="^skdreport help$"
+     sequence="100"
+     script="ShowSKDHelp"
+     >
+  </alias>
+
+  <alias
+     name="skd_life"
+     enabled="y"
+     regexp="y"
+     match="^skdreport life$"
+     sequence="100"
+     script="ShowSKDLife"
+     >
+  </alias>
+
+  <alias
+     name="skd_resetlife"
+     enabled="y"
+     regexp="y"
+     match="^skdreport resetlife$"
+     sequence="100"
+     script="ResetSKDLife"
+     >
+  </alias>
+
+  <!-- sequence 200 - only fires if none of the sequence 100 aliases matched -->
+  <alias
+     name="skd_lastrun_send"
+     enabled="y"
+     regexp="y"
+     match="^skdreport\s+(\S+)$"
+     sequence="200"
+     script="SendLastRun"
+     >
+  </alias>
+
+  <alias
+     name="skd_lastrun_send_default"
+     enabled="y"
+     regexp="y"
+     match="^skdreport$"
+     sequence="200"
+     script="SendLastRun"
+     >
+  </alias>
+
+  <alias
+     name="skd_life_send"
+     enabled="y"
+     regexp="y"
+     match="^skdreportlife\s+(\S+)$"
+     sequence="100"
+     script="SendLifeReport"
+     >
+  </alias>
+
+  <alias
+     name="skd_life_send_default"
+     enabled="y"
+     regexp="y"
+     match="^skdreportlife$"
+     sequence="100"
+     script="SendLifeReport"
+     >
+  </alias>
+
+</aliases>
+
+<!--  Script  -->
+
+<script>
+<![CDATA[
+
+-- ===========================================================
+--  SKDReport - times Spectre of the Deep encounters and
+--  reports the combined trains/gold/TP/QP/Repop/Sigil haul.
+--  All completed runs are saved to a persistent history table
+--  so lifetime stats survive plugin reloads and MUD restarts.
+-- ===========================================================
+
+-- Adds thousands separators to a number, e.g. 7234843 -> "7,234,843"
+local function FormatNumber(n)
+  local formatted = tostring(math.floor(n))
+  local k
+  while true do
+    formatted, k = formatted:gsub("^(-?%d+)(%d%d%d)", '%1,%2')
+    if k == 0 then break end
+  end
+  return formatted
+end
+
+-- MUSHclient hex colors for ColourNote (xterm indices -> RGB)
+local MUSH_COLOR = {
+  white  = "white",
+  cyan   = "#00D7FF",  -- xterm 045
+  yellow = "#875FFF",  -- xterm 099
+  red    = "#00FF87",  -- xterm 048
+}
+
+-- Aardwolf xterm @ codes for channel sends
+local AARD_COLOR = {
+  white  = "@W",
+  cyan   = "@x045",
+  yellow = "@x099",
+  red    = "@x048",
+}
+
+-- Takes a list of {colour, text} pairs.
+-- Returns:
+--   parts - flat arg list for ColourNote(unpack(parts))
+--   plain - plain text string (no colour codes)
+--   aard  - Aardwolf @colour-coded string for channel sends
+local function BuildLine(segments)
+  local parts = {}
+  local plain = {}
+  local aard  = {}
+  for _, seg in ipairs(segments) do
+    table.insert(parts, MUSH_COLOR[seg[1]] or seg[1])
+    table.insert(parts, "")
+    table.insert(parts, seg[2])
+    table.insert(plain, seg[2])
+    table.insert(aard, (AARD_COLOR[seg[1]] or "@W") .. seg[2])
+  end
+  return parts, table.concat(plain), table.concat(aard) .. "@w"
+end
+
+-- ===========================================================
+--  Run history table serialization
+--  Each entry is a Lua table literal stored as a single string.
+--  Normal run:  {e=elapsed, tr=trains, g=gold, tp=tp, qp=qp,
+--                rp=repop, si=sigil, ts=timestamp}
+--  Legacy batch (migrated from old life_* vars):
+--               {legacy=1, lruns=N, e=..., tr=..., ...}
+-- ===========================================================
+
+local function SerializeRuns(runs)
+  local parts = {}
+  for _, r in ipairs(runs) do
+    if r.legacy then
+      parts[#parts+1] = string.format(
+        "{legacy=1,lruns=%d,e=%d,tr=%d,g=%d,tp=%d,qp=%d,rp=%d,si=%d}",
+        r.lruns or 1, r.e or 0, r.tr or 0, r.g or 0,
+        r.tp or 0, r.qp or 0, r.rp or 0, r.si or 0)
+    else
+      parts[#parts+1] = string.format(
+        "{e=%d,tr=%d,g=%d,tp=%d,qp=%d,rp=%d,si=%d,ts=%d}",
+        r.e or 0, r.tr or 0, r.g or 0,
+        r.tp or 0, r.qp or 0, r.rp or 0, r.si or 0,
+        r.ts or 0)
+    end
+  end
+  return "{" .. table.concat(parts, ",") .. "}"
+end
+
+local function DeserializeRuns()
+  local s = GetVariable("run_history") or ""
+  if s == "" then return {} end
+  local chunk = loadstring("return " .. s)
+  if not chunk then return {} end
+  local ok, result = pcall(chunk)
+  if not ok or type(result) ~= "table" then return {} end
+  return result
+end
+
+-- Append one run record to the persistent history
+local function AppendRun(rec)
+  local runs = DeserializeRuns()
+  runs[#runs+1] = rec
+  SetVariable("run_history", SerializeRuns(runs))
+end
+
+-- Sum all run records into a single totals table
+local function ComputeLifeTotals()
+  local runs = DeserializeRuns()
+  local t = { runs=0, elapsed=0, trains=0, gold=0, tp=0, qp=0, repop=0, sigil=0 }
+  for _, r in ipairs(runs) do
+    local n = (r.legacy == 1 and r.lruns) and r.lruns or 1
+    t.runs    = t.runs    + n
+    t.elapsed = t.elapsed + (r.e  or 0)
+    t.trains  = t.trains  + (r.tr or 0)
+    t.gold    = t.gold    + (r.g  or 0)
+    t.tp      = t.tp      + (r.tp or 0)
+    t.qp      = t.qp      + (r.qp or 0)
+    t.repop   = t.repop   + (r.rp or 0)
+    t.sigil   = t.sigil   + (r.si or 0)
+  end
+  return t
+end
+
+-- ===========================================================
+--  GMCP area tracking
+-- ===========================================================
+
+local GMCP_HANDLER_ID = "3e7dedbe37e44942dd46d264"
+
+local function GetCurrentArea()
+  local ok, ret, datastring = pcall(CallPlugin, GMCP_HANDLER_ID, "gmcpdata_as_string", "room.info")
+  if not ok or ret ~= 0 or not datastring or datastring == "" then return nil end
+  local chunk = loadstring("return " .. datastring)
+  if not chunk then return nil end
+  local ok2, room_info = pcall(chunk)
+  if not ok2 or type(room_info) ~= "table" then return nil end
+  return room_info.area or room_info.Area
+end
+
+-- ===========================================================
+--  Run state
+-- ===========================================================
+
+local function ResetSKD()
+  skd_timing     = false
+  skd_recording  = false
+  skd_start_time = nil
+  skd_end_time   = nil
+  skd_trains     = 0
+  skd_gold       = 0
+  skd_tp         = 0
+  skd_qp         = 0
+  skd_repop      = 0
+  skd_sigil      = 0
+  skd_run_area   = nil
+end
+
+-- Migrate old flat life_* variables into the run_history table.
+-- Called once from OnPluginInstall when run_history doesn't exist yet.
+local function MigrateOldStats()
+  local old_runs = tonumber(GetVariable("life_runs")) or 0
+  if old_runs == 0 then
+    SetVariable("run_history", "{}")
+    return
+  end
+  -- Wrap all old aggregate data in a single legacy batch entry
+  local legacy = {
+    legacy = 1,
+    lruns  = old_runs,
+    e      = tonumber(GetVariable("life_elapsed")) or 0,
+    tr     = tonumber(GetVariable("life_trains"))  or 0,
+    g      = tonumber(GetVariable("life_gold"))    or 0,
+    tp     = tonumber(GetVariable("life_tp"))      or 0,
+    qp     = tonumber(GetVariable("life_qp"))      or 0,
+    rp     = tonumber(GetVariable("life_repop"))   or 0,
+    si     = tonumber(GetVariable("life_sigil"))   or 0,
+  }
+  SetVariable("run_history", SerializeRuns({legacy}))
+  ColourNote("#00D7FF", "", string.format(
+    "SKDReport: migrated %d run(s) of existing stats into run history table.", old_runs))
+end
+
+function OnPluginInstall()
+  if GetVariable("channel") == nil then
+    SetVariable("channel", "")
+  end
+  -- First-time setup or migration from old life_* variables
+  if GetVariable("run_history") == nil then
+    MigrateOldStats()
+  end
+  ResetSKD()
+  ShowSKDHelp()
+end
+
+function OnPluginConnect()
+  ResetSKD()
+end
+
+function OnPluginBroadcast(msg, id, name, text)
+  if id ~= GMCP_HANDLER_ID then return end
+  if text ~= "room.info" then return end
+  if not (skd_timing or skd_recording) then return end
+  if not skd_run_area then return end
+  local current_area = GetCurrentArea()
+  if current_area and current_area ~= skd_run_area then
+    ColourNote("white", "", "SKDReport: left '" .. skd_run_area ..
+      "' (now in '" .. current_area .. "') - run aborted.")
+    ResetSKD()
+  end
+end
+
+-- ===========================================================
+--  Trigger handlers
+-- ===========================================================
+
+function StartSKDTimer(name, line, wildcards)
+  ResetSKD()
+  skd_timing     = true
+  skd_start_time = os.time()
+  skd_run_area   = GetCurrentArea()
+end
+
+function EndSKDTimerStartRecording(name, line, wildcards)
+  if skd_timing then
+    skd_end_time = os.time()
+    skd_timing   = false
+  end
+  skd_recording = true
+end
+
+function CaptureTrainsGold(name, line, wildcards)
+  if not skd_recording then return end
+  skd_trains = skd_trains + (tonumber((wildcards[1]:gsub(",", ""))) or 0)
+  skd_gold   = skd_gold   + (tonumber((wildcards[2]:gsub(",", ""))) or 0)
+end
+
+function CaptureSigil(name, line, wildcards)
+  if not skd_recording then return end
+  skd_sigil = skd_sigil + 1
+end
+
+function CaptureTP(name, line, wildcards)
+  if not skd_recording then return end
+  skd_tp = skd_tp + 1
+end
+
+function CaptureRepop(name, line, wildcards)
+  if not skd_recording then return end
+  skd_repop = skd_repop + 1
+end
+
+function CaptureQP(name, line, wildcards)
+  if not skd_recording then return end
+  skd_qp = skd_qp + (tonumber(wildcards[1]) or 0)
+end
+
+-- ===========================================================
+--  FinishSKD - report and save the completed run
+-- ===========================================================
+
+function FinishSKD(name, line, wildcards)
+  if not skd_recording then return end
+  skd_recording = false
+
+  local TRAINS_PER_PUP = 4
+  local time_str = "N/A"
+  local pups_str = nil
+  local rate_str = nil
+  local elapsed  = nil
+
+  if skd_start_time and skd_end_time then
+    elapsed  = skd_end_time - skd_start_time
+    if elapsed < 0 then elapsed = 0 end
+    time_str = string.format("%d:%02d", math.floor(elapsed/60), elapsed%60)
+  end
+
+  if elapsed and skd_trains > 0 then
+    local pups = skd_trains / TRAINS_PER_PUP
+    pups_str = string.format("%.2f", pups)
+    rate_str = string.format("%.2fs", elapsed / pups)
+  end
+
+  local channel = GetVariable("channel")
+
+  local segs = {
+    {"cyan",  "SKD"},
+    {"white", ": ["},
+    {"yellow","Time"},
+    {"white", ": "},
+    {"red",   time_str},
+    {"white", "]"},
+  }
+
+  if pups_str then
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"red",    pups_str}
+    segs[#segs+1] = {"white",  " "}
+    segs[#segs+1] = {"yellow", "pups"}
+    segs[#segs+1] = {"white",  " @ "}
+    segs[#segs+1] = {"red",    rate_str}
+    segs[#segs+1] = {"white",  "]"}
+  end
+
+  segs[#segs+1] = {"white",  " ["}
+  segs[#segs+1] = {"red",    FormatNumber(skd_trains)}
+  segs[#segs+1] = {"white",  " "}
+  segs[#segs+1] = {"yellow", "Trains"}
+  segs[#segs+1] = {"white",  "] ["}
+  segs[#segs+1] = {"red",    FormatNumber(skd_gold)}
+  segs[#segs+1] = {"white",  " "}
+  segs[#segs+1] = {"yellow", "Gold"}
+  segs[#segs+1] = {"white",  "]"}
+
+  if skd_tp > 0 then
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"red",    tostring(skd_tp)}
+    segs[#segs+1] = {"yellow", "TP"}
+    segs[#segs+1] = {"white",  "]"}
+  end
+
+  if skd_qp > 0 then
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"red",    tostring(skd_qp)}
+    segs[#segs+1] = {"white",  " "}
+    segs[#segs+1] = {"yellow", "QP"}
+    segs[#segs+1] = {"white",  "]"}
+  end
+
+  if skd_repop > 0 then
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"yellow", "Repop Token"}
+    segs[#segs+1] = {"white",  "]"}
+  end
+
+  if skd_sigil > 0 then
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"yellow", "Sigil"}
+    segs[#segs+1] = {"white",  "]"}
+  end
+
+  local parts, plain, aard = BuildLine(segs)
+  ColourNote(unpack(parts))
+  if channel and channel ~= "" then
+    Send(channel .. " " .. aard)
+  end
+
+  skd_last_run_aard = aard
+
+  -- Save this run to the persistent history table
+  if elapsed then
+    AppendRun({
+      e  = elapsed,
+      tr = skd_trains,
+      g  = skd_gold,
+      tp = skd_tp,
+      qp = skd_qp,
+      rp = skd_repop,
+      si = skd_sigil,
+      ts = os.time(),
+    })
+  end
+
+  ResetSKD()
+end
+
+-- ===========================================================
+--  Alias handlers
+-- ===========================================================
+
+function SetSKDChannel(name, line, wildcards)
+  local arg = wildcards[1]
+  if not arg or arg == "" then
+    local current = GetVariable("channel")
+    if current == "" then
+      ColourNote("white", "", "SKDReport: no channel set - reports display locally only.")
+    else
+      ColourNote("white", "", "SKDReport: channel is currently set to '" .. current .. "'.")
+    end
+    return
+  end
+  if arg == "none" or arg == "off" or arg == "clear" then
+    SetVariable("channel", "")
+    ColourNote("white", "", "SKDReport: channel cleared - reports will display locally only.")
+  else
+    SetVariable("channel", arg)
+    ColourNote("white", "", "SKDReport: channel set to '" .. arg .. "'.")
+  end
+end
+
+function ResetSKDCommand(name, line, wildcards)
+  ResetSKD()
+  ColourNote("white", "", "SKDReport: state reset.")
+end
+
+function SendLastRun(name, line, wildcards)
+  local dest = (wildcards[1] and wildcards[1] ~= "") and wildcards[1] or GetVariable("channel")
+  if not dest or dest == "" then
+    ColourNote("white", "", "SKDReport: no channel set - use 'skdreport channel <name>' first.")
+    return
+  end
+  if not skd_last_run_aard or skd_last_run_aard == "" then
+    ColourNote("white", "", "SKDReport: no completed run to report yet.")
+    return
+  end
+  Send(dest .. " " .. skd_last_run_aard)
+end
+
+-- ===========================================================
+--  Lifetime stats display
+-- ===========================================================
+
+local function BuildLifeLine()
+  local t = ComputeLifeTotals()
+
+  local life_time_str
+  if t.elapsed >= 3600 then
+    life_time_str = string.format("%d:%02d:%02d",
+      math.floor(t.elapsed/3600),
+      math.floor((t.elapsed%3600)/60),
+      t.elapsed%60)
+  else
+    life_time_str = string.format("%d:%02d", math.floor(t.elapsed/60), t.elapsed%60)
+  end
+
+  local life_pups_str = "N/A"
+  local life_rate_str = "N/A"
+  if t.trains > 0 and t.elapsed > 0 then
+    local pups = t.trains / 4
+    life_pups_str = string.format("%.2f", pups)
+    life_rate_str = string.format("%.2fs", t.elapsed / pups)
+  end
+
+  local avg_str = "N/A"
+  if t.runs > 0 then
+    local avg = math.floor(t.elapsed / t.runs)
+    avg_str = string.format("%d:%02d", math.floor(avg/60), avg%60)
+  end
+
+  local segs = {
+    {"cyan",   "SKD Life"},
+    {"white",  ": ["},
+    {"yellow", "Runs"},
+    {"white",  ": "},
+    {"red",    tostring(t.runs)},
+    {"white",  "] ["},
+    {"yellow", "Time"},
+    {"white",  ": "},
+    {"red",    life_time_str},
+    {"white",  "] ["},
+    {"yellow", "Avg"},
+    {"white",  ": "},
+    {"red",    avg_str},
+    {"white",  "] ["},
+    {"red",    life_pups_str},
+    {"white",  " "},
+    {"yellow", "pups"},
+    {"white",  " @ "},
+    {"red",    life_rate_str},
+    {"white",  "] ["},
+    {"red",    FormatNumber(t.trains)},
+    {"white",  " "},
+    {"yellow", "Trains"},
+    {"white",  "] ["},
+    {"red",    FormatNumber(t.gold)},
+    {"white",  " "},
+    {"yellow", "Gold"},
+    {"white",  "]"},
+  }
+
+  if t.tp > 0 then
+    segs[#segs+1] = {"white", " ["}
+    segs[#segs+1] = {"red",   tostring(t.tp)}
+    segs[#segs+1] = {"yellow","TP"}
+    segs[#segs+1] = {"white", "]"}
+  end
+  if t.qp > 0 then
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"red",    tostring(t.qp)}
+    segs[#segs+1] = {"white",  " "}
+    segs[#segs+1] = {"yellow", "QP"}
+    segs[#segs+1] = {"white",  "]"}
+  end
+  if t.repop > 0 then
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"yellow", "Repop Tokens"}
+    segs[#segs+1] = {"white",  ": "}
+    segs[#segs+1] = {"red",    tostring(t.repop)}
+    segs[#segs+1] = {"white",  "]"}
+  end
+  if t.sigil > 0 then
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"yellow", "Sigils"}
+    segs[#segs+1] = {"white",  ": "}
+    segs[#segs+1] = {"red",    tostring(t.sigil)}
+    segs[#segs+1] = {"white",  "]"}
+  end
+
+  local parts, plain, aard = BuildLine(segs)
+  return parts, aard
+end
+
+function ShowSKDLife(name, line, wildcards)
+  local parts, aard = BuildLifeLine()
+  ColourNote(unpack(parts))
+end
+
+function SendLifeReport(name, line, wildcards)
+  local dest = (wildcards[1] and wildcards[1] ~= "") and wildcards[1] or GetVariable("channel")
+  if not dest or dest == "" then
+    ColourNote("white", "", "SKDReport: no channel set - use 'skdreport channel <name>' first.")
+    return
+  end
+  local parts, aard = BuildLifeLine()
+  Send(dest .. " " .. aard)
+end
+
+function ResetSKDLife(name, line, wildcards)
+  SetVariable("run_history", "{}")
+  ColourNote("#00D7FF", "", "SKDReport: lifetime stats have been reset.")
+end
+
+-- ===========================================================
+--  Help
+-- ===========================================================
+
+function ShowSKDHelp(name, line, wildcards)
+  local function P(segs)
+    local parts = BuildLine(segs)
+    ColourNote(unpack(parts))
+  end
+
+  P({ {"white","["}, {"cyan","SKDReport"}, {"white","] Help"} })
+
+  P({
+    {"white","  "},{"cyan","skdreport channel"},{"white"," "},{"yellow","<name>"},
+    {"white","  - set report channel (e.g. "},{"yellow","gt"},{"white","); blank shows current, "},
+    {"yellow","none"},{"white"," clears it"},
+  })
+  P({
+    {"white","  "},{"cyan","skdreport reset"},
+    {"white","  - manually clear/abort an in-progress run"},
+  })
+  P({
+    {"white","  "},{"cyan","skdreport life"},
+    {"white","  - show lifetime totals locally"},
+  })
+  P({
+    {"white","  "},{"cyan","skdreport resetlife"},
+    {"white","  - wipe all lifetime run history"},
+  })
+  P({
+    {"white","  "},{"cyan","skdreport"},{"white"," "},{"yellow","[channel]"},
+    {"white","  - resend last run to "},{"yellow","<channel>"},{"white"," or set channel if omitted"},
+  })
+  P({
+    {"white","  "},{"cyan","skdreportlife"},{"white"," "},{"yellow","[channel]"},
+    {"white","  - send lifetime stats to "},{"yellow","<channel>"},{"white"," or set channel if omitted"},
+  })
+  P({
+    {"white","  "},{"cyan","skdreport help"},
+    {"white","  - show this help"},
+  })
+  P({
+    {"white","  "},{"yellow","Automatic:"},
+    {"white"," timer starts/stops off SKD's spoken lines; run aborted via GMCP if you leave the area."},
+  })
+end
+
+]]>
+</script>
+
+</muclient>

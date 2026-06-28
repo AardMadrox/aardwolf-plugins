@@ -1,0 +1,553 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="TEDReport"
+   author="Eric"
+   id="B7D4A1F9C83E502D6B1F4C28"
+   language="Lua"
+   purpose="Times TED (Fury) runs and reports trains/gold/TP rewards"
+   version="1.0"
+>
+</plugin>
+
+<aliases>
+  <alias
+    match="^tedreportchan\s+(\S+)$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="SetReportChannel"
+  >
+  </alias>
+  <alias
+    match="^tedreportlife\s+(\S+)$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="ShowLifetimeStats"
+  >
+  </alias>
+  <alias
+    match="^tedreportlife$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="ShowLifetimeStats"
+  >
+  </alias>
+  <alias
+    match="^tedreport\s+(\S+)$"
+    enabled="y"
+    sequence="200"
+    regexp="y"
+    script="SendReport"
+  >
+  </alias>
+  <alias
+    match="^tedreport$"
+    enabled="y"
+    sequence="200"
+    regexp="y"
+    script="SendReport"
+  >
+  </alias>
+  <alias
+    match="^tedreporthelp$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="ShowHelp"
+  >
+  </alias>
+</aliases>
+
+<triggers>
+  <!-- Run start -->
+  <trigger
+    match="^\[1\] Your pent up aggression does COMPLETELY DESERVING things to Willie Braggz\. \[\d+\]$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="RunStart"
+  >
+  </trigger>
+
+  <!-- Run end - rewards follow this line (or nothing line) -->
+  <trigger
+    match="^Try again in 23 Hours\.$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="RunEnd"
+  >
+  </trigger>
+
+  <!-- No rewards this run -->
+  <trigger
+    match="^In the chaos of everything,? you barely make it out alive\. YOU GET NOTHING!$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="RunNothing"
+  >
+  </trigger>
+
+  <!-- Trains -->
+  <trigger
+    match="^In the chaos of everything,? you find ([0-9,]+) Trains in your possession\.$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="LootTrains"
+  >
+  </trigger>
+
+  <!-- Gold -->
+  <trigger
+    match="^In the chaos of everything,? you find ([0-9,]+) Gold in your possession\.$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="LootGold"
+  >
+  </trigger>
+
+  <!-- Furious TP Token -->
+  <trigger
+    match="^In the chaos of everything,? you find A Furious Trivia Point Token in your possession\.$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="LootTP"
+  >
+  </trigger>
+</triggers>
+
+<script>
+<![CDATA[
+
+---------------------------------------------------------------------------
+-- Colour tables matching SKDReport theme exactly
+-- cyan=@x045, yellow=@x099, red=@x048, white=@W
+---------------------------------------------------------------------------
+
+local MUSH_COLOR = {
+  white  = "white",
+  cyan   = "#00D7FF",  -- xterm 045
+  yellow = "#875FFF",  -- xterm 099
+  red    = "#00FF87",  -- xterm 048
+}
+local AARD_COLOR = {
+  white  = "@W",
+  cyan   = "@x045",
+  yellow = "@x099",
+  red    = "@x048",
+}
+
+local function BuildLine(segments)
+  local parts, plain, aard = {}, {}, {}
+  for _, seg in ipairs(segments) do
+    table.insert(parts, MUSH_COLOR[seg[1]] or seg[1])
+    table.insert(parts, "")
+    table.insert(parts, seg[2])
+    table.insert(plain, seg[2])
+    table.insert(aard, (AARD_COLOR[seg[1]] or "@W") .. seg[2])
+  end
+  return parts, table.concat(plain), table.concat(aard) .. "@w"
+end
+
+local ANOTE_MAP = {
+  ["@x045"] = "#00D7FF",
+  ["@x099"] = "#875FFF",
+  ["@x048"] = "#00FF87",
+  ["@W"]    = "white",
+  ["@w"]    = "silver",
+}
+local function ANote(msg)
+  local args = {}
+  local pos = 1
+  while pos <= #msg do
+    local code, rest = msg:match("^(@[xX]%d%d%d)(.*)", pos)
+    if not code then
+      code, rest = msg:match("^(@[Ww])(.*)", pos)
+    end
+    if code then
+      local col = ANOTE_MAP[code] or "white"
+      local text = rest:match("^([^@]*)")
+      table.insert(args, col)
+      table.insert(args, "")
+      table.insert(args, text or "")
+      pos = pos + #code + #(text or "")
+    else
+      local text = msg:match("^([^@]+)", pos) or msg:sub(pos, pos)
+      table.insert(args, "white")
+      table.insert(args, "")
+      table.insert(args, text)
+      pos = pos + #text
+    end
+  end
+  if #args > 0 then ColourNote(unpack(args)) end
+end
+
+local COL_HDR  = "@x045"
+local COL_VAL  = "@W"
+local COL_ACC  = "@x045"
+local COL_TIME = "@x048"
+local COL_SEP  = "@x099"
+local COL_GOOD = "@x048"
+local COL_LBL  = "@W"
+local COL_ITEM = "@x099"
+
+local SEP = COL_SEP .. string.rep("-", 60) .. "@w"
+
+---------------------------------------------------------------------------
+-- Plugin state
+local runActive   = false
+local startTime   = 0
+local ted_elapsed = 0
+local finalizeGen = 0
+local pendingGen  = 0
+local ted_trains  = 0
+local ted_gold    = 0
+local ted_tp      = 0
+
+local CHAN_KEY   = "ted_report_channel"
+local DATA_FILE  = GetInfo(66) .. "ted_runs.txt"
+
+---------------------------------------------------------------------------
+-- Persistence - every run stored individually; totals derived on demand
+---------------------------------------------------------------------------
+local function LoadRuns()
+  local f = io.open(DATA_FILE, "r")
+  if not f then return {} end
+  local raw = f:read("*all")
+  f:close()
+  if not raw or raw == "" then return {} end
+  local fn, err = loadstring("return " .. raw)
+  if not fn then return {} end
+  local ok, t = pcall(fn)
+  if not ok or type(t) ~= "table" then return {} end
+  return t
+end
+
+local function SaveRuns(runs)
+  local entries = {}
+  for _, r in ipairs(runs) do
+    entries[#entries+1] = string.format(
+      "{secs=%d,trains=%d,gold=%d,tp=%d,nothing=%s}",
+      r.secs, r.trains, r.gold, r.tp, tostring(r.nothing or false)
+    )
+  end
+  local f = io.open(DATA_FILE, "w")
+  if not f then return end
+  f:write("{" .. table.concat(entries, ",") .. "}")
+  f:close()
+end
+
+local function CalcTotals(runs)
+  local t = {
+    runs        = #runs,
+    totalSecs   = 0,
+    totalTrains = 0,
+    totalGold   = 0,
+    totalTP     = 0,
+    -- per-run presence counts
+    hadTrains   = 0,
+    hadGold     = 0,
+    hadTP       = 0,
+    hadNothing  = 0,
+  }
+  for _, r in ipairs(runs) do
+    t.totalSecs   = t.totalSecs   + r.secs
+    t.totalTrains = t.totalTrains + r.trains
+    t.totalGold   = t.totalGold   + r.gold
+    t.totalTP     = t.totalTP     + r.tp
+    if r.nothing then
+      t.hadNothing = t.hadNothing + 1
+    else
+      if r.trains > 0 then t.hadTrains = t.hadTrains + 1 end
+      if r.gold   > 0 then t.hadGold   = t.hadGold   + 1 end
+      if r.tp     > 0 then t.hadTP     = t.hadTP     + 1 end
+    end
+  end
+  return t
+end
+
+local function GetChannel()
+  return GetVariable(CHAN_KEY) or "gt"
+end
+
+---------------------------------------------------------------------------
+-- Helpers
+---------------------------------------------------------------------------
+local function FmtTime(secs)
+  local m = math.floor(secs / 60)
+  local s = secs % 60
+  if m > 0 then
+    return string.format("%dm %02ds", m, s)
+  else
+    return string.format("%ds", s)
+  end
+end
+
+local function ParseNum(s)
+  return tonumber((s:gsub(",", ""))) or 0
+end
+
+---------------------------------------------------------------------------
+-- Run management
+---------------------------------------------------------------------------
+local function FinalizeRun()
+  if not runActive then return end
+  runActive = false
+  local runs = LoadRuns()
+  runs[#runs+1] = { secs=ted_elapsed, trains=ted_trains, gold=ted_gold, tp=ted_tp }
+  SaveRuns(runs)
+  local stats  = CalcTotals(runs)
+  local runNum = #runs
+
+  _G._ted_last = {
+    elapsed = ted_elapsed,
+    trains  = ted_trains,
+    gold    = ted_gold,
+    tp      = ted_tp,
+    runNum  = runNum,
+  }
+
+  local segs = {
+    {"cyan",   "TED"},
+    {"white",  " #"},
+    {"red",    tostring(runNum)},
+    {"white",  " ["},
+    {"yellow", "Time"},
+    {"white",  ": "},
+    {"red",    FmtTime(ted_elapsed)},
+    {"white",  "] ["},
+    {"yellow", "Trains"},
+    {"white",  ": "},
+    {"red",    tostring(ted_trains)},
+    {"white",  "] ["},
+    {"yellow", "Gold"},
+    {"white",  ": "},
+    {"red",    tostring(ted_gold)},
+    {"white",  "]"},
+  }
+  if ted_tp > 0 then
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"yellow", "TP"}
+    segs[#segs+1] = {"white",  "]"}
+  end
+  local _, _, aard = BuildLine(segs)
+  Send(GetChannel() .. " " .. aard)
+end
+
+function TEDFinalizeCallback()
+  if runActive and finalizeGen == pendingGen then
+    FinalizeRun()
+  end
+end
+
+local function ArmFinalize()
+  if not runActive then return end
+  pendingGen = finalizeGen
+  DoAfterSpecial(1.5, "TEDFinalizeCallback()", 12)
+end
+
+---------------------------------------------------------------------------
+-- Trigger callbacks
+---------------------------------------------------------------------------
+function RunStart()
+  runActive   = true
+  startTime   = os.time()
+  finalizeGen = finalizeGen + 1
+  ted_trains  = 0
+  ted_gold    = 0
+  ted_tp      = 0
+end
+
+function RunEnd()
+  if not runActive then return end
+  -- Snapshot time; rewards arrive on lines that follow, finalize after quiet
+  ted_elapsed = os.time() - startTime
+  ArmFinalize()
+end
+
+function RunNothing()
+  if not runActive then return end
+  ted_elapsed = os.time() - startTime
+  -- Finalize immediately with zero rewards
+  runActive = false
+  local runs = LoadRuns()
+  runs[#runs+1] = { secs=ted_elapsed, trains=0, gold=0, tp=0, nothing=true }
+  SaveRuns(runs)
+  local runNum = #runs
+  _G._ted_last = { elapsed=ted_elapsed, trains=0, gold=0, tp=0, runNum=runNum }
+  local segs = {
+    {"cyan",   "TED"},
+    {"white",  " #"},
+    {"red",    tostring(runNum)},
+    {"white",  " ["},
+    {"yellow", "Time"},
+    {"white",  ": "},
+    {"red",    FmtTime(ted_elapsed)},
+    {"white",  "] ["},
+    {"red",    "YOU GET NOTHING"},
+    {"white",  "]"},
+  }
+  local _, _, aard = BuildLine(segs)
+  Send(GetChannel() .. " " .. aard)
+end
+
+function LootTrains(name, line, wildcards)
+  if not runActive then return end
+  ted_trains = ParseNum(wildcards[1])
+  ArmFinalize()
+end
+
+function LootGold(name, line, wildcards)
+  if not runActive then return end
+  ted_gold = ParseNum(wildcards[1])
+  ArmFinalize()
+end
+
+function LootTP(name, line, wildcards)
+  if not runActive then return end
+  ted_tp = 1
+  ArmFinalize()
+end
+
+---------------------------------------------------------------------------
+-- Alias callbacks
+---------------------------------------------------------------------------
+function SetReportChannel(name, line, wildcards)
+  local chan = wildcards[1]:lower()
+  SetVariable(CHAN_KEY, chan)
+  ANote(COL_HDR .. "[TED] " .. COL_LBL .. "Report channel set to: " .. COL_VAL .. chan)
+end
+
+function SendReport(name, line, wildcards)
+  local chan = (wildcards[1] and wildcards[1] ~= "") and wildcards[1]:lower() or GetChannel()
+
+  local last = _G._ted_last
+  if not last then
+    ANote(COL_HDR .. "[TED] " .. COL_LBL .. "No completed run to report yet.")
+    return
+  end
+
+  local segs = {
+    {"cyan",   "TED"},
+    {"white",  " #"},
+    {"red",    tostring(last.runNum)},
+    {"white",  " ["},
+    {"yellow", "Time"},
+    {"white",  ": "},
+    {"red",    FmtTime(last.elapsed)},
+    {"white",  "] ["},
+    {"yellow", "Trains"},
+    {"white",  ": "},
+    {"red",    tostring(last.trains)},
+    {"white",  "] ["},
+    {"yellow", "Gold"},
+    {"white",  ": "},
+    {"red",    tostring(last.gold)},
+    {"white",  "]"},
+  }
+  if last.tp > 0 then
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"yellow", "TP"}
+    segs[#segs+1] = {"white",  "]"}
+  end
+
+  local _, _, aard = BuildLine(segs)
+  Send(chan .. " " .. aard)
+end
+
+function ShowLifetimeStats(name, line, wildcards)
+  local runs  = LoadRuns()
+  local stats = CalcTotals(runs)
+  if stats.runs == 0 then
+    ANote(COL_HDR .. "[TED] " .. COL_LBL .. "No runs recorded yet.")
+    return
+  end
+
+  local chan      = (wildcards and wildcards[1] and wildcards[1] ~= "") and wildcards[1]:lower() or GetChannel()
+  local avgSecs   = math.floor(stats.totalSecs / stats.runs)
+  local avgTrains = string.format("%.1f", stats.totalTrains / stats.runs)
+  local avgGold   = string.format("%.0f", stats.totalGold   / stats.runs)
+  local tpPct      = string.format("%.0f", stats.hadTP      / stats.runs * 100)
+  local trainsPct  = string.format("%.0f", stats.hadTrains  / stats.runs * 100)
+  local goldPct    = string.format("%.0f", stats.hadGold    / stats.runs * 100)
+  local nothingPct = string.format("%.0f", stats.hadNothing / stats.runs * 100)
+
+  local segs = {
+    {"cyan",   "TED Life"},
+    {"white",  " ["},
+    {"yellow", "Runs"},
+    {"white",  ": "},
+    {"red",    tostring(stats.runs)},
+    {"white",  "] ["},
+    {"yellow", "Avg"},
+    {"white",  ": "},
+    {"red",    FmtTime(avgSecs)},
+    {"white",  "] ["},
+    {"yellow", "Trains"},
+    {"white",  ": avg "},
+    {"red",    avgTrains},
+    {"white",  " ("},
+    {"red",    trainsPct .. "%"},
+    {"white",  ")] ["},
+    {"yellow", "Gold"},
+    {"white",  ": avg "},
+    {"red",    avgGold},
+    {"white",  " ("},
+    {"red",    goldPct .. "%"},
+    {"white",  ")] ["},
+    {"yellow", "TP"},
+    {"white",  ": "},
+    {"red",    tpPct .. "%"},
+    {"white",  "] ["},
+    {"yellow", "Nothing"},
+    {"white",  ": "},
+    {"red",    nothingPct .. "%"},
+    {"white",  "]"},
+  }
+  local _, _, aard = BuildLine(segs)
+  Send(chan .. " " .. aard)
+end
+
+function ShowHelp()
+  ANote(SEP)
+  ANote(COL_HDR .. "  -=-  TED REPORTER HELP  -=-")
+  ANote(SEP)
+  ANote(COL_LBL .. "  " .. COL_ACC .. "tedreportchan <channel>" ..
+        COL_LBL .. "  - Set default report channel (e.g. gt, clan, say)")
+  ANote(COL_LBL .. "  " .. COL_ACC .. "tedreport <channel>" ..
+        COL_LBL .. "     - Send last run report to <channel>")
+  ANote(COL_LBL .. "  " .. COL_ACC .. "tedreportlife <channel>" ..
+        COL_LBL .. "      - Send lifetime stats to <channel>")
+  ANote(COL_LBL .. "  " .. COL_ACC .. "tedreporthelp" ..
+        COL_LBL .. "           - Show this help")
+  ANote(SEP)
+  ANote(COL_LBL .. "  Timer starts on Willie Braggz aggression line.")
+  ANote(COL_LBL .. "  Run finalizes 1.5s after the last reward line.")
+  ANote(COL_LBL .. "  TP token is recorded if present (not guaranteed every run).")
+  ANote(SEP)
+end
+
+---------------------------------------------------------------------------
+-- Plugin load
+---------------------------------------------------------------------------
+function OnPluginInstall()
+  ANote(COL_HDR .. "[TEDReport] " .. COL_LBL .. "Loaded. Type " ..
+        COL_ACC .. "tedreporthelp" .. COL_LBL .. " for commands.")
+end
+
+function OnPluginEnable()
+  OnPluginInstall()
+end
+
+]]>
+</script>
+
+</muclient>

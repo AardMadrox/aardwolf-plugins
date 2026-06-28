@@ -1,0 +1,602 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="ChaosCast"
+   author="Eric"
+   id="a1b2c3d4e5f6a7b8c9d0e1f2"
+   language="Lua"
+   purpose="Tracks chaos portal casts - normal vs golden"
+   date_written="2026-06-10"
+   requires="4.40"
+   version="1.0"
+>
+<description trim="y">
+Tracks how many chaos portals you cast, and what percentage are normal vs golden.
+Commands:
+  chaoscast        - Show stats
+  chaoscast help   - Show help
+  chaoscast reset  - Reset stats
+</description>
+</plugin>
+
+<!--  Get our standard constants -->
+<include name="constants.lua"/>
+
+<!--  Triggers  -->
+<triggers>
+
+  <!-- Normal portal detected -->
+  <trigger
+    match="With a blinding flash of light, you have created a chaos portal!"
+    enabled="y"
+    name="chaos_normal"
+    sequence="100"
+    script="OnNormalPortal"
+  >
+  </trigger>
+
+  <!-- Golden portal detected -->
+  <trigger
+    match="The chaos portal flares with a golden aura!"
+    enabled="y"
+    name="chaos_golden"
+    sequence="100"
+    script="OnGoldenPortal"
+  >
+  </trigger>
+
+  <!-- Destination line: Your chaos portal leads to <Room> in <Area>. -->
+  <trigger
+    match="^Your chaos portal leads to (.+) in (.+)\.$"
+    enabled="y"
+    name="chaos_destination"
+    sequence="101"
+    regexp="y"
+    script="OnPortalDestination"
+  >
+  </trigger>
+
+  <!-- RaviTrack: buying a chaos portal from Ravi -->
+  <trigger
+    match="^You spend five trivia points on (.+)\.$"
+    enabled="y"
+    name="ravi_buy"
+    sequence="100"
+    regexp="y"
+    script="OnRaviBuy"
+  >
+  </trigger>
+
+</triggers>
+
+<!--  Aliases  -->
+<aliases>
+
+  <alias
+    match="^bcp (\d+)$"
+    enabled="y"
+    name="bcp_cast"
+    sequence="96"
+    regexp="y"
+    script="OnBcpCast"
+  >
+  </alias>
+
+  <alias
+    match="bcpstop"
+    enabled="y"
+    name="bcp_stop"
+    sequence="96"
+    script="OnBcpStop"
+  >
+  </alias>
+
+  <alias
+    match="chaoscast help"
+    enabled="y"
+    name="chaoscast_help"
+    sequence="97"
+    script="OnChaosCastHelp"
+  >
+  </alias>
+
+  <alias
+    match="chaoscast reset"
+    enabled="y"
+    name="chaoscast_reset"
+    sequence="97"
+    script="OnChaosCastReset"
+  >
+  </alias>
+
+  <alias
+    match="chaoscastbc"
+    enabled="y"
+    name="chaoscast_gt"
+    sequence="99"
+    script="OnChaosCastGtToggle"
+  >
+  </alias>
+
+  <alias
+    match="^chaoscast (\w+)$"
+    enabled="y"
+    name="chaoscast_channel"
+    sequence="98"
+    regexp="y"
+    script="OnChaosCastChannel"
+  >
+  </alias>
+
+  <alias
+    match="chaoscast"
+    enabled="y"
+    name="chaoscast_display"
+    sequence="100"
+    script="OnChaosCastDisplay"
+  >
+  </alias>
+
+  <!-- RaviTrack aliases -->
+  <alias
+    match="ravitrack help"
+    enabled="y"
+    name="ravitrack_help"
+    sequence="97"
+    script="OnRaviHelp"
+  >
+  </alias>
+
+  <alias
+    match="ravitrack reset"
+    enabled="y"
+    name="ravitrack_reset"
+    sequence="97"
+    script="OnRaviReset"
+  >
+  </alias>
+
+  <alias
+    match="^ravitrack (\w+)$"
+    enabled="y"
+    name="ravitrack_channel"
+    sequence="98"
+    regexp="y"
+    script="OnRaviChannel"
+  >
+  </alias>
+
+  <alias
+    match="ravitrack"
+    enabled="y"
+    name="ravitrack_display"
+    sequence="100"
+    script="OnRaviTrack"
+  >
+  </alias>
+
+</aliases>
+
+<!--  Script  -->
+<script>
+<![CDATA[
+
+require "wait"
+
+-- ─────────────────────────────────────────────
+--  ChaosCast - MushClient Plugin
+-- ─────────────────────────────────────────────
+
+local dataFile = GetPluginInfo(GetPluginID(), 6) .. "ChaosCast.dat"
+
+local stats = { total = 0, normal = 0, golden = 0, continent = 0, area = 0 }
+local pendingGolden = false
+local gtBroadcast = true  -- gt broadcast toggle
+
+local CONTINENTS = {
+    ["alagh, the blood lands"]     = true,
+    ["gelidus"]                    = true,
+    ["the continent of mesolar"]   = true,
+    ["the dark continent, abend"]  = true,
+    ["the southern ocean"]         = true,
+    ["the uncharted oceans"]       = true,
+    ["vidblain, the ever dark"]    = true,
+}
+
+local function IsContinent(area)
+    return CONTINENTS[area:lower()] == true
+end
+
+-- ─── Persistence ─────────────────────────────
+
+local function SaveData()
+    local f = io.open(dataFile, "w")
+    if f then
+        f:write(string.format("total=%d\nnormal=%d\ngolden=%d\ngtbroadcast=%d\ncontinent=%d\narea=%d\n",
+            stats.total, stats.normal, stats.golden, gtBroadcast and 1 or 0,
+            stats.continent, stats.area))
+        f:close()
+    end
+end
+
+local function LoadData()
+    local f = io.open(dataFile, "r")
+    if f then
+        for line in f:lines() do
+            local k, v = line:match("^(%a+)=(%d+)$")
+            if k and v then
+                if k == "total" or k == "normal" or k == "golden"
+                or k == "continent" or k == "area" then
+                    stats[k] = tonumber(v)
+                elseif k == "gtbroadcast" then
+                    gtBroadcast = (tonumber(v) == 1)
+                end
+            end
+        end
+        f:close()
+    end
+end
+
+-- ─── Helpers ─────────────────────────────────
+
+local function Pct(part, total)
+    if total == 0 then return "0", "00" end
+    local p = (part / total) * 100
+    local whole = math.floor(p)
+    local frac  = math.floor((p - whole) * 100)
+    return string.format("%d", whole), string.format("%02d", frac)
+end
+
+-- Shorthand: ColourNote takes (fg, bg, text, fg, bg, text, ...)
+-- colour names: "white", "red", "cyan", "green", "black"
+local BG = "black"
+
+local function CN(...)
+    ColourNote(...)
+end
+
+-- ─── Display ─────────────────────────────────
+
+local function ShowStats()
+    local nW, nF = Pct(stats.normal, stats.total)
+    local gW, gF = Pct(stats.golden, stats.total)
+    local cW, cF = Pct(stats.continent, stats.total)
+    local aW, aF = Pct(stats.area,      stats.total)
+
+    CN("green",  BG, "Chaos Portals Cast")
+
+    CN("white",  BG, "Total Portals: ",
+       "red",    BG, tostring(stats.total))
+
+    CN("white",  BG, "Normal Portals: ",
+       "red",    BG, tostring(stats.normal),
+       "white",  BG, " (",
+       "cyan",   BG, nW,
+       "white",  BG, ".",
+       "cyan",   BG, nF,
+       "white",  BG, "%)")
+
+    CN("white",  BG, "Golden Portals: ",
+       "red",    BG, tostring(stats.golden),
+       "white",  BG, " (",
+       "cyan",   BG, gW,
+       "white",  BG, ".",
+       "cyan",   BG, gF,
+       "white",  BG, "%)")
+
+    CN("white",  BG, "Continent Lands: ",
+       "red",    BG, tostring(stats.continent),
+       "white",  BG, " (",
+       "cyan",   BG, cW,
+       "white",  BG, ".",
+       "cyan",   BG, cF,
+       "white",  BG, "%)")
+
+    CN("white",  BG, "Area Lands: ",
+       "red",    BG, tostring(stats.area),
+       "white",  BG, " (",
+       "cyan",   BG, aW,
+       "white",  BG, ".",
+       "cyan",   BG, aF,
+       "white",  BG, "%)")
+end
+
+local function ShowHelp()
+    CN("green",  BG, "ChaosCast Help")
+    CN("white",  BG, "chaoscast            ", "cyan", BG, "- Show portal cast statistics")
+    CN("white",  BG, "chaoscast help       ", "cyan", BG, "- Show this help message")
+    CN("white",  BG, "chaoscast reset      ", "cyan", BG, "- Reset all statistics")
+    CN("white",  BG, "chaoscastbc          ", "cyan", BG, "- Toggle gt broadcast on/off")
+    CN("white",  BG, "chaoscast <channel>  ", "cyan", BG, "- Broadcast stats to a channel (eg: chaoscast gt)")
+    CN("white",  BG, "bcp <number>         ", "cyan", BG, "- Cast chaos blank X times with 1 second delay (eg: bcp 10)")
+    CN("white",  BG, "bcpstop              ", "cyan", BG, "- Stop an in-progress BCP run")
+    Note("")
+    CN("green",  BG, "RaviTrack")
+    CN("white",  BG, "ravitrack            ", "cyan", BG, "- Show Ravi portal purchase statistics")
+    CN("white",  BG, "ravitrack help       ", "cyan", BG, "- Show RaviTrack help")
+    CN("white",  BG, "ravitrack reset      ", "cyan", BG, "- Reset Ravi purchase stats")
+    CN("white",  BG, "ravitrack <channel>  ", "cyan", BG, "- Broadcast Ravi stats to a channel (eg: ravitrack gt)")
+end
+
+-- ─── Trigger Handlers ────────────────────────
+
+function OnNormalPortal(name, line, wildcards)
+    pendingGolden = false
+end
+
+function OnGoldenPortal(name, line, wildcards)
+    pendingGolden = true
+end
+
+function OnPortalDestination(name, line, wildcards)
+    local room     = wildcards[1]
+    local area     = wildcards[2]
+    local isGolden = pendingGolden
+    pendingGolden  = false
+
+    stats.total = stats.total + 1
+    if isGolden then
+        stats.golden = stats.golden + 1
+    else
+        stats.normal = stats.normal + 1
+    end
+    if IsContinent(area) then
+        stats.continent = stats.continent + 1
+    else
+        stats.area = stats.area + 1
+    end
+    SaveData()
+
+    local goldFlag = isGolden and "Y" or "N"
+
+    if gtBroadcast then
+        local goldCode = isGolden and "@x048" or "@x099"
+        Execute("gt @WArea: @x048" .. area .. "@x045 | @WRoom: @x048" .. room .. "@x045 | @YGold: " .. goldCode .. goldFlag .. "@w")
+    end
+end
+
+-- ─── BCP Bulk Cast ───────────────────────────
+
+local bcp = { total = 0 }
+
+function BcpTick() end  -- unused
+
+function OnBcpCast(name, line, wildcards)
+    local n = tonumber(wildcards[1])
+    if not n or n < 1 then
+        CN("green", BG, "ChaosCast: ", "white", BG, "Usage: bcp <number>  eg: bcp 10")
+        return
+    end
+
+    bcp.total = n
+
+    CN("green", BG, "ChaosCast: ", "white", BG, "Starting BCP — casting ",
+       "red",   BG, tostring(n),
+       "white", BG, " portals with a 1 second delay each.")
+
+    wait.make(function()
+        for i = 1, n do
+            Execute("c chaos blank")
+            wait.time(1000)
+        end
+        CN("green", BG, "ChaosCast: ", "white", BG, "BCP complete. Cast ",
+           "red",   BG, tostring(n),
+           "white", BG, " portals.")
+    end)
+end
+
+function OnBcpStop(name, line, wildcards)
+    CN("green", BG, "ChaosCast: ", "white", BG, "BCP stopped.")
+    wait.cancel_all()
+end
+
+
+
+function OnChaosCastDisplay(name, line, wildcards)
+    ShowStats()
+end
+
+function OnChaosCastHelp(name, line, wildcards)
+    ShowHelp()
+end
+
+function OnChaosCastChannel(name, line, wildcards)
+    local channel = wildcards[1]
+
+    -- Don't intercept reserved commands
+    if channel == "help" or channel == "reset" then
+        return
+    end
+
+    local nW, nF = Pct(stats.normal,    stats.total)
+    local gW, gF = Pct(stats.golden,    stats.total)
+    local cW, cF = Pct(stats.continent, stats.total)
+    local aW, aF = Pct(stats.area,      stats.total)
+
+    local msg = "@WChaos Portals @x048Total: @x099" .. stats.total ..
+                "@x045 | @WNormal: @x099" .. stats.normal ..
+                "@W (@x048" .. nW .. "@W.@x048" .. nF .. "@W%)" ..
+                "@x045 | @WGolden: @x099" .. stats.golden ..
+                "@W (@x048" .. gW .. "@W.@x048" .. gF .. "@W%)" ..
+                "@x045 | @WContinent: @x099" .. stats.continent ..
+                "@W (@x048" .. cW .. "@W.@x048" .. cF .. "@W%)" ..
+                "@x045 | @WArea: @x099" .. stats.area ..
+                "@W (@x048" .. aW .. "@W.@x048" .. aF .. "@W%)@w"
+
+    Execute(channel .. " " .. msg)
+end
+
+function OnChaosCastGtToggle(name, line, wildcards)
+    gtBroadcast = not gtBroadcast
+    SaveData()
+    if gtBroadcast then
+        CN("green", BG, "ChaosCast: ", "white", BG, "gt broadcast ", "green", BG, "ENABLED")
+    else
+        CN("green", BG, "ChaosCast: ", "white", BG, "gt broadcast ", "red", BG, "DISABLED")
+    end
+end
+
+function OnChaosCastReset(name, line, wildcards)
+    stats.total     = 0
+    stats.normal    = 0
+    stats.golden    = 0
+    stats.continent = 0
+    stats.area      = 0
+    SaveData()
+    CN("green", BG, "ChaosCast: ", "white", BG, "Stats have been reset.")
+end
+
+-- ─── Plugin Lifecycle ────────────────────────
+
+function OnPluginInstall()
+    LoadData()
+    ravi_load_data()
+    CN("green", BG, "ChaosCast loaded. Type 'chaoscast help' for commands.")
+end
+
+function OnPluginConnect()
+    LoadData()
+    ravi_load_data()
+end
+
+function OnPluginSaveState()
+    SaveData()
+    ravi_save_data()
+end
+
+-- ─────────────────────────────────────────────
+--  RaviTrack - merged into ChaosCast
+-- ─────────────────────────────────────────────
+
+local ravi_data_file = "RaviTrack.dat"
+
+local RAVI_TYPES = {
+    "a blank chaos portal",
+    "A blank chaos portal with a silvery tint",
+    "A shiny platinum blank chaos portal",
+    "A glittering diamond blank chaos portal",
+}
+
+local ravi_counts = {
+    ["a blank chaos portal"]                    = 0,
+    ["A blank chaos portal with a silvery tint"] = 0,
+    ["A shiny platinum blank chaos portal"]     = 0,
+    ["A glittering diamond blank chaos portal"] = 0,
+}
+
+function ravi_save_data()
+    local f = io.open(ravi_data_file, "w")
+    if not f then return end
+    for k, v in pairs(ravi_counts) do
+        f:write(k .. "|" .. tostring(v) .. "\n")
+    end
+    f:close()
+end
+
+function ravi_load_data()
+    local f = io.open(ravi_data_file, "r")
+    if not f then return end
+    for line in f:lines() do
+        local name, num = line:match("^(.*)|(%d+)$")
+        if name and num and ravi_counts[name] ~= nil then
+            ravi_counts[name] = tonumber(num)
+        end
+    end
+    f:close()
+end
+
+function OnRaviBuy(name, line, wildcards)
+    local portal = wildcards[1]
+    if ravi_counts[portal] ~= nil then
+        ravi_counts[portal] = ravi_counts[portal] + 1
+        ravi_save_data()
+    end
+end
+
+function OnRaviTrack()
+    local total = 0
+    for _, v in pairs(ravi_counts) do total = total + v end
+
+    local function pctParts(amt)
+        if total == 0 then return "0", "00" end
+        local p = (amt / total) * 100
+        local whole = math.floor(p)
+        local frac  = math.floor((p - whole) * 100)
+        return string.format("%d", whole), string.format("%02d", frac)
+    end
+
+    local blank    = ravi_counts["a blank chaos portal"]
+    local silver   = ravi_counts["A blank chaos portal with a silvery tint"]
+    local platinum = ravi_counts["A shiny platinum blank chaos portal"]
+    local diamond  = ravi_counts["A glittering diamond blank chaos portal"]
+
+    CN("green", BG, "Ravi Portal Tracker")
+
+    CN("white", BG, "Total Portals: ",
+       "red",   BG, tostring(total))
+
+    local function RaviLine(label, amt)
+        local w, f = pctParts(amt)
+        CN("white", BG, label .. ": ",
+           "red",   BG, tostring(amt),
+           "white", BG, " (",
+           "cyan",  BG, w,
+           "white", BG, ".",
+           "cyan",  BG, f,
+           "white", BG, "%)")
+    end
+
+    RaviLine("Blank",    blank)
+    RaviLine("Silver",   silver)
+    RaviLine("Platinum", platinum)
+    RaviLine("Diamond",  diamond)
+end
+
+function OnRaviChannel(name, line, wildcards)
+    local channel = wildcards[1]
+    if channel == "help" or channel == "reset" then return end
+
+    local total = 0
+    for _, v in pairs(ravi_counts) do total = total + v end
+
+    local blank    = ravi_counts["a blank chaos portal"]
+    local silver   = ravi_counts["A blank chaos portal with a silvery tint"]
+    local platinum = ravi_counts["A shiny platinum blank chaos portal"]
+    local diamond  = ravi_counts["A glittering diamond blank chaos portal"]
+
+    local function P(amt)
+        local w, f = Pct(amt, total)
+        return "@W (@x048" .. w .. "@W.@x048" .. f .. "@W%)"
+    end
+
+    local msg = "@WRavi Track @x045| @WTotal: @x099" .. tostring(total) ..
+                "@x045 | @WBlank: @x099"    .. tostring(blank)    .. P(blank) ..
+                "@x045 | @WSilver: @x099"   .. tostring(silver)   .. P(silver) ..
+                "@x045 | @WPlatinum: @x099" .. tostring(platinum) .. P(platinum) ..
+                "@x045 | @WDiamond: @x099"  .. tostring(diamond)  .. P(diamond) ..
+                "@w"
+
+    Execute(channel .. " " .. msg)
+end
+
+function OnRaviReset()
+    for k, _ in pairs(ravi_counts) do
+        ravi_counts[k] = 0
+    end
+    ravi_save_data()
+    CN("green", BG, "ChaosCast: ", "white", BG, "Ravi portal stats reset.")
+end
+
+function OnRaviHelp()
+    CN("green",  BG, "RaviTrack Help")
+    CN("white",  BG, "ravitrack            ", "cyan", BG, "- Show Ravi portal purchase statistics")
+    CN("white",  BG, "ravitrack help       ", "cyan", BG, "- Show this help")
+    CN("white",  BG, "ravitrack reset      ", "cyan", BG, "- Reset all counts")
+    CN("white",  BG, "ravitrack <channel>  ", "cyan", BG, "- Broadcast stats to a channel (eg: ravitrack gt)")
+end
+
+]]>
+</script>
+
+</muclient>
