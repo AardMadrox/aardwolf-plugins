@@ -1,38 +1,35 @@
 <?xml version="1.0" encoding="iso-8859-1"?>
 <!DOCTYPE muclient>
 
-<!-- PortalValue
-     Stand in the room you care about and type "pv". The plugin finds the
-     shortest-walk saved mapper portal across ALL areas (a portal in another area
-     can beat an in-area one), then shows the speedwalk (using your saved exits +
-     cexits) FROM that portal TO this room, plus a movement count. It also reports
-     the "recall walk": how many rooms it is from your recall to this room using
-     normal walking only (no portals).
+<!-- PortalValue  (v3.0 — PortalDex folded in)
+     Two tools in one plugin:
 
-     Movement rule:
-       - taking the portal itself         = 1 movement
-       - each cardinal step (n/s/e/w/u/d)  = 1 movement
-       - each custom exit (e.g. "enter hole") = 1 movement
-       - open/close commands               = 0 movements (they never appear in
-                                             mapper paths, so this is automatic)
+     1. PORTAL PATHING (pv):
+        Stand in a room and type "pv". Finds the shortest-walk saved mapper portal
+        across ALL areas, shows the speedwalk (using your saved exits + cexits) FROM
+        that portal TO this room, plus a movement count. Also reports the "recall
+        walk" (no-portal walking distance from recall), and — using the catalog
+        below — "No normals" / "No chaos" lines (nearest portal excluding random
+        chaos portals).
 
-     Commands:
-       pv  /  pvtest        - calculate for the room you're standing in
-       pv <channel>         - post a one-line summary to a channel, e.g. "pv spo"
-                             sends: <channel> Room <n>: [<x> movements from <p>]
-                             [<y> portaless movements from recall]
-       portalvalue help     - show usage
-       portalvaluehistory   - list every result found (persists across sessions)
-       portalvaluepurge     - clear the history
-       pvcheck              - verify setup on this client (mapper + database)
-       pvdebug              - toggle debug messages
+     2. PORTAL CATALOG (portaldex):
+        Builds a saved catalog of your portals by type, by reading Aardwolf 'id'
+        output. Classified by FLAGS + KEYWORDS (which survive restringing):
+          nosac + nosteal => chaos portal;  + precious => golden chaos
+          keyword "trivia" / Found at "A Bad Trip" => trivia;  else => gameload
+        'restrung' tracked separately. Portals catalog automatically when you 'id'
+        one, or in bulk via 'portaldex scan'.
 
-     Shareable: this plugin reads the mapper's own database name and the world
-     folder from the running client at install time, so it works for whoever
-     installs it against THEIR own mapper, rooms, and portals. The only
-     requirement is the standard Aardwolf client package (GMCP mapper + GMCP
-     handler), which use fixed plugin IDs identical on every install. On install
-     it runs pvcheck automatically and reports whether it's ready.
+     Data: the catalog lives in its own file PortalDex_data.lua (in the world
+     folder); pv history lives in plugin state. Kept separate on purpose.
+
+     Movement rule: portal hop = 1; each cardinal step = 1; each cexit = 1;
+     open/close = 0 (they never appear in mapper paths).
+
+     Commands: type "portalvalue help" (or "portaldex help") for the full list.
+
+     Shareable: reads the mapper's own db name + world folder at runtime, so it works
+     for whoever installs it. Requires the standard Aardwolf client package.
 -->
 
 <muclient>
@@ -41,137 +38,82 @@
    author="Eric"
    id="e9f3a7c2b1d84605fa9c7e21"
    language="Lua"
-   purpose="Find the closest saved portal to a newly-entered chaos portal and show the speedwalk."
+   purpose="Find the closest saved portal + speedwalk to your room, and catalog your portals by type."
    date_written="2026-06-27"
    requires="4.73"
-   version="2.3"
+   version="3.0"
 >
 </plugin>
 
-<!-- ================= ALIASES ================= -->
+<!-- ============ TRIGGERS: capture 'id' boxes for the catalog ============ -->
+<triggers>
+  <trigger enabled="y" regexp="y" keep_evaluating="y" match="^\+\-+\+\s*$"     script="pd_border" sequence="100"></trigger>
+  <trigger enabled="y" regexp="y" keep_evaluating="y" match="^\|(.*)\|\s*$"    script="pd_line"   sequence="100"></trigger>
+</triggers>
+
+<!-- ============ ALIASES ============ -->
 <aliases>
-
-  <alias
-   match="^pv$"
-   enabled="y"
-   regexp="y"
-   ignore_case="y"
-   script="pv_test"
-   sequence="100"
-  >
-  </alias>
-
-  <alias
-   match="^pv (.+)$"
-   enabled="y"
-   regexp="y"
-   ignore_case="y"
-   script="pv_channel"
-   sequence="100"
-  >
-  </alias>
-
-  <alias
-   match="^pvtest$"
-   enabled="y"
-   regexp="y"
-   ignore_case="y"
-   script="pv_test"
-   sequence="100"
-  >
-  </alias>
-
-  <alias
-   match="^portalvalue help$"
-   enabled="y"
-   regexp="y"
-   ignore_case="y"
-   script="pv_usage"
-   sequence="100"
-  >
-  </alias>
-
-  <alias
-   match="^portalvaluehistory$"
-   enabled="y"
-   regexp="y"
-   ignore_case="y"
-   script="pv_history"
-   sequence="100"
-  >
-  </alias>
-
-  <alias
-   match="^portalvaluepurge$"
-   enabled="y"
-   regexp="y"
-   ignore_case="y"
-   script="pv_purge"
-   sequence="100"
-  >
-  </alias>
-
-  <alias
-   match="^pvcheck$"
-   enabled="y"
-   regexp="y"
-   ignore_case="y"
-   script="pv_check"
-   sequence="100"
-  >
-  </alias>
-
-  <alias
-   match="^pvdebug$"
-   enabled="y"
-   regexp="y"
-   ignore_case="y"
-   script="pv_toggle_debug"
-   sequence="100"
-  >
-  </alias>
-
+  <!-- pathing -->
+  <alias match="^pv$"                enabled="y" regexp="y" ignore_case="y" script="pv_test"          sequence="100"></alias>
+  <alias match="^pv (.+)$"           enabled="y" regexp="y" ignore_case="y" script="pv_channel"       sequence="100"></alias>
+  <alias match="^pvtest$"            enabled="y" regexp="y" ignore_case="y" script="pv_test"          sequence="100"></alias>
+  <alias match="^portalvalue help$"  enabled="y" regexp="y" ignore_case="y" script="pv_help_all"      sequence="100"></alias>
+  <alias match="^portalvaluehistory$" enabled="y" regexp="y" ignore_case="y" script="pv_show_history" sequence="100"></alias>
+  <alias match="^portalvaluepurge$"  enabled="y" regexp="y" ignore_case="y" script="pv_purge"         sequence="100"></alias>
+  <alias match="^pvcheck$"           enabled="y" regexp="y" ignore_case="y" script="pv_check"         sequence="100"></alias>
+  <alias match="^pvdebug$"           enabled="y" regexp="y" ignore_case="y" script="pv_toggle_debug"  sequence="100"></alias>
+  <!-- catalog -->
+  <alias match="^portaldex$"         enabled="y" regexp="y" ignore_case="y" script="pd_summary"  sequence="100"></alias>
+  <alias match="^pdex$"              enabled="y" regexp="y" ignore_case="y" script="pd_summary"  sequence="100"></alias>
+  <alias match="^portaldex list$"    enabled="y" regexp="y" ignore_case="y" script="pd_list"     sequence="90"></alias>
+  <alias match="^portaldex list (.+)$" enabled="y" regexp="y" ignore_case="y" script="pd_list"   sequence="90"></alias>
+  <alias match="^portaldex clear$"   enabled="y" regexp="y" ignore_case="y" script="pd_clear"    sequence="90"></alias>
+  <alias match="^portaldex help$"    enabled="y" regexp="y" ignore_case="y" script="pv_help_all" sequence="90"></alias>
+  <alias match="^portaldex missing$" enabled="y" regexp="y" ignore_case="y" script="pd_missing"  sequence="90"></alias>
+  <alias match="^portaldex speed ?(.*)$" enabled="y" regexp="y" ignore_case="y" script="pd_speed_cmd" sequence="85"></alias>
+  <alias match="^portaldex bag ?(.*)$"   enabled="y" regexp="y" ignore_case="y" script="pd_bag_cmd"   sequence="85"></alias>
+  <alias match="^portaldex auto ?(.*)$"  enabled="y" regexp="y" ignore_case="y" script="pd_auto_cmd"  sequence="85"></alias>
+  <alias match="^portaldex scan ?(.*)$"  enabled="y" regexp="y" ignore_case="y" script="pd_scan"      sequence="80"></alias>
 </aliases>
 
-<!-- ================= SCRIPT ================= -->
+<!-- ============ SCRIPT ============ -->
 <script>
 <![CDATA[
+
+require "serialize"
 
 local MAPPER_ID = "b6eae87ccedd84f510b74714"
 local GMCP_ID   = "3e7dedbe37e44942dd46d264"
 
 -- theme colours
-local C = {
-   hdr = "@x099",   -- purple
-   val = "@x045",   -- cyan
-   num = "@W",      -- bright white
-   ok  = "@x048",   -- green
-   bad = "@R",      -- bright red (diagnostics)
-}
-
--- state
-pv_history = pv_history or {}
-pv_debug   = pv_debug or false
+local C = { hdr="@x099", val="@x045", num="@W", ok="@x048", bad="@R" }
 
 -- colour output (fall back to plain text if the colour lib isn't available)
 local have_colors = pcall(require, "aardwolf_colors")
 function pv_echo(s)
-   if have_colors then
-      AnsiNote(ColoursToANSI(s))
-   else
-      -- crude strip of @-codes
-      Note((s:gsub("@x%d%d?%d?", ""):gsub("@%a", "")))
+   if have_colors then AnsiNote(ColoursToANSI(s))
+   else Note((s:gsub("@x%d%d?%d?", ""):gsub("@%a", ""))) end
+end
+local echo = pv_echo          -- PortalDex code calls echo()
+
+local function esc(s) return (tostring(s or ""):gsub("@", "@@")) end
+local function q(s)   return "'" .. tostring(s):gsub("'", "''") .. "'" end
+
+-- locate the mapper's sqlite db (adapts to whatever world/char/install we're in)
+local function get_db_path()
+   if not IsPluginInstalled(MAPPER_ID) then
+      return nil, "the Aardwolf GMCP mapper plugin is not installed"
    end
-end
-
--- escape user-supplied text so stray @ signs aren't read as colour codes
-local function esc(s)
-   return (tostring(s or ""):gsub("@", "@@"))
-end
-
--- sql string-quote
-local function q(s)
-   return "'" .. tostring(s):gsub("'", "''") .. "'"
+   local db_name = GetPluginVariable(MAPPER_ID, "db_name")
+   if not db_name or db_name == "" then
+      db_name = (WorldName() or ""):gsub("[^%w%s()_-]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+   end
+   if db_name == "" then return nil, "could not determine the mapper's database name" end
+   local path = GetInfo(66) .. db_name .. ".db"
+   local f = io.open(path, "rb")
+   if not f then return nil, "database file not found at: " .. path end
+   f:close()
+   return path
 end
 
 local CARDINALS = { n=true, s=true, e=true, w=true, u=true, d=true }
@@ -183,9 +125,7 @@ local function build_speedwalk(dirs)
    local function flush()
       if #run > 0 then
          local parts = {}
-         for _, rc in ipairs(run) do
-            parts[#parts+1] = ((rc.c > 1) and rc.c or "") .. rc.d
-         end
+         for _, rc in ipairs(run) do parts[#parts+1] = ((rc.c > 1) and rc.c or "") .. rc.d end
          segs[#segs+1] = "run " .. table.concat(parts)
          run = {}
       end
@@ -194,61 +134,457 @@ local function build_speedwalk(dirs)
       moves = moves + 1
       if CARDINALS[d] then
          local last = run[#run]
-         if last and last.d == d then
-            last.c = last.c + 1
-         else
-            run[#run+1] = { d = d, c = 1 }
-         end
+         if last and last.d == d then last.c = last.c + 1
+         else run[#run+1] = { d = d, c = 1 } end
       else
          flush()
-         segs[#segs+1] = d   -- custom exit, verbatim
+         segs[#segs+1] = d
       end
    end
    flush()
    return table.concat(segs, ";"), moves
 end
 
--- format the "no-portal walking distance from recall" line
 local function recall_line(rooms, sw, msg)
    if rooms ~= nil then
-      if rooms == 0 then
-         return C.hdr .. "Recall walk : " .. C.val .. "you're standing on recall"
-      end
+      if rooms == 0 then return C.hdr .. "Recall walk : " .. C.val .. "you're standing on recall" end
       return C.hdr .. "Recall walk : " .. C.num .. rooms .. C.hdr .. " rooms (no portals)  "
              .. C.ok .. (sw ~= "" and esc(sw) or "")
    end
    return C.hdr .. "Recall walk : " .. C.hdr .. "(" .. esc(msg or "unknown") .. ")"
 end
 
--- locate the mapper's database file on disk.
--- Everything here is read from the running client at runtime, so it adapts to
--- whatever world / character / install the plugin is loaded into:
---   * the mapper's own "db_name" variable (the file it actually uses)
---   * GetInfo(66) = this world's file folder (where the mapper keeps the db)
--- Returns: path  (or)  nil, reason
-local function get_db_path()
-   if not IsPluginInstalled(MAPPER_ID) then
-      return nil, "the Aardwolf GMCP mapper plugin is not installed"
-   end
-   local db_name = GetPluginVariable(MAPPER_ID, "db_name")
-   if not db_name or db_name == "" then
-      -- fallback: replicate the mapper's own default = sanitize_filename(WorldName())
-      db_name = (WorldName() or ""):gsub("[^%w%s()_-]", "")
-      db_name = db_name:gsub("^%s+", ""):gsub("%s+$", "")   -- Trim
-   end
-   if db_name == "" then
-      return nil, "could not determine the mapper's database name"
-   end
-   local path = GetInfo(66) .. db_name .. ".db"
-   local f = io.open(path, "rb")
-   if not f then
-      return nil, "database file not found at: " .. path
-   end
+-- =========================================================================
+-- ===============  CATALOG (formerly the PortalDex plugin)  ===============
+-- =========================================================================
+
+-- catalog[idnumber] = { id, name, kw, ptype, restrung, leads, found, level, t, refs }
+catalog = catalog or {}
+pd_bag = pd_bag or ""                          -- portal container keyword
+if pd_auto == nil then pd_auto = true end      -- catalog-as-you-go on/off
+scan_active = false                            -- a scan is running?
+scan_queue = scan_queue or {}
+pd_speed = pd_speed or 2.0                      -- seconds between scan steps
+scan_mode = nil                                 -- "missing" => auto-repeat
+scan_pass_start = 0
+pd_scan_current_ref = ""                        -- ref being scanned right now
+
+-- ---- catalog persistence: own file (survives reinstalls) ----
+local function pd_datafile() return GetInfo(66) .. "PortalDex_data.lua" end
+
+local function pd_save()
+   local path = pd_datafile()
+   local tmp  = path .. ".tmp"
+   local f = io.open(tmp, "w")
+   if not f then return end
+   f:write("return " .. serialize.save_simple({ catalog = catalog, bag = pd_bag, auto = pd_auto, speed = pd_speed }))
    f:close()
-   return path
+   os.remove(path)
+   os.rename(tmp, path)
 end
 
--- pretty-print one result record
+local function pd_read_table(path)
+   local f = io.open(path, "r")
+   if not f then return nil end
+   local content = f:read("*a"); f:close()
+   if not content or content == "" then return nil end
+   local ok, data = pcall(function() return assert(loadstring(content))() end)
+   if ok and type(data) == "table" then return data end
+   return nil
+end
+
+local function pd_load()
+   local data = pd_read_table(pd_datafile()) or pd_read_table(pd_datafile() .. ".tmp")
+   if data then
+      if type(data.catalog) == "table" then catalog = data.catalog end
+      pd_bag = data.bag or pd_bag
+      if data.auto ~= nil then pd_auto = data.auto end
+      if tonumber(data.speed) then pd_speed = tonumber(data.speed) end
+   end
+end
+
+-- ---- id-box capture ----
+local in_block = false
+local buf = {}
+
+function pd_border()
+   if in_block then in_block = false; pd_parse(buf)
+   else in_block = true; buf = {} end
+end
+
+function pd_line(name, line, wc)
+   if in_block then buf[#buf+1] = wc[1] end
+end
+
+local function classify(kw, flagset, found)
+   kw = (kw or ""):lower()
+   found = (found or ""):lower()
+   local chaos = (flagset["nosac"] and flagset["nosteal"]) or kw:find("chaos portal", 1, true)
+   if chaos then
+      if flagset["precious"] or kw:find("golden", 1, true) then return "golden chaos" end
+      return "chaos"
+   end
+   if kw:find("trivia", 1, true) then return "trivia" end
+   if found == "a bad trip" then return "trivia" end
+   return "gameload"
+end
+
+function pd_parse(lines)
+   local f, cur = {}, nil
+   for _, raw in ipairs(lines) do
+      local label = raw:match("^%s*([%a][%a%s']-)%s*:")
+      if label and not raw:match("^%s*:") then
+         local val = raw:match(":%s*(.-)%s*$") or ""
+         label = label:gsub("%s+$",""):gsub("%s+"," ")
+         f[label] = val
+         cur = label
+      else
+         local cont = raw:match("^%s*:%s*(.-)%s*$")
+         if cont and cur then f[cur] = (f[cur] or "") .. ", " .. cont end
+      end
+   end
+
+   if not (f["Id"] and f["Type"]) then return end
+   if not f["Type"]:match("[Pp]ortal") then return end
+   if not pd_auto and not scan_active then return end
+
+   local id = (f["Id"] or ""):match("%d+")
+   if not id then return end
+
+   local flagset = {}
+   for w in (f["Flags"] or ""):gmatch("[%w%-]+") do flagset[w:lower()] = true end
+
+   local level = (f["Type"] or ""):match("Level%s*:%s*(%d+)") or "?"
+   local kw    = f["Keywords"] or ""
+   local existing = catalog[id]
+   local rec = {
+      id = id, name = f["Name"] or "?", kw = kw,
+      ptype = classify(kw, flagset, f["Found at"]),
+      restrung = flagset["restrung"] and true or false,
+      leads = f["Leads to"] or "?", found = f["Found at"] or "?",
+      level = level, t = os.date("%Y-%m-%d %H:%M"),
+      refs = (existing and existing.refs) or {},
+   }
+   if scan_active and pd_scan_current_ref ~= "" then rec.refs[pd_scan_current_ref] = true end
+
+   local isnew = (existing == nil)
+   catalog[id] = rec
+   pd_save()
+
+   if isnew then
+      echo(C.hdr.."[PortalDex] +"..C.ok..esc(rec.ptype)..C.hdr..(rec.restrung and " "..C.val.."(restrung)" or "")
+          .." "..C.val..esc(rec.name).." "..C.num.."("..id..")"..C.hdr.." -> "..C.val..esc(rec.leads))
+   end
+end
+
+local function count_types()
+   local counts, total, restrung = {}, 0, 0
+   for _, r in pairs(catalog) do
+      counts[r.ptype] = (counts[r.ptype] or 0) + 1
+      total = total + 1
+      if r.restrung then restrung = restrung + 1 end
+   end
+   return counts, total, restrung
+end
+
+function pd_summary()
+   local counts, total, restrung = count_types()
+   echo(C.hdr.."============= "..C.num.."PortalDex"..C.hdr.." =============")
+   if total == 0 then
+      echo(C.val.."No portals cataloged yet. 'id' a portal (or run "..C.ok.."portaldex scan"..C.val..").")
+      return
+   end
+   for _, ty in ipairs({"golden chaos","chaos","trivia","gameload"}) do
+      if counts[ty] then echo(C.hdr.."  "..C.ok..string.format("%-14s", ty)..C.num..counts[ty]); counts[ty] = nil end
+   end
+   for ty, n in pairs(counts) do echo(C.hdr.."  "..C.ok..string.format("%-14s", ty)..C.num..n) end
+   echo(C.hdr.."  "..C.val..string.format("%-14s","(restrung)")..C.num..restrung)
+   echo(C.hdr.."  "..C.val..string.format("%-14s","total")..C.num..total)
+   echo(C.hdr.."Use "..C.ok.."portaldex list"..C.hdr.." to see them all.")
+end
+
+function pd_list(name, line, wc)
+   local filter = wc and wc[1] and wc[1]:lower() or nil
+   local arr = {}
+   for _, r in pairs(catalog) do arr[#arr+1] = r end
+   table.sort(arr, function(a,b)
+      if a.ptype ~= b.ptype then return a.ptype < b.ptype end
+      return (a.name or "") < (b.name or "")
+   end)
+   local shown = 0
+   echo(C.hdr.."============= "..C.num.."PortalDex list"..C.hdr.." =============")
+   for _, r in ipairs(arr) do
+      local hay = (r.ptype.." "..r.name.." "..r.leads):lower()
+      if (not filter) or hay:find(filter, 1, true) then
+         echo(C.ok..string.format("%-13s", r.ptype)..(r.restrung and C.bad.."R " or "  ")
+             ..C.val..esc(r.name).." "..C.num.."("..r.id..")"..C.hdr.." -> "..C.val..esc(r.leads)
+             ..C.hdr.." lvl "..C.num..esc(r.level))
+         shown = shown + 1
+      end
+   end
+   echo(C.hdr.."("..C.num..shown..C.hdr.." shown"..(filter and (", filter '"..esc(wc[1]).."'") or "")..")")
+end
+
+function pd_clear()
+   catalog = {}
+   pd_save()
+   echo(C.hdr.."[PortalDex] Catalog cleared.")
+end
+
+function pd_speed_cmd(name, line, wc)
+   local n = tonumber(wc and wc[1])
+   if not n then
+      echo(C.hdr.."[PortalDex] Scan speed: "..C.num..pd_speed..C.hdr.."s per portal. Set with "..C.ok.."portaldex speed <seconds>"..C.hdr..".")
+      return
+   end
+   if n < 0.5 then n = 0.5 elseif n > 10 then n = 10 end
+   pd_speed = n; pd_save()
+   echo(C.hdr.."[PortalDex] Scan speed set to "..C.num..pd_speed..C.hdr.."s per portal.")
+end
+
+function pd_auto_cmd(name, line, wc)
+   local arg = ((wc and wc[1]) or ""):gsub("^%s+",""):gsub("%s+$",""):lower()
+   if arg == "on" then pd_auto = true
+   elseif arg == "off" then pd_auto = false
+   elseif arg == "" then pd_auto = not pd_auto
+   else echo(C.hdr.."[PortalDex] Use "..C.ok.."portaldex auto on|off"..C.hdr..".") return end
+   pd_save()
+   echo(C.hdr.."[PortalDex] Catalog-as-you-go is "..(pd_auto and (C.ok.."ON") or (C.bad.."OFF"))
+       ..C.hdr..(pd_auto and "." or " — manual id's won't be saved (scans still catalog)."))
+end
+
+function pd_bag_cmd(name, line, wc)
+   local arg = (wc and wc[1] or ""):gsub("^%s+",""):gsub("%s+$","")
+   if arg == "" then
+      if pd_bag == "" then echo(C.hdr.."[PortalDex] No portal container set; scans use each command's own container.")
+      else echo(C.hdr.."[PortalDex] Portal container keyword: "..C.val..esc(pd_bag)) end
+      echo(C.hdr.."Set with "..C.ok.."portaldex bag <keyword>"..C.hdr..", clear with "..C.ok.."portaldex bag none"..C.hdr..".")
+      return
+   end
+   if arg:lower() == "none" or arg:lower() == "clear" then
+      pd_bag = ""; pd_save()
+      echo(C.hdr.."[PortalDex] Portal container cleared; scans will use each command's container.")
+      return
+   end
+   pd_bag = arg; pd_save()
+   echo(C.hdr.."[PortalDex] Portal container set to "..C.val..esc(pd_bag)..C.hdr..". Scans will take/put using this bag.")
+end
+
+-- Pull the item reference (and container) from a portal command: the LAST visible
+-- id number or keyword used in a take/get (dungeon portals take a first-room portal,
+-- nod, then take the real one). Normal portals have one take, so last == only.
+local function extract_ref(cmd)
+   cmd = cmd or ""
+   local lastref, lastcont
+   for seg in (cmd .. ";"):gmatch("([^;]*);") do
+      local ref, cont = seg:match("^%s*[tT]ake%s+([^%s;]+)%s+([^%s;]+)")
+      if not ref then ref, cont = seg:match("^%s*[gG]et%s+([^%s;]+)%s+([^%s;]+)") end
+      if not ref then ref = seg:match("^%s*[tT]ake%s+([^%s;]+)") or seg:match("^%s*[gG]et%s+([^%s;]+)") end
+      if ref then lastref, lastcont = ref, cont end
+   end
+   return lastref, lastcont
+end
+
+local function tcount(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+
+local function build_ref_index()
+   local idx = {}
+   for id, e in pairs(catalog) do
+      if e.refs then for r in pairs(e.refs) do idx[r] = id end end
+   end
+   return idx
+end
+
+local function resolve_ref(ref, idx)
+   ref = (ref or ""):lower()
+   if ref == "" then return nil end
+   if idx[ref] then return idx[ref] end
+   if ref:match("^%d+$") and catalog[ref] then return ref end
+   for id, e in pairs(catalog) do
+      for w in (e.kw or ""):gmatch("%S+") do
+         w = w:lower()
+         if w == ref or (#ref < #w and w:sub(1, #ref) == ref) then return id end
+      end
+   end
+   return nil
+end
+
+local function make_cataloged_checker()
+   local idx = build_ref_index()
+   return function(ref) return resolve_ref(ref, idx) ~= nil end
+end
+
+local function cross_reference()
+   local path, why = get_db_path()
+   if not path then echo(C.hdr.."[PortalDex] "..esc(why or "no mapper db")..".") return nil end
+   local ok_sql, sqlite3 = pcall(require, "sqlite3")
+   if not ok_sql then echo(C.hdr.."[PortalDex] sqlite3 library unavailable.") return nil end
+   local db = sqlite3.open(path)
+   if not db then echo(C.hdr.."[PortalDex] could not open the mapper database.") return nil end
+   local idx = build_ref_index()
+   local byItem, missing, total, noitem = {}, {}, 0, 0
+   for row in db:nrows([[
+         SELECT e.dir AS cmd, e.touid AS t, r.name AS nm, r.area AS ar
+         FROM exits e LEFT JOIN rooms r ON r.uid = e.touid
+         WHERE e.fromuid IN ('*','**')
+   ]]) do
+      total = total + 1
+      local ref = extract_ref(row.cmd)
+      if not ref then
+         noitem = noitem + 1
+      else
+         local entry = { ref = ref, nm = row.nm or "?", t = tostring(row.t), ar = row.ar or "?" }
+         local id = resolve_ref(ref, idx)
+         if not id then missing[#missing+1] = entry
+         else byItem[id] = byItem[id] or {}; table.insert(byItem[id], entry) end
+      end
+   end
+   db:close()
+   return { byItem = byItem, missing = missing, total = total, noitem = noitem }
+end
+
+local function load_portal_refs(only_missing)
+   local path, why = get_db_path()
+   if not path then echo(C.hdr.."[PortalDex] "..esc(why or "no mapper db")..".") return {} end
+   local ok_sql, sqlite3 = pcall(require, "sqlite3")
+   if not ok_sql then echo(C.hdr.."[PortalDex] sqlite3 library unavailable.") return {} end
+   local db = sqlite3.open(path)
+   if not db then echo(C.hdr.."[PortalDex] could not open the mapper database.") return {} end
+   local check = only_missing and make_cataloged_checker() or nil
+   local list, seen = {}, {}
+   for row in db:nrows("SELECT dir FROM exits WHERE fromuid IN ('*','**')") do
+      local ref, container = extract_ref(row.dir)
+      local bag = (pd_bag ~= "" and pd_bag) or container
+      if ref and bag and not seen[ref] then
+         seen[ref] = true
+         if (not check) or (not check(ref)) then list[#list+1] = { ref = ref, container = bag } end
+      end
+   end
+   db:close()
+   return list
+end
+
+function pd_scan_finish_pass()
+   if scan_mode == "missing" then
+      local remaining = load_portal_refs(true)
+      if #remaining > 0 and #remaining < scan_pass_start then
+         scan_pass_start = #remaining
+         scan_queue = remaining
+         scan_active = true
+         echo(C.hdr.."[PortalDex] Pass done — "..C.num..#remaining..C.hdr.." still missing, retrying...")
+         pd_scan_step()
+         return
+      end
+      scan_mode = nil
+      echo(C.hdr.."[PortalDex] Scan complete. "..C.num..#remaining..C.hdr.." still missing"
+          ..((#remaining > 0) and (C.hdr.." (no progress last pass — "..C.ok.."portaldex missing"..C.hdr.." to inspect)") or "")..".")
+   else
+      echo(C.hdr.."[PortalDex] Scan complete.")
+   end
+   pd_summary()
+end
+
+function pd_scan_step()
+   if not scan_active then return end
+   local item = table.remove(scan_queue, 1)
+   if not item then scan_active = false; pd_scan_finish_pass(); return end
+   pd_scan_current_ref = (item.ref or ""):lower()
+   Send("take " .. item.ref .. " " .. item.container)
+   Send("id "   .. item.ref)
+   Send("put "  .. item.ref .. " " .. item.container)
+   DoAfterSpecial(pd_speed, "pd_scan_step()", 12)
+end
+
+function pd_scan(name, line, wc)
+   local arg = ((wc and wc[1]) or ""):gsub("^%s+",""):gsub("%s+$",""):lower()
+
+   if arg == "stop" then
+      if scan_active then
+         scan_active = false
+         echo(C.hdr.."[PortalDex] Scan paused — "..C.num..#scan_queue..C.hdr.." left. "
+             ..C.ok.."portaldex scan"..C.hdr.." to resume, "..C.ok.."portaldex scan restart"..C.hdr.." to start over.")
+      else echo(C.hdr.."[PortalDex] No scan running.") end
+      return
+   end
+   if scan_active then
+      echo(C.hdr.."[PortalDex] Scan already running. "..C.ok.."portaldex scan stop"..C.hdr.." to pause.")
+      return
+   end
+
+   if arg == "missing" then
+      scan_queue = load_portal_refs(true)
+      if #scan_queue == 0 then echo(C.hdr.."[PortalDex] No missing portals to scan.") return end
+      scan_mode = "missing"; scan_pass_start = #scan_queue
+      echo(C.hdr.."[PortalDex] Scanning "..C.num..#scan_queue..C.hdr.." MISSING portals (auto-repeats until done). "..C.ok.."portaldex scan stop"..C.hdr.." to pause.")
+      scan_active = true; pd_scan_step()
+      return
+   end
+
+   scan_mode = nil
+   if arg == "restart" then scan_queue = {} end
+
+   if #scan_queue > 0 then
+      echo(C.hdr.."[PortalDex] Resuming scan — "..C.num..#scan_queue..C.hdr.." left. "..C.ok.."portaldex scan stop"..C.hdr.." to pause.")
+   else
+      scan_queue = load_portal_refs()
+      if #scan_queue == 0 then echo(C.hdr.."[PortalDex] Found no take/get portal commands in the mapper to scan.") return end
+      echo(C.hdr.."[PortalDex] Scanning "..C.num..#scan_queue..C.hdr.." saved portals (take/id/put, ~"..pd_speed.."s each). "..C.ok.."portaldex scan stop"..C.hdr.." to pause.")
+   end
+   scan_active = true
+   pd_scan_step()
+end
+
+function pd_missing()
+   local x = cross_reference()
+   if not x then return end
+   local present, uniq = 0, tcount(x.byItem)
+   for _, lst in pairs(x.byItem) do present = present + #lst end
+   table.sort(x.missing, function(a,b) return (a.ar.." "..a.nm) < (b.ar.." "..b.nm) end)
+   echo(C.hdr.."========== "..C.num.."PortalDex vs mapper"..C.hdr.." ==========")
+   echo(C.hdr.."Mapper portals : "..C.num..x.total)
+   echo(C.hdr.."Matched        : "..C.num..present..C.hdr.."  ("..C.num..uniq..C.hdr.." unique items)")
+   echo(C.hdr.."Missing        : "..C.num..#x.missing)
+   echo(C.hdr.."Recall/home    : "..C.num..x.noitem..C.hdr.." (no take command — not bag items)")
+   if #x.missing > 0 then
+      echo(C.hdr.."--- missing (run "..C.ok.."portaldex scan missing"..C.hdr.." to fetch these) ---")
+      for _, m in ipairs(x.missing) do
+         echo(C.bad.."  miss  "..C.val..esc(m.nm).." "..C.num.."["..m.t.."]"..C.hdr.." ("..C.val..esc(m.ar)..C.hdr..")  ref: "..C.ok..esc(m.ref))
+      end
+   else
+      echo(C.ok.."Nothing missing!")
+   end
+end
+
+-- =========================================================================
+-- ===================  PATHING (the original PortalValue)  ================
+-- =========================================================================
+
+pv_history = pv_history or {}
+pv_debug   = pv_debug or false
+
+local function save_history()
+   SetVariable("history", serialize.save_simple(pv_history))
+end
+
+-- Classify a portal command using the IN-MEMORY catalog. Returns:
+--   typer(cmd) -> ptype or nil ;  has_chaos ; has_golden   (nil if catalog empty)
+local function pv_portal_typer()
+   if next(catalog) == nil then return nil end
+   local idx = build_ref_index()
+   local has_chaos, has_golden = false, false
+   for _, e in pairs(catalog) do
+      if e.ptype == "chaos" then has_chaos = true
+      elseif e.ptype == "golden chaos" then has_golden = true end
+   end
+   local typer = function(cmd)
+      local ref = extract_ref(cmd)
+      if not ref then return nil end
+      local id = resolve_ref(ref, idx)
+      return (id and catalog[id]) and catalog[id].ptype or nil
+   end
+   return typer, has_chaos, has_golden
+end
+
 local function pv_show_record(r, with_header)
    if with_header then
       pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue" .. C.hdr .. " ===================")
@@ -256,28 +592,36 @@ local function pv_show_record(r, with_header)
    pv_echo(C.hdr .. "This room   : " .. C.val .. esc(r.newname) .. " " .. C.num .. "[" .. esc(r.newuid) .. "] "
            .. C.hdr .. "(" .. C.val .. esc(r.area) .. C.hdr .. ")")
    local areanote = ""
-   if r.same_area == false then
-      areanote = C.hdr .. " (in " .. C.val .. esc(r.parea or "?") .. C.hdr .. ")"
-   end
+   if r.same_area == false then areanote = C.hdr .. " (in " .. C.val .. esc(r.parea or "?") .. C.hdr .. ")" end
    pv_echo(C.hdr .. "From portal : " .. C.val .. esc(r.pname) .. " " .. C.num .. "[" .. esc(r.puid) .. "]" .. areanote)
    pv_echo(C.hdr .. "  command   : " .. C.ok .. esc(r.pcmd) .. " " .. C.hdr .. "(lvl " .. C.num .. esc(r.plevel) .. C.hdr .. ")")
    pv_echo(C.hdr .. "Speedwalk   : " .. C.ok .. (r.sw ~= "" and esc(r.sw) or "(adjacent)"))
    pv_echo(C.hdr .. "Movements   : " .. C.num .. r.moves .. C.hdr .. " walk + " .. C.num .. "1"
            .. C.hdr .. " portal = " .. C.num .. (r.moves + 1))
+   if not r.has_chaos then
+      pv_echo(C.hdr .. "No normals  : " .. C.bad .. "need to run portaldex scan")
+   elseif r.nn_moves then
+      pv_echo(C.hdr .. "No normals  : " .. C.num .. r.nn_moves .. C.hdr .. " walk + " .. C.num .. "1"
+              .. C.hdr .. " portal = " .. C.num .. (r.nn_moves + 1)
+              .. C.hdr .. "  from " .. C.val .. esc(r.nn_pname or "?") .. " " .. C.num .. "[" .. esc(r.nn_puid or "?") .. "]")
+   else
+      pv_echo(C.hdr .. "No normals  : " .. C.val .. "(none reachable)")
+   end
+   if not (r.has_chaos and r.has_golden) then
+      pv_echo(C.hdr .. "No chaos    : " .. C.bad .. "need to run portaldex scan")
+   elseif r.nc_moves then
+      pv_echo(C.hdr .. "No chaos    : " .. C.num .. r.nc_moves .. C.hdr .. " walk + " .. C.num .. "1"
+              .. C.hdr .. " portal = " .. C.num .. (r.nc_moves + 1)
+              .. C.hdr .. "  from " .. C.val .. esc(r.nc_pname or "?") .. " " .. C.num .. "[" .. esc(r.nc_puid or "?") .. "]")
+   else
+      pv_echo(C.hdr .. "No chaos    : " .. C.val .. "(none reachable)")
+   end
    pv_echo(recall_line(r.recall_rooms, r.recall_sw, r.recall_msg))
    if r.have_here then
       pv_echo(C.hdr .. "PS          : " .. C.val .. "You already have a portal here!")
    end
 end
 
-local function save_history()
-   SetVariable("history", serialize.save_simple(pv_history))
-end
-
--- core: given a room uid, find the shortest-walk portal across ALL areas and the
--- no-portal walking distance from recall, then report.
--- If "channel" is given (e.g. "spo", "clan", "tell bob"), send a one-line summary
--- to that channel instead of printing the full local report.
 local function compute_for_room(T, channel)
    T = tostring(T)
 
@@ -287,24 +631,14 @@ local function compute_for_room(T, channel)
               .. ". Type " .. C.ok .. "pvcheck" .. C.hdr .. " for details.")
       return
    end
-
    local ok_sql, sqlite3 = pcall(require, "sqlite3")
-   if not ok_sql then
-      pv_echo(C.hdr .. "[PortalValue] sqlite3 library unavailable.")
-      return
-   end
-
+   if not ok_sql then pv_echo(C.hdr .. "[PortalValue] sqlite3 library unavailable.") return end
    local db = sqlite3.open(dbpath)
-   if not db then
-      pv_echo(C.hdr .. "[PortalValue] Could not open the mapper database.")
-      return
-   end
+   if not db then pv_echo(C.hdr .. "[PortalValue] Could not open the mapper database.") return end
 
-   -- landing room area + name
    local area, tname
    for row in db:nrows(string.format("SELECT area, name FROM rooms WHERE uid=%s", q(T))) do
-      area  = row.area
-      tname = row.name
+      area = row.area; tname = row.name
    end
    if not area then
       db:close()
@@ -313,17 +647,12 @@ local function compute_for_room(T, channel)
       return
    end
 
-   -- do you already have a portal straight to this room? We still compute the
-   -- next-best portal as if you didn't (portals to this room are ignored below),
-   -- and just add a gentle note at the end.
    local have_portal_here = false
    for _ in db:nrows(string.format(
          "SELECT 1 AS x FROM exits WHERE fromuid IN ('*','**') AND touid=%s LIMIT 1", q(T))) do
       have_portal_here = true
    end
 
-   -- load ALL walking exits (incl. cexits) and build a reverse adjacency, so we
-   -- can breadth-first search the whole map backward from this room
    local radj = {}
    for row in db:nrows("SELECT fromuid AS f, touid AS t, dir AS d FROM exits WHERE fromuid NOT IN ('*','**')") do
       local t = tostring(row.t)
@@ -332,33 +661,24 @@ local function compute_for_room(T, channel)
       bucket[#bucket+1] = { from = tostring(row.f), dir = row.d }
    end
 
-   -- every saved portal (any area), tagged with its area so we can prefer local ones
    local portals = {}
    for row in db:nrows([[
          SELECT e.touid AS t, e.dir AS d, e.level AS lv, r.name AS nm, r.area AS ar
          FROM exits e JOIN rooms r ON r.uid = e.touid
          WHERE e.fromuid IN ('*','**')
    ]]) do
-      portals[#portals+1] = {
-         uid = tostring(row.t), cmd = row.d, level = row.lv,
-         name = row.nm, area = row.ar,
-      }
+      portals[#portals+1] = { uid = tostring(row.t), cmd = row.d, level = row.lv, name = row.nm, area = row.ar }
    end
 
-   -- recall room = destination of your recall/home portal (prefer one named "recall")
    local recall_uid
    for row in db:nrows("SELECT touid AS t, dir AS d FROM exits WHERE fromuid='**'") do
       if not recall_uid then recall_uid = tostring(row.t) end
-      if row.d and tostring(row.d):lower():find("recall") then
-         recall_uid = tostring(row.t)
-         break
-      end
+      if row.d and tostring(row.d):lower():find("recall") then recall_uid = tostring(row.t); break end
    end
    db:close()
 
-   -- global backward BFS from this room
    local dist = { [T] = 0 }
-   local fwd  = {}            -- fwd[node] = { dir =, nxt = }  forward step toward T
+   local fwd  = {}
    local queue, head = { T }, 1
    while head <= #queue do
       local cur = queue[head]; head = head + 1
@@ -376,7 +696,6 @@ local function compute_for_room(T, channel)
       end
    end
 
-   -- reconstruct the forward dir list from some start room to T
    local function path_dirs(start)
       local dirs, node = {}, start
       while node ~= T do
@@ -388,29 +707,30 @@ local function compute_for_room(T, channel)
       return dirs
    end
 
-   -- no-portal walking distance from recall
    local recall_rooms, recall_sw, recall_msg
-   if not recall_uid then
-      recall_msg = "no 'recall' portal saved in the mapper"
-   elseif recall_uid == T then
-      recall_rooms, recall_sw = 0, ""
-   elseif dist[recall_uid] == nil then
-      recall_msg = "no known no-portal walk from recall yet"
-   else
-      recall_sw, recall_rooms = build_speedwalk(path_dirs(recall_uid))
-   end
+   if not recall_uid then recall_msg = "no 'recall' portal saved in the mapper"
+   elseif recall_uid == T then recall_rooms, recall_sw = 0, ""
+   elseif dist[recall_uid] == nil then recall_msg = "no known no-portal walk from recall yet"
+   else recall_sw, recall_rooms = build_speedwalk(path_dirs(recall_uid)) end
 
-   -- shortest reachable portal by walking distance, across ALL areas (a portal in
-   -- another area can give a shorter total path than an in-area one). Ties break
-   -- toward a portal in this same area.
-   local best
+   local typer, has_chaos, has_golden = pv_portal_typer()
+   local best, best_nn, best_noch
    for _, pt in ipairs(portals) do
       if pt.uid ~= T and dist[pt.uid] ~= nil then
          local d = dist[pt.uid]
-         if (not best)
-            or d < best.d
-            or (d == best.d and pt.area == area and best.portal.area ~= area) then
+         if (not best) or d < best.d or (d == best.d and pt.area == area and best.portal.area ~= area) then
             best = { d = d, portal = pt }
+         end
+         local ty = typer and typer(pt.cmd) or nil
+         if ty ~= "chaos" then
+            if (not best_nn) or d < best_nn.d or (d == best_nn.d and pt.area == area and best_nn.portal.area ~= area) then
+               best_nn = { d = d, portal = pt }
+            end
+         end
+         if ty ~= "chaos" and ty ~= "golden chaos" then
+            if (not best_noch) or d < best_noch.d or (d == best_noch.d and pt.area == area and best_noch.portal.area ~= area) then
+               best_noch = { d = d, portal = pt }
+            end
          end
       end
    end
@@ -420,42 +740,46 @@ local function compute_for_room(T, channel)
               .. C.val .. esc(tname or "?") .. " " .. C.num .. "[" .. esc(T) .. "]" .. C.hdr
               .. " yet. (Explore the connecting rooms, or save a nearby portal.)")
       pv_echo(recall_line(recall_rooms, recall_sw, recall_msg))
-      if have_portal_here then
-         pv_echo(C.hdr .. "PS          : " .. C.val .. "You already have a portal here!")
-      end
+      if have_portal_here then pv_echo(C.hdr .. "PS          : " .. C.val .. "You already have a portal here!") end
       return
    end
 
    local sw, walkmoves = build_speedwalk(path_dirs(best.portal.uid))
 
+   local nn_moves, nn_pname, nn_puid
+   if best_nn then
+      _, nn_moves = build_speedwalk(path_dirs(best_nn.portal.uid))
+      nn_pname = best_nn.portal.name; nn_puid = best_nn.portal.uid
+   end
+   local nc_moves, nc_pname, nc_puid
+   if best_noch then
+      _, nc_moves = build_speedwalk(path_dirs(best_noch.portal.uid))
+      nc_pname = best_noch.portal.name; nc_puid = best_noch.portal.uid
+   end
+
    local rec = {
-      time         = os.date("%Y-%m-%d %H:%M"),
-      area         = area,
-      newname      = tname or "?",
-      newuid       = T,
-      pname        = best.portal.name or "?",
-      puid         = best.portal.uid,
-      parea        = best.portal.area or "?",
-      same_area    = (best.portal.area == area),
-      pcmd         = best.portal.cmd or "?",
-      plevel       = tostring(best.portal.level or 0),
-      sw           = sw,
-      moves        = walkmoves,
-      recall_rooms = recall_rooms,
-      recall_sw    = recall_sw,
-      recall_msg   = recall_msg,
-      have_here    = have_portal_here,
+      time = os.date("%Y-%m-%d %H:%M"), area = area, newname = tname or "?", newuid = T,
+      pname = best.portal.name or "?", puid = best.portal.uid, parea = best.portal.area or "?",
+      same_area = (best.portal.area == area), pcmd = best.portal.cmd or "?",
+      plevel = tostring(best.portal.level or 0), sw = sw, moves = walkmoves,
+      recall_rooms = recall_rooms, recall_sw = recall_sw, recall_msg = recall_msg,
+      have_here = have_portal_here,
+      has_chaos = has_chaos or false, has_golden = has_golden or false,
+      nn_moves = nn_moves, nn_pname = nn_pname, nn_puid = nn_puid,
+      nc_moves = nc_moves, nc_pname = nc_pname, nc_puid = nc_puid,
    }
    table.insert(pv_history, rec)
    save_history()
 
    if channel then
-      -- one-line channel summary (no speedwalks). Recall shows N/A when there is
-      -- no known no-portal walking route from recall to here.
       local recall_disp = (recall_rooms ~= nil) and tostring(recall_rooms) or "N/A"
+      local nn_disp = (has_chaos and nn_moves) and tostring(nn_moves + 1) or "N/A"
+      local nc_disp = (has_chaos and has_golden and nc_moves) and tostring(nc_moves + 1) or "N/A"
       local summary = C.val .. esc(area) .. " " .. esc(tname or "?") .. C.hdr .. " (" .. C.num .. T .. C.hdr .. "): ["
          .. C.num .. (walkmoves + 1) .. C.hdr .. " movements from " .. C.val .. esc(best.portal.area or "?")
          .. " " .. esc(best.portal.name or "?") .. C.hdr .. " (" .. C.num .. best.portal.uid .. C.hdr .. ")] ["
+         .. C.num .. nn_disp .. C.hdr .. " no normals] ["
+         .. C.num .. nc_disp .. C.hdr .. " no chaos] ["
          .. C.num .. recall_disp .. C.hdr .. " portaless movements from recall" .. C.hdr .. "]"
       Send(channel .. " " .. summary)
       pv_echo(C.hdr .. "[PortalValue] Sent summary to " .. C.val .. esc(channel) .. C.hdr .. "."
@@ -466,8 +790,6 @@ local function compute_for_room(T, channel)
    pv_show_record(rec, true)
 end
 
--- read the current room's vnum from GMCP, then run the calculation.
--- channel (optional) routes a one-line summary to that channel instead.
 local function process_current_room(channel)
    local _, data = CallPlugin(GMCP_ID, "gmcpval", "room.info")
    local room
@@ -479,27 +801,17 @@ local function process_current_room(channel)
    compute_for_room(tostring(room.num), channel)
 end
 
--- ===== alias entry points (must be global) =====
+-- ===== pathing alias entry points =====
 
-function pv_test()
-   process_current_room()
-end
+function pv_test() process_current_room() end
 
--- "pv <channel>" -> post a one-line summary to that channel
 function pv_channel(name, line, wc)
    local channel = (wc[1] or ""):gsub("^%s+", ""):gsub("%s+$", "")
-   if channel == "" then
-      process_current_room()
-   else
-      process_current_room(channel)
-   end
+   if channel == "" then process_current_room() else process_current_room(channel) end
 end
 
-function pv_history()
-   if #pv_history == 0 then
-      pv_echo(C.hdr .. "[PortalValue] History is empty.")
-      return
-   end
+function pv_show_history()
+   if #pv_history == 0 then pv_echo(C.hdr .. "[PortalValue] History is empty.") return end
    pv_echo(C.hdr .. "========= " .. C.num .. "PortalValue history (" .. #pv_history .. ")" .. C.hdr .. " =========")
    for i, r in ipairs(pv_history) do
       local pnote = (r.same_area == false) and (C.hdr .. " (in " .. C.val .. esc(r.parea or "?") .. C.hdr .. ")") or ""
@@ -523,17 +835,12 @@ function pv_toggle_debug()
    pv_echo(C.hdr .. "[PortalValue] Debug " .. C.num .. (pv_debug and "ON" or "OFF") .. C.hdr .. ".")
 end
 
--- self-diagnostics: confirms the plugin can see this install's mapper + database.
--- Safe to run on anyone's machine; tells them exactly what's missing if anything.
 function pv_check()
    pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue check" .. C.hdr .. " ===================")
-
    local has_mapper = IsPluginInstalled(MAPPER_ID)
    pv_echo(C.hdr .. "Mapper plugin : " .. (has_mapper and (C.ok .. "found") or (C.bad .. "NOT installed")))
-
    local has_gmcp = IsPluginInstalled(GMCP_ID)
    pv_echo(C.hdr .. "GMCP handler  : " .. (has_gmcp and (C.ok .. "found") or (C.bad .. "NOT installed")))
-
    local path, why = get_db_path()
    if not path then
       pv_echo(C.hdr .. "Database      : " .. C.bad .. esc(why or "not found"))
@@ -542,65 +849,78 @@ function pv_check()
       return
    end
    pv_echo(C.hdr .. "Database      : " .. C.ok .. esc(path))
-
    local ok_sql, sqlite3 = pcall(require, "sqlite3")
-   if not ok_sql then
-      pv_echo(C.hdr .. "SQLite        : " .. C.bad .. "library unavailable")
-      return
-   end
+   if not ok_sql then pv_echo(C.hdr .. "SQLite        : " .. C.bad .. "library unavailable") return end
    local db = sqlite3.open(path)
-   if not db then
-      pv_echo(C.hdr .. "SQLite        : " .. C.bad .. "could not open the database")
-      return
-   end
+   if not db then pv_echo(C.hdr .. "SQLite        : " .. C.bad .. "could not open the database") return end
    local nrooms, nportals = 0, 0
    for row in db:nrows("SELECT count(*) AS c FROM rooms") do nrooms = row.c end
    for row in db:nrows("SELECT count(*) AS c FROM exits WHERE fromuid IN ('*','**')") do nportals = row.c end
    db:close()
+   local _, ncat = count_types()
    pv_echo(C.hdr .. "Rooms mapped  : " .. C.num .. nrooms)
    pv_echo(C.hdr .. "Saved portals : " .. C.num .. nportals)
+   pv_echo(C.hdr .. "Catalogued    : " .. C.num .. ncat)
    if nportals == 0 then
-      pv_echo(C.ok .. "Ready, " .. C.hdr .. "but you have no saved mapper portals yet. Add some with the")
-      pv_echo(C.hdr .. "mapper's " .. C.val .. "'mapper portal <command>'" .. C.hdr .. " before " .. C.val .. "pv" .. C.hdr .. " can find anything.")
+      pv_echo(C.ok .. "Ready, " .. C.hdr .. "but you have no saved mapper portals yet (add with 'mapper portal <command>').")
    else
       pv_echo(C.ok .. "Ready. Stand in a room and type " .. C.val .. "pv" .. C.ok .. ".")
    end
 end
 
-function pv_usage()
-   pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue" .. C.hdr .. " ===================")
-   pv_echo(C.val .. "Stand in a room and find the nearest saved portal + speedwalk to it.")
-   pv_echo(C.hdr .. "  pv                 " .. C.val .. "- calculate for the room you're in")
+-- combined help (both "portalvalue help" and "portaldex help" land here)
+function pv_help_all()
+   pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue " .. C.val .. "3.0" .. C.hdr .. " ===================")
+   pv_echo(C.val .. "Find the nearest portal to walk from, and catalog your portals by type.")
+   pv_echo(C.hdr .. "-- pathing --")
+   pv_echo(C.hdr .. "  pv                 " .. C.val .. "- nearest portal + speedwalk to your room")
    pv_echo(C.hdr .. "  pv <channel>       " .. C.val .. "- post a one-line summary to a channel (e.g. pv spo)")
-   pv_echo(C.hdr .. "  portalvaluehistory " .. C.val .. "- list all results")
-   pv_echo(C.hdr .. "  portalvaluepurge   " .. C.val .. "- clear the history")
-   pv_echo(C.hdr .. "  pvcheck            " .. C.val .. "- verify it's set up correctly on this client")
+   pv_echo(C.hdr .. "  portalvaluehistory " .. C.val .. "- list past results")
+   pv_echo(C.hdr .. "  portalvaluepurge   " .. C.val .. "- clear history")
+   pv_echo(C.hdr .. "  pvcheck            " .. C.val .. "- verify mapper / database setup")
+   pv_echo(C.hdr .. "-- catalog --")
+   pv_echo(C.hdr .. "  portaldex          " .. C.val .. "- catalog summary (counts by type)")
+   pv_echo(C.hdr .. "  portaldex list [t] " .. C.val .. "- list catalogued portals (optional filter)")
+   pv_echo(C.hdr .. "  portaldex scan     " .. C.val .. "- id saved portals (also: scan stop/restart/missing)")
+   pv_echo(C.hdr .. "  portaldex missing  " .. C.val .. "- mapper portals not yet catalogued")
+   pv_echo(C.hdr .. "  portaldex bag <kw> " .. C.val .. "- set portal container keyword (used by scan)")
+   pv_echo(C.hdr .. "  portaldex auto on|off " .. C.val .. "- catalog-as-you-go toggle")
+   pv_echo(C.hdr .. "  portaldex speed <s>   " .. C.val .. "- scan pacing (seconds per portal)")
+   pv_echo(C.hdr .. "  portaldex clear    " .. C.val .. "- wipe the catalog")
+   pv_echo(C.hdr .. "Portals also catalog automatically whenever you " .. C.ok .. "id" .. C.hdr .. " one.")
+   pv_echo(C.bad .. "Scan uses the LAST item id/keyword in each mapper portal command.")
 end
 
--- ===== lifecycle =====
+-- ===== lifecycle (does both halves) =====
 
 function OnPluginInstall()
-   require "serialize"
+   -- catalog (own file) + one-time migration from the old PortalDex plugin variable
+   pd_load()
+   if next(catalog) == nil then
+      local saved = GetVariable("catalog")
+      if saved and saved ~= "" then
+         local ok, t = pcall(function() return assert(loadstring("return "..saved))() end)
+         if ok and type(t) == "table" then catalog = t; pd_save() end
+      end
+   end
+   -- pv history (plugin state)
    local saved = GetVariable("history")
    if saved and saved ~= "" then
       local ok, t = pcall(function() return assert(loadstring("return " .. saved))() end)
-      if ok and type(t) == "table" then
-         pv_history = t
-      else
-         pv_history = {}
-      end
+      pv_history = (ok and type(t) == "table") and t or {}
    else
       pv_history = {}
    end
-   pv_echo(C.hdr .. "[PortalValue] Loaded. " .. C.num .. #pv_history .. C.hdr .. " saved result(s). Type "
-           .. C.ok .. "portalvalue help" .. C.hdr .. " for help.")
-   -- Verify setup automatically so a new user knows immediately whether it works.
-   -- Deferred a couple seconds so it isn't fooled by plugin load order at startup
-   -- (the mapper may not have finished loading at our install moment).
-   DoAfterSpecial(2, "pv_check()", 12)   -- 12 = sendto.script
+   local _, total = count_types()
+   pv_echo(C.hdr .. "[PortalValue] Loaded v3.0. " .. C.num .. #pv_history .. C.hdr .. " result(s), "
+           .. C.num .. total .. C.hdr .. " portal(s) cataloged ("
+           .. (pd_auto and (C.ok .. "auto ON") or (C.bad .. "auto OFF")) .. C.hdr .. "). Type "
+           .. C.ok .. "portalvalue help" .. C.hdr .. ".")
+   DoAfterSpecial(2, "pv_check()", 12)
 end
 
 function OnPluginSaveState()
+   pd_save()
    save_history()
 end
 
