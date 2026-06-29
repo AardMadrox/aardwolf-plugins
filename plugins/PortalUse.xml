@@ -1,0 +1,569 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE muclient>
+<muclient>
+  <plugin
+     name="PortalUse"
+     author="Eric"
+     id="3fa92c7bd184e55a9c02b6da"
+     language="Lua"
+     purpose="Tracks worn portal usage with colour output; can show destination area from PortalDex."
+     date_written="2026-06-08"
+     version="2.0"
+  >
+  </plugin>
+
+  <aliases>
+    <alias match="portalusetop *"     enabled="y" ignore_case="y" regexp="n" script="OnPortalUseTop" />
+    <alias match="^portaluse(?!top)(?! help)(.*)$"  enabled="y" ignore_case="y" regexp="y" script="OnPortalUsage" />
+    <alias match="portalusage*"       enabled="y" ignore_case="y" script="OnPortalUsage" />
+    <alias match="portalignore *"     enabled="y" ignore_case="y" script="OnPortalIgnore" />
+    <alias match="portalreset*"       enabled="y" ignore_case="y" script="OnPortalReset" />
+    <alias match="portalclean"        enabled="y" ignore_case="y" script="OnPortalClean" />
+    <alias match="portalhelp"         enabled="y" ignore_case="y" script="OnPortalHelp" />
+    <alias match="portaluse help"     enabled="y" ignore_case="y" script="OnPortalHelp" />
+    <alias match="portalscan"         enabled="y" ignore_case="y" script="OnPortalScan" />
+    <alias match="portalsetbag *"     enabled="y" ignore_case="y" script="OnPortalSetBag" />
+    <alias match="portalsetbag"       enabled="y" ignore_case="y" script="OnPortalSetBag" />
+    <alias match="portalarea *"       enabled="y" ignore_case="y" script="OnPortalArea" />
+    <alias match="portalarea"         enabled="y" ignore_case="y" script="OnPortalArea" />
+  </aliases>
+
+  <triggers>
+    <trigger
+       enabled="y"
+       regexp="y"
+       match="You stop using (.+) as a portal"
+       script="OnPortalEnter"
+    />
+    <trigger
+       name="scan_start"
+       enabled="n"
+       regexp="y"
+       match="^.+ contains:$"
+       script="OnScanStart"
+    />
+    <trigger
+       name="scan_item"
+       enabled="n"
+       regexp="y"
+       match="^\s*(?:\(\s*\d+\)\s+)?\(K\)\s+(.+?)\s+\(\d+\)\s*$"
+       script="OnScanItem"
+    />
+    <trigger
+       name="scan_end"
+       enabled="n"
+       regexp="y"
+       match="^(You have \d+|There are no items|The \w+ is empty)"
+       script="OnScanEnd"
+    />
+  </triggers>
+
+  <script>
+<![CDATA[
+---------------------------------------------------------
+-- PortalUse 2.0  (formerly Portal Usage Tracker v8.0)
+---------------------------------------------------------
+
+local usage      = {}
+local ignore     = {}
+local colors     = {}
+local data_file  = "PortalUse.dat"
+local bag_keyword = ""
+local scan_active = false
+local show_area   = false   -- show destination area (from PortalValue 3.0's catalog)
+
+-- theme colours (RGB hex of @x099 / @x045 / @W / @x048) for our own output;
+-- portal NAME rendering keeps its own captured colours and is never changed.
+local TC = { hdr = "#875fff", val = "#00d7ff", num = "#ffffff", ok = "#00ff87" }
+
+-- Read the portal catalog written by PortalValue 3.0 (PortalDex folded in) and
+-- return a map of lowercased portal name -> destination area ("Leads to").
+-- Returns {} if PortalValue 3.0 isn't installed / hasn't scanned.
+local function load_portaldex_areas ()
+  local f = io.open(GetInfo(66) .. "PortalDex_data.lua", "r")
+  if not f then return {} end
+  local content = f:read("*a"); f:close()
+  local ok, data = pcall(function() return assert(loadstring(content))() end)
+  if not ok or type(data) ~= "table" or type(data.catalog) ~= "table" then return {} end
+  local map = {}
+  for _, e in pairs(data.catalog) do
+    if e.name and e.leads and e.leads ~= "?" then map[e.name:lower()] = e.leads end
+  end
+  return map
+end
+
+---------------------------------------------------------
+-- Utility
+---------------------------------------------------------
+
+local function clean_name (s)
+  s = s:gsub("\27%[[0-9;]*m", "")
+  s = s:gsub("<[^>]+>", "")
+  s = s:match("^%s*(.-)%s*$")
+  return s
+end
+
+local function rgb_to_hex (n)
+  if not n then return "#ffffff" end
+  local r = n % 256
+  local g = math.floor(n / 256) % 256
+  local b = math.floor(n / 65536) % 256
+  return string.format("#%02x%02x%02x", r, g, b)
+end
+
+local function rgb_to_xterm (n)
+  if not n then return 7 end
+  local r = n % 256
+  local g = math.floor(n / 256) % 256
+  local b = math.floor(n / 65536) % 256
+  if r == g and g == b then
+    if r < 8   then return 16 end
+    if r > 238 then return 231 end
+    return math.floor((r - 8) / 10) + 232
+  end
+  local function to6 (v)
+    if v < 48  then return 0
+    elseif v < 115 then return 1
+    elseif v < 155 then return 2
+    elseif v < 195 then return 3
+    elseif v < 235 then return 4
+    else return 5 end
+  end
+  return 16 + 36 * to6(r) + 6 * to6(g) + to6(b)
+end
+
+local function extract_name_styles (styles, plain_name)
+  if not styles or #styles == 0 then return nil end
+  local full_text = ""
+  for _, sp in ipairs(styles) do
+    full_text = full_text .. (sp.text or "")
+  end
+  local s, e = full_text:find(plain_name, 1, true)
+  if not s then return nil end
+  local result = {}
+  local pos = 1
+  for _, sp in ipairs(styles) do
+    local sp_text = sp.text or ""
+    local sp_end  = pos + #sp_text - 1
+    if sp_end >= s and pos <= e then
+      local clip_s = math.max(pos, s)
+      local clip_e = math.min(sp_end, e)
+      local clipped = sp_text:sub(clip_s - pos + 1, clip_e - pos + 1)
+      if clipped ~= "" then
+        table.insert(result, {
+          text  = clipped,
+          fore  = rgb_to_hex(sp.textcolour),
+          xterm = rgb_to_xterm(sp.textcolour),
+        })
+      end
+    end
+    pos = pos + #sp_text
+  end
+  return #result > 0 and result or nil
+end
+
+-- Build an Aardwolf @xNNN colour-coded string from spans (for channel output)
+local function spans_to_aard (spans)
+  if not spans then return nil end
+  local t = {}
+  for _, sp in ipairs(spans) do
+    table.insert(t, string.format("@x%03d", sp.xterm) .. sp.text)
+  end
+  return table.concat(t) .. "@w"
+end
+
+---------------------------------------------------------
+-- File save / load
+---------------------------------------------------------
+
+local function hex_enc (s)
+  return (s:gsub(".", function(c) return string.format("%02X", string.byte(c)) end))
+end
+
+local function hex_dec (s)
+  return (s:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end))
+end
+
+local function save_data ()
+  local f = io.open(data_file, "w")
+  if not f then
+    ColourNote("white","red","[PortalUse] Cannot write: " .. data_file)
+    return
+  end
+  f:write("USAGE\n")
+  for portal, count in pairs(usage) do
+    f:write(portal .. "|" .. tostring(count) .. "\n")
+  end
+  f:write("IGNORE\n")
+  for portal in pairs(ignore) do
+    f:write(portal .. "\n")
+  end
+  f:write("BAG\n")
+  f:write(bag_keyword .. "\n")
+  f:write("AREA\n")
+  f:write((show_area and "1" or "0") .. "\n")
+  f:write("COLORS\n")
+  for portal, spans in pairs(colors) do
+    local parts = {}
+    for _, sp in ipairs(spans) do
+      table.insert(parts, hex_enc(sp.text) .. ":" .. sp.fore .. ":" .. tostring(sp.xterm))
+    end
+    f:write(hex_enc(portal) .. "|" .. table.concat(parts, ",") .. "\n")
+  end
+  f:close()
+end
+
+local function load_data ()
+  local f = io.open(data_file, "r")
+  if not f then return end
+  usage  = {}
+  ignore = {}
+  colors = {}
+  local section = "usage"
+  for line in f:lines() do
+    if     line == "USAGE"  then section = "usage"
+    elseif line == "IGNORE" then section = "ignore"
+    elseif line == "BAG"    then section = "bag"
+    elseif line == "AREA"   then section = "area"
+    elseif line == "COLORS" then section = "colors"
+    elseif section == "usage" then
+      local name, count = line:match("^(.*)|(%d+)$")
+      if name and count then usage[name] = tonumber(count) end
+    elseif section == "ignore" and line ~= "" then
+      ignore[line] = true
+    elseif section == "bag" and line ~= "" then
+      bag_keyword = line
+    elseif section == "area" and line ~= "" then
+      show_area = (line == "1")
+    elseif section == "colors" and line ~= "" then
+      local enc_portal, spans_str = line:match("^([^|]+)|(.+)$")
+      if enc_portal and spans_str then
+        local portal = hex_dec(enc_portal)
+        local spans = {}
+        for part in spans_str:gmatch("[^,]+") do
+          local enc_text, fore, xterm = part:match("^([^:]+):(#%x+):(%d+)$")
+          if enc_text and fore and xterm then
+            table.insert(spans, { text = hex_dec(enc_text), fore = fore, xterm = tonumber(xterm) })
+          end
+        end
+        if #spans > 0 then colors[portal] = spans end
+      end
+    end
+  end
+  f:close()
+end
+
+---------------------------------------------------------
+-- Plugin lifecycle
+---------------------------------------------------------
+
+function OnPluginInstall ()
+  load_data()
+  OnPortalHelp()
+end
+
+---------------------------------------------------------
+-- Scan
+---------------------------------------------------------
+
+local expecting_header = false
+
+function start_scan ()
+  if bag_keyword == "" then
+    ColourNote("white","red","[PortalUse] No bag set. Use: portalsetbag <keyword>")
+    return
+  end
+  scan_active      = false
+  expecting_header = true
+  EnableTrigger("scan_start", true)
+  EnableTrigger("scan_item",  false)
+  EnableTrigger("scan_end",   false)
+  ColourNote(TC.val,"","[PortalUse] Scanning " .. bag_keyword .. " for colours...")
+  SendNoEcho("exa " .. bag_keyword)
+  -- Safety timeout in case scan_end trigger never fires
+  DoAfterSpecial(3, "CallPlugin('3fa92c7bd184e55a9c02b6da','scan_timeout','')", sendto.script)
+end
+
+function OnScanStart (name, line, wildcards, styles)
+  if not expecting_header then return end
+  expecting_header = false
+  EnableTrigger("scan_start", false)
+  scan_active = true
+  EnableTrigger("scan_item", true)
+  EnableTrigger("scan_end",  true)
+end
+
+function OnScanItem (name, line, wildcards, styles)
+  if not scan_active then return end
+  local plain_name = clean_name(wildcards[1])
+  if plain_name == "" then return end
+  if ignore[plain_name] then return end
+  if not usage[plain_name] then
+    usage[plain_name] = 0
+  end
+  local spans = extract_name_styles(styles, plain_name)
+  if spans then colors[plain_name] = spans end
+end
+
+function OnScanEnd (name, line, wildcards, styles)
+  scan_active      = false
+  expecting_header = false
+  EnableTrigger("scan_start", false)
+  EnableTrigger("scan_item",  false)
+  EnableTrigger("scan_end",   false)
+  save_data()
+  ColourNote(TC.val,"","[PortalUse] Scan complete. (matched: [" .. line .. "])")
+end
+
+function scan_timeout ()
+  if scan_active then
+    scan_active      = false
+    expecting_header = false
+    EnableTrigger("scan_start", false)
+    EnableTrigger("scan_item",  false)
+    EnableTrigger("scan_end",   false)
+    save_data()
+    ColourNote(TC.val,"","[PortalUse] Scan complete (timeout).")
+  end
+end
+
+---------------------------------------------------------
+-- Trigger: worn portal usage
+---------------------------------------------------------
+
+function OnPortalEnter (name, line, wildcards, styles)
+  local portal = clean_name(wildcards[1])
+  if ignore[portal] then return end
+  usage[portal] = (usage[portal] or 0) + 1
+  if not colors[portal] then
+    local spans = extract_name_styles(styles, portal)
+    if spans then colors[portal] = spans end
+  end
+  save_data()
+end
+
+---------------------------------------------------------
+-- portaluse / portalusage
+---------------------------------------------------------
+
+function OnPortalUsage (name, line, wildcards)
+  local mode = string.match(line, "^%S+%s+(%S+)$")
+  mode = mode and string.lower(mode) or "high"
+
+  local list = {}
+  for portal, count in pairs(usage) do
+    table.insert(list, { portal = portal, count = count })
+  end
+
+  if     mode == "alpha"  then table.sort(list, function(a,b) return a.portal < b.portal end)
+  elseif mode == "ralpha" then table.sort(list, function(a,b) return a.portal > b.portal end)
+  elseif mode == "low"    then table.sort(list, function(a,b) return a.count  < b.count  end)
+  else                         table.sort(list, function(a,b) return a.count  > b.count  end)
+  end
+
+  ColourNote(TC.hdr,"","Portal Usage (" .. mode .. ")")
+
+  local areas = show_area and load_portaldex_areas() or nil
+
+  for _, entry in ipairs(list) do
+    if not ignore[entry.portal] then          -- still honour the ignore list
+      local spans = colors[entry.portal]
+      if spans then
+        for _, sp in ipairs(spans) do
+          ColourTell(sp.fore, "", sp.text)
+        end
+      else
+        ColourTell("blue","", entry.portal)
+      end
+      if areas then
+        local a = areas[entry.portal:lower()]
+        if a then ColourTell(TC.val,"", " [" .. a .. "]") end
+      end
+      ColourTell(TC.hdr, "", " USES: ")
+      ColourTell(TC.num, "", tostring(entry.count))
+      Note("")
+    end
+  end
+  Note("")
+  Note("")
+end
+
+---------------------------------------------------------
+-- portalusetop
+---------------------------------------------------------
+
+function OnPortalUseTop (name, line, wildcards)
+  local channel = line:match("^portalusetop%s+(%S+)$")
+  if not channel or channel == "" then
+    ColourNote("white","red","Usage: portalusetop <channel>")
+    return
+  end
+
+  local list = {}
+  for portal, count in pairs(usage) do
+    if not ignore[portal] then                 -- still honour the ignore list
+      table.insert(list, { portal = portal, count = count })
+    end
+  end
+  table.sort(list, function(a,b) return a.count > b.count end)
+
+  local areas = show_area and load_portaldex_areas() or nil
+
+  local parts = {}
+  for i = 1, math.min(5, #list) do
+    local entry = list[i]
+    local aard  = spans_to_aard(colors[entry.portal]) or entry.portal
+    local areatag = ""
+    if areas then
+      local a = areas[entry.portal:lower()]
+      if a then areatag = "@x045 [" .. a .. "]@w" end
+    end
+    parts[i] = aard .. areatag .. "@w(" .. entry.count .. ")"
+  end
+
+  local msg = "Top portals: " .. table.concat(parts, "@w | ")
+  Send(channel .. " " .. msg)
+end
+
+---------------------------------------------------------
+-- portalignore
+---------------------------------------------------------
+
+function OnPortalIgnore (name, line, wildcards)
+  local arg = wildcards[1]
+  if not arg or arg == "" then
+    ColourNote("white","red","Usage: portalignore <portal> | portalignore list")
+    return
+  end
+  if string.lower(arg) == "list" then
+    ColourNote(TC.hdr,"","Ignored portals:")
+    local any = false
+    for portal in pairs(ignore) do
+      any = true
+      ColourTell("yellow","",portal)
+      Note("")
+    end
+    if not any then ColourNote(TC.num,"","(none)") end
+    return
+  end
+  local portal = clean_name(arg)
+  if ignore[portal] then
+    ignore[portal] = nil
+    ColourNote("white","red","Removed from ignore list: " .. portal)
+  else
+    ignore[portal] = true
+    ColourNote(TC.ok,"","Added to ignore list: " .. portal)
+  end
+  save_data()
+end
+
+---------------------------------------------------------
+-- portalreset
+---------------------------------------------------------
+
+function OnPortalReset (name, line, wildcards)
+  local arg = string.match(line, "^portalreset%s+(.*)$")
+  if not arg or arg == "" then
+    ColourNote("white","red","Usage: portalreset all | portalreset <portal>")
+    return
+  end
+  if string.lower(arg) == "all" then
+    usage  = {}
+    colors = {}
+    ColourNote(TC.hdr,"","All portal usage reset.")
+    save_data()
+    return
+  end
+  local portal = clean_name(arg)
+  if usage[portal] then
+    usage[portal]  = nil
+    colors[portal] = nil
+    ColourNote(TC.ok,"","Reset usage for: " .. portal)
+  else
+    ColourNote("white","red","No usage found for: " .. portal)
+  end
+  save_data()
+end
+
+---------------------------------------------------------
+-- portalscan / portalsetbag
+---------------------------------------------------------
+
+function OnPortalScan (name, line, wildcards)
+  start_scan()
+end
+
+function OnPortalSetBag (name, line, wildcards)
+  local arg = wildcards[1] and wildcards[1]:match("^%s*(.-)%s*$") or ""
+  if arg == "" then
+    if bag_keyword == "" then
+      ColourNote(TC.val,"","[PortalUse] No bag keyword set. Use: portalsetbag <keyword>")
+    else
+      ColourNote(TC.val,"","[PortalUse] Current bag keyword: " .. bag_keyword)
+    end
+    return
+  end
+  bag_keyword = arg
+  ColourNote(TC.val,"","[PortalUse] Bag keyword set to: " .. bag_keyword)
+  save_data()
+end
+
+---------------------------------------------------------
+-- portalclean
+---------------------------------------------------------
+
+function OnPortalClean (name, line, wildcards)
+  local removed = 0
+  for portal, count in pairs(usage) do
+    if count == 0 then
+      usage[portal]  = nil
+      colors[portal] = nil
+      removed = removed + 1
+    end
+  end
+  save_data()
+  ColourNote(TC.val,"","[PortalUse] Removed " .. removed .. " portal(s) with 0 uses.")
+end
+
+---------------------------------------------------------
+-- portalarea
+---------------------------------------------------------
+
+function OnPortalArea (name, line, wildcards)
+  local arg = (line:match("^portalarea%s+(%S+)") or ""):lower()
+  if     arg == "on"  then show_area = true
+  elseif arg == "off" then show_area = false
+  elseif arg == ""    then show_area = not show_area
+  else ColourNote("white","red","Usage: portalarea on|off"); return end
+  save_data()
+  ColourNote(TC.val,"","[PortalUse] Destination area display is " .. (show_area and "ON" or "OFF") .. ".")
+  if show_area and next(load_portaldex_areas()) == nil then
+    ColourNote("white","red","  (No catalog found - this needs PortalValue 3.0 or higher, with a 'portaldex scan' done.)")
+  end
+end
+
+---------------------------------------------------------
+-- portalhelp
+---------------------------------------------------------
+
+function OnPortalHelp ()
+  ColourNote(TC.hdr,"","PortalUse 2.0")
+  ColourNote(TC.val,"","Commands:")
+  ColourNote(TC.val,"","  portaluse [mode]           -- Show usage (high, low, alpha, ralpha)")
+  ColourNote(TC.val,"","  portalusetop <channel>     -- Send top 5 portals to a channel")
+  ColourNote(TC.val,"","  portalscan                 -- Refresh colours, add untracked portals with 0 uses")
+  ColourNote(TC.val,"","  portalsetbag <keyword>     -- Set the bag keyword for portalscan")
+  ColourNote(TC.val,"","  portalarea on|off          -- Show destination area next to each portal")
+  ColourNote(TC.num, "","       requires PortalValue 3.0 or higher (uses its portal catalog)")
+  ColourNote(TC.val,"","  portalignore <portal>      -- Toggle ignoring a portal")
+  ColourNote(TC.val,"","  portalignore list          -- Show ignored portals")
+  ColourNote(TC.val,"","  portalclean                -- Remove all portals with 0 uses")
+  ColourNote(TC.val,"","  portalreset all            -- Reset all usage")
+  ColourNote(TC.val,"","  portalreset <portal>       -- Reset one portal")
+  ColourNote(TC.val,"","  portalhelp                 -- Show this help")
+end
+
+]]>
+  </script>
+
+</muclient>
