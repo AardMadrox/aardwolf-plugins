@@ -7,7 +7,7 @@
    id="A3F9C2E7B14D608F5A2C9E31"
    language="Lua"
    purpose="Times Matron Dragon runs and reports rewards"
-   version="1.0"
+   version="1.1"
 >
 </plugin>
 
@@ -88,9 +88,10 @@
   >
   </trigger>
 
-  <!-- Trivia Point Token (Glass/Crystal/Stone or any future variant) -->
+  <!-- Trivia Point Token (Glass/Crystal/Stone/Golden Dune or any future variant;
+       the name can be more than one word, so match any text before "Trivia Point Token") -->
   <trigger
-    match="^You manage to loot a \w+ Trivia Point Token from the lair\.$"
+    match="^You manage to loot a .+ Trivia Point Token from the lair\.$"
     enabled="y"
     sequence="100"
     script="LootGlassToken"
