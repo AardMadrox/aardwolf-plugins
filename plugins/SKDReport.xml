@@ -10,7 +10,7 @@
    purpose="Times Spectre of the Deep (SKD) fights and reports trains/gold/TP/Repop Token/Sigil rewards"
    date_written="2026-06-21"
    requires="4.71"
-   version="1.0"
+   version="1.1"
    save_state="y"
    >
 </plugin>
@@ -203,6 +203,26 @@
      match="^skdreportlife$"
      sequence="100"
      script="SendLifeReport"
+     >
+  </alias>
+
+  <alias
+     name="skd_day_send"
+     enabled="y"
+     regexp="y"
+     match="^skdreportday\s+(\S+)$"
+     sequence="100"
+     script="SendDayReport"
+     >
+  </alias>
+
+  <alias
+     name="skd_day_send_default"
+     enabled="y"
+     regexp="y"
+     match="^skdreportday$"
+     sequence="100"
+     script="SendDayReport"
      >
   </alias>
 
@@ -617,9 +637,7 @@ end
 --  Lifetime stats display
 -- ===========================================================
 
-local function BuildLifeLine()
-  local t = ComputeLifeTotals()
-
+local function BuildSummaryLine(label, t)
   local life_time_str
   if t.elapsed >= 3600 then
     life_time_str = string.format("%d:%02d:%02d",
@@ -645,7 +663,7 @@ local function BuildLifeLine()
   end
 
   local segs = {
-    {"cyan",   "SKD Life"},
+    {"cyan",   label},
     {"white",  ": ["},
     {"yellow", "Runs"},
     {"white",  ": "},
@@ -707,6 +725,47 @@ local function BuildLifeLine()
   return parts, aard
 end
 
+local function BuildLifeLine()
+  return BuildSummaryLine("SKD Life", ComputeLifeTotals())
+end
+
+-- Most recent 7am (today's 7am, or yesterday's if it's currently before 7am).
+local function GetDayCutoff()
+  local now = os.time()
+  local t = os.date("*t", now)
+  t.hour, t.min, t.sec = 7, 0, 0
+  local cutoff = os.time(t)
+  if now < cutoff then
+    cutoff = cutoff - 86400
+  end
+  return cutoff
+end
+
+-- Sum only runs completed since the most recent 7am. Legacy batch entries
+-- (no real timestamp) are never counted toward the daily total.
+local function ComputeDayTotals()
+  local runs = DeserializeRuns()
+  local cutoff = GetDayCutoff()
+  local t = { runs=0, elapsed=0, trains=0, gold=0, tp=0, qp=0, repop=0, sigil=0 }
+  for _, r in ipairs(runs) do
+    if not r.legacy and r.ts and r.ts >= cutoff then
+      t.runs    = t.runs    + 1
+      t.elapsed = t.elapsed + (r.e  or 0)
+      t.trains  = t.trains  + (r.tr or 0)
+      t.gold    = t.gold    + (r.g  or 0)
+      t.tp      = t.tp      + (r.tp or 0)
+      t.qp      = t.qp      + (r.qp or 0)
+      t.repop   = t.repop   + (r.rp or 0)
+      t.sigil   = t.sigil   + (r.si or 0)
+    end
+  end
+  return t
+end
+
+local function BuildDayLine()
+  return BuildSummaryLine("SKD Day", ComputeDayTotals())
+end
+
 function ShowSKDLife(name, line, wildcards)
   local parts, aard = BuildLifeLine()
   ColourNote(unpack(parts))
@@ -720,6 +779,21 @@ function SendLifeReport(name, line, wildcards)
   end
   local parts, aard = BuildLifeLine()
   Send(dest .. " " .. aard)
+end
+
+function SendDayReport(name, line, wildcards)
+  local t = ComputeDayTotals()
+  local dest = (wildcards[1] and wildcards[1] ~= "") and wildcards[1] or GetVariable("channel")
+  if t.runs == 0 then
+    ColourNote("white", "", "SKDReport: no SKD runs since 7am yet.")
+    return
+  end
+  local parts, aard = BuildDayLine()
+  if dest and dest ~= "" then
+    Send(dest .. " " .. aard)
+  else
+    ColourNote(unpack(parts))
+  end
 end
 
 function ResetSKDLife(name, line, wildcards)
@@ -763,6 +837,10 @@ function ShowSKDHelp(name, line, wildcards)
   P({
     {"white","  "},{"cyan","skdreportlife"},{"white"," "},{"yellow","[channel]"},
     {"white","  - send lifetime stats to "},{"yellow","<channel>"},{"white"," or set channel if omitted"},
+  })
+  P({
+    {"white","  "},{"cyan","skdreportday"},{"white"," "},{"yellow","[channel]"},
+    {"white","  - report runs since 7am to "},{"yellow","<channel>"},{"white"," (default channel, or locally if none)"},
   })
   P({
     {"white","  "},{"cyan","skdreport help"},
