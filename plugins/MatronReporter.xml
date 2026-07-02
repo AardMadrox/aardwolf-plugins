@@ -7,7 +7,7 @@
    id="A3F9C2E7B14D608F5A2C9E31"
    language="Lua"
    purpose="Times Matron Dragon runs and reports rewards"
-   version="1.1"
+   version="1.2"
 >
 </plugin>
 
@@ -137,6 +137,16 @@
     script="LootTrainingSessions"
   >
   </trigger>
+
+  <!-- Gold coins -->
+  <trigger
+    match="^You receive ([\d,]+) gold coins\.$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="LootGold"
+  >
+  </trigger>
 </triggers>
 
 <script>
@@ -218,6 +228,7 @@ local REWARD_KEYS = {
   "Sunburst Shield",
   "Quest Points",
   "Training Sessions",
+  "Gold",
 }
 
 -- Plugin state
@@ -278,6 +289,7 @@ local function NormalizeReward(loot)
   if loot == "Sunburst Shield" then return "Sunburst Shield" end
   if loot:match("Quest Points$") then return "Quest Points" end
   if loot:match("Training Sessions$") then return "Training Sessions" end
+  if loot:match("[Gg]old$") then return "Gold" end
   return loot  -- unknown item, keep as-is
 end
 
@@ -403,6 +415,14 @@ function LootTrainingSessions(name, line, wildcards)
   if not runActive then return end
   if wildcards[1] then
     pendingLoots[#pendingLoots+1] = wildcards[1] .. " Training Sessions"
+    ArmFinalize()
+  end
+end
+
+function LootGold(name, line, wildcards)
+  if not runActive then return end
+  if wildcards[1] then
+    pendingLoots[#pendingLoots+1] = wildcards[1] .. " Gold"
     ArmFinalize()
   end
 end
