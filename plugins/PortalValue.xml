@@ -41,7 +41,7 @@
    purpose="Find the closest saved portal + speedwalk to your room, and catalog your portals by type."
    date_written="2026-06-27"
    requires="4.73"
-   version="3.0"
+   version="3.1"
 >
 </plugin>
 
@@ -68,6 +68,7 @@
   <alias match="^portaldex list$"    enabled="y" regexp="y" ignore_case="y" script="pd_list"     sequence="90"></alias>
   <alias match="^portaldex list (.+)$" enabled="y" regexp="y" ignore_case="y" script="pd_list"   sequence="90"></alias>
   <alias match="^portaldex clear$"   enabled="y" regexp="y" ignore_case="y" script="pd_clear"    sequence="90"></alias>
+  <alias match="^portaldex remove (.+)$" enabled="y" regexp="y" ignore_case="y" script="pd_remove" sequence="90"></alias>
   <alias match="^portaldex help$"    enabled="y" regexp="y" ignore_case="y" script="pv_help_all" sequence="90"></alias>
   <alias match="^portaldex missing$" enabled="y" regexp="y" ignore_case="y" script="pd_missing"  sequence="90"></alias>
   <alias match="^portaldex speed ?(.*)$" enabled="y" regexp="y" ignore_case="y" script="pd_speed_cmd" sequence="85"></alias>
@@ -329,6 +330,41 @@ function pd_clear()
    catalog = {}
    pd_save()
    echo(C.hdr.."[PortalDex] Catalog cleared.")
+end
+
+-- remove one portal from the catalog, by item id (exact) or by name text (one match)
+function pd_remove(name, line, wc)
+   local arg = ((wc and wc[1]) or ""):gsub("^%s+",""):gsub("%s+$","")
+   if arg == "" then
+      echo(C.hdr.."[PortalDex] Usage: "..C.ok.."portaldex remove <item id | name>"..C.hdr..". (ids show in "..C.ok.."portaldex list"..C.hdr..".)")
+      return
+   end
+   if arg:match("^%d+$") and catalog[arg] then
+      local nm = catalog[arg].name or "?"
+      catalog[arg] = nil
+      pd_save()
+      echo(C.hdr.."[PortalDex] Removed "..C.val..esc(nm).." "..C.num.."("..arg..")"..C.hdr.." from the catalog.")
+      return
+   end
+   local low = arg:lower()
+   local matches = {}
+   for id, e in pairs(catalog) do
+      local hay = ((e.name or "").." "..(e.ptype or "").." "..(e.leads or "")):lower()
+      if hay:find(low, 1, true) then matches[#matches+1] = { id = id, e = e } end
+   end
+   if #matches == 0 then
+      echo(C.hdr.."[PortalDex] No cataloged portal matches "..C.val.."'"..esc(arg).."'"..C.hdr..".")
+   elseif #matches == 1 then
+      local m = matches[1]
+      catalog[m.id] = nil
+      pd_save()
+      echo(C.hdr.."[PortalDex] Removed "..C.val..esc(m.e.name or "?").." "..C.num.."("..m.id..")"..C.hdr.." from the catalog.")
+   else
+      echo(C.hdr.."[PortalDex] "..C.num..#matches..C.hdr.." matches — remove by id with "..C.ok.."portaldex remove <id>"..C.hdr..":")
+      for _, m in ipairs(matches) do
+         echo("  "..C.val..esc(m.e.name or "?").." "..C.num.."("..m.id..")"..C.hdr.." ["..C.ok..esc(m.e.ptype or "?")..C.hdr.."]")
+      end
+   end
 end
 
 function pd_speed_cmd(name, line, wc)
@@ -886,6 +922,7 @@ function pv_help_all()
    pv_echo(C.hdr .. "  portaldex bag <kw> " .. C.val .. "- set portal container keyword (used by scan)")
    pv_echo(C.hdr .. "  portaldex auto on|off " .. C.val .. "- catalog-as-you-go toggle")
    pv_echo(C.hdr .. "  portaldex speed <s>   " .. C.val .. "- scan pacing (seconds per portal)")
+   pv_echo(C.hdr .. "  portaldex remove <id|name> " .. C.val .. "- remove one portal from the catalog")
    pv_echo(C.hdr .. "  portaldex clear    " .. C.val .. "- wipe the catalog")
    pv_echo(C.hdr .. "Portals also catalog automatically whenever you " .. C.ok .. "id" .. C.hdr .. " one.")
    pv_echo(C.bad .. "Scan uses the LAST item id/keyword in each mapper portal command.")
