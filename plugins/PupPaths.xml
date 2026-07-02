@@ -9,7 +9,7 @@
    purpose="Step-by-step pup pathing with named routes"
    date_written="2026-06-14"
    requires="4.40"
-   version="1.8"
+   version="1.10"
 >
 <description trim="y">
 PupPaths: Walk named paths one room at a time. Type the path keyword to advance.
@@ -24,6 +24,8 @@ Commands:
 On the first clean run from step 1 to the end, the room numbers along a path are
 recorded via GMCP. After that, stepping off the path (eg backtracking a room) lets
 PupPaths recognize where you are and continue from that room instead of resetting.
+If you type pp &lt;name&gt; for a recorded path while somewhere else entirely, the
+mapper walks you to the path's first room (via 'mapper goto').
 
 Path segments are separated by ';'. A run of direction letters/numbers is a
 speedwalk (eg 3e2s); anything else is a command (eg pull lever, enter portal).
@@ -105,6 +107,26 @@ local YELLOW = "#875FFF"   -- @x099 : directions/commands to run, help placehold
 
 local function CN(...) ColourNote(...) end
 local function Msg(...) CN(GREEN, BG, "[PupPaths] ", ...) end
+
+---------------------------------------------------------
+-- GMCP access (via the standard aard GMCP handler plugin)
+---------------------------------------------------------
+
+local GMCP_HANDLER_ID = "3e7dedbe37e44942dd46d264"
+
+-- Read the room number the GMCP handler already has cached, so we can
+-- position ourselves right after a plugin reload without asking the MUD.
+local function queryCurrentRoom()
+    local ret, datastring = CallPlugin(GMCP_HANDLER_ID, "gmcpdata_as_string", "room.info.num")
+    if ret ~= 0 or not datastring then return nil end
+    return tonumber(datastring)
+end
+
+-- Ask the MUD to re-send room.info. This is a GMCP protocol message, NOT a
+-- typed command — it must go out as a telnet subnegotiation packet.
+local function requestRoom()
+    SendPkt(string.char(0xFF, 0xFA, 201) .. "request room" .. string.char(0xFF, 0xF0))
+end
 
 ---------------------------------------------------------
 -- Direction expansion
@@ -328,9 +350,13 @@ function pp.step(pname)
 
     -- We need to know the current room: to record step 1 of a new path, and to
     -- position a recorded path from wherever you're standing. After a reload we
-    -- may not know it yet — ask the MUD, then have them retry.
+    -- may not know it yet — the GMCP handler keeps the last room.info cached,
+    -- so read it from there and carry on in the same keypress.
     if not currentRoom then
-        Execute("request room")
+        currentRoom = queryCurrentRoom()
+    end
+    if not currentRoom then
+        requestRoom()
         Msg(YELLOW, BG, "Getting your current room — press ",
             WHITE, BG, "pp " .. pname, YELLOW, BG, " again.")
         return
@@ -355,8 +381,22 @@ function pp.step(pname)
             if target then
                 p.pos = target
             else
-                Msg(YELLOW, BG, "You're not on a recorded room of path '",
-                    WHITE, BG, pname, YELLOW, BG, "'. Walk onto it and try again.")
+                -- Not standing on any recorded room of this path: let the mapper
+                -- run us to the path's first room. Only recorded paths get this
+                -- (unrecorded ones still need a clean run from wherever step 1 is).
+                local firstRoom = eff[1]
+                if firstRoom and firstRoom > 0 then
+                    p.pos = 1
+                    Msg(CYAN, BG, "Not on path '", WHITE, BG, pname,
+                        CYAN, BG, "' — mapper is taking you to its start (room ",
+                        RED,  BG, tostring(firstRoom),
+                        CYAN, BG, "). Type ", WHITE, BG, "pp " .. pname,
+                        CYAN, BG, " when you arrive.")
+                    Execute("mapper goto " .. firstRoom)
+                else
+                    Msg(YELLOW, BG, "You're not on a recorded room of path '",
+                        WHITE, BG, pname, YELLOW, BG, "'. Walk onto it and try again.")
+                end
                 return
             end
         end
@@ -476,6 +516,7 @@ function pp.help()
     CN(WHITE,  BG, "ppcharge                 ", CYAN,   BG, "- Toggle charge mode on/off (prepends 'charge' to each direction)")
     CN(YELLOW, BG, "pp <name>", WHITE, BG, "               ", CYAN, BG, "- Advance one step on that path  eg: pp skd")
     CN(GREEN,  BG, "Records each path's rooms on the first full run; then resumes mid-path (eg after a backtrack) instead of resetting.")
+    CN(GREEN,  BG, "On a recorded path, pp <name> from off the path makes the mapper walk you to the path's start.")
     CN(GREEN,  BG, "Commands in a path (eg pull lever, enter portal) just work — move-or-stay is auto-detected via GMCP.")
     CN(GREEN,  BG, "Optional override prefixes: ", WHITE, BG, "do:<cmd>", GREEN, BG, " stays put; ", WHITE, BG, "go:<cmd>", GREEN, BG, " moves you.")
     CN(GREEN,  BG, "Status: ", ppEnabled and GREEN or RED, BG, ppEnabled and "ENABLED" or "DISABLED")
