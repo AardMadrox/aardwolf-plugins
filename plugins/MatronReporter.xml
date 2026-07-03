@@ -7,7 +7,7 @@
    id="A3F9C2E7B14D608F5A2C9E31"
    language="Lua"
    purpose="Times Matron Dragon runs and reports rewards"
-   version="1.2"
+   version="1.4"
 >
 </plugin>
 
@@ -231,6 +231,13 @@ local REWARD_KEYS = {
   "Gold",
 }
 
+-- Outlier guard: after a death-and-resume, the timer restarts on re-entry and
+-- produces an unrealistically short run. Reject runs that fall outside a window
+-- around the current average so they don't skew the long-term stats.
+local OUTLIER_MIN_RUNS = 3    -- need this many recorded runs before judging
+local OUTLIER_UNDER    = 60   -- reject if more than 1 min shorter than average
+local OUTLIER_OVER      = 120  -- reject if more than 2 min longer than average
+
 -- Plugin state
 local runActive    = false
 local startTime    = 0
@@ -343,6 +350,25 @@ function FinalizeRun()
   runActive = false
 
   local runs = LoadRuns()
+
+  -- Outlier check against the average of previously recorded runs.
+  -- A death-and-resume restarts the timer and yields an unrealistic time. Rather
+  -- than drop the run (which would skew loot % and the run count), we keep the run
+  -- but substitute the average time so it counts as a run without moving the avg.
+  if #runs >= OUTLIER_MIN_RUNS then
+    local sum = 0
+    for _, r in ipairs(runs) do sum = sum + r.secs end
+    local avg = math.floor(sum / #runs)
+    if elapsed < avg - OUTLIER_UNDER or elapsed > avg + OUTLIER_OVER then
+      ANote(COL_HDR .. "[Matron] " .. COL_LBL .. "Run of " .. COL_TIME ..
+            FmtTime(elapsed) .. COL_LBL .. " outside " ..
+            FmtTime(avg - OUTLIER_UNDER) .. "-" .. FmtTime(avg + OUTLIER_OVER) ..
+            " window (likely a death/resume); counting it at the average " ..
+            COL_TIME .. FmtTime(avg) .. COL_LBL .. " instead.")
+      elapsed = avg
+    end
+  end
+
   runs[#runs+1] = { secs=elapsed, loots=pendingLoots }
   SaveRuns(runs)
   local stats  = CalcTotals(runs)
