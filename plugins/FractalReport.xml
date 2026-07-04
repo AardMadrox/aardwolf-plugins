@@ -7,7 +7,7 @@
    id="C2E8F4A71D9B305E8C3A7F16"
    language="Lua"
    purpose="Tracks Fractal run rewards and reports to channel"
-   version="1.1"
+   version="1.3"
 >
 </plugin>
 
@@ -63,6 +63,15 @@
 </aliases>
 
 <triggers>
+  <!-- Run start - the spectral flames intro (first line only) -->
+  <trigger
+    match="&gt;&gt;&gt;&gt;&gt; SPECTRAL FLAMES ENGULF THE AREA AND FALL AWAY &lt;&lt;&lt;&lt;&lt;"
+    enabled="y"
+    sequence="100"
+    script="RunStart"
+  >
+  </trigger>
+
   <!-- Gold reward -->
   <trigger
     match="^The gods award you with ([0-9,]+) gold coins\.$"
@@ -183,6 +192,25 @@ local frac_qp     = 0
 local frac_trains = 0
 local frac_tp     = 0
 
+-- Timing
+local startTime   = 0
+local runStarted  = false   -- true once the spectral-flames intro fires
+local elapsed     = 0
+
+-- Outlier guard: a death-and-resume restarts the timer and yields an unrealistic
+-- time. Rather than drop the run (which would skew loot averages and the run count),
+-- keep it but substitute the average time so it counts without moving the average.
+local OUTLIER_MIN_RUNS = 3    -- need this many timed runs before judging
+local OUTLIER_UNDER    = 60   -- reject if more than 1 min shorter than average
+local OUTLIER_OVER     = 120  -- reject if more than 2 min longer than average
+
+local function FmtTime(secs)
+  local m = math.floor(secs / 60)
+  local s = secs % 60
+  if m > 0 then return string.format("%dm %02ds", m, s)
+  else return string.format("%ds", s) end
+end
+
 local CHAN_KEY  = "fractal_report_channel"
 local DATA_FILE = GetInfo(66) .. "fractal_runs.txt"
 
@@ -206,8 +234,8 @@ local function SaveRuns(runs)
   local entries = {}
   for _, r in ipairs(runs) do
     entries[#entries+1] = string.format(
-      "{gold=%d,qp=%d,trains=%d,tp=%d}",
-      r.gold, r.qp, r.trains, r.tp
+      "{gold=%d,qp=%d,trains=%d,tp=%d,secs=%d}",
+      r.gold, r.qp, r.trains, r.tp, r.secs or 0
     )
   end
   local f = io.open(DATA_FILE, "w")
@@ -217,13 +245,18 @@ local function SaveRuns(runs)
 end
 
 local function CalcTotals(runs)
-  local t = { runs=0, totalGold=0, totalQP=0, totalTrains=0, totalTP=0 }
+  local t = { runs=0, totalGold=0, totalQP=0, totalTrains=0, totalTP=0,
+              timedRuns=0, totalSecs=0 }
   for _, r in ipairs(runs) do
     t.runs        = t.runs + 1
     t.totalGold   = t.totalGold   + r.gold
     t.totalQP     = t.totalQP     + r.qp
     t.totalTrains = t.totalTrains + r.trains
     t.totalTP     = t.totalTP     + r.tp
+    if r.secs and r.secs > 0 then
+      t.timedRuns = t.timedRuns + 1
+      t.totalSecs = t.totalSecs + r.secs
+    end
   end
   return t
 end
@@ -236,41 +269,73 @@ local function ParseNum(s)
   return tonumber((s:gsub(",", ""))) or 0
 end
 
----------------------------------------------------------------------------
--- Finalize: called 1.5s after the last reward line goes quiet
----------------------------------------------------------------------------
-local function FinalizeRun()
-  collecting = false
-  local runs = LoadRuns()
-  local record = { gold=frac_gold, qp=frac_qp, trains=frac_trains, tp=frac_tp }
-  runs[#runs+1] = record
-  SaveRuns(runs)
-  local runNum = #runs
-
+-- Build the report segments, listing only rewards actually received (like SKDReport)
+local function BuildReportSegs(runNum, secs, gold, qp, trains, tp)
   local segs = {
     {"cyan",   "Fractal"},
     {"white",  " #"},
     {"red",    tostring(runNum)},
     {"white",  " ["},
-    {"yellow", "Gold"},
+    {"yellow", "Time"},
     {"white",  ": "},
-    {"red",    tostring(frac_gold)},
-    {"white",  "] ["},
-    {"yellow", "QP"},
-    {"white",  ": "},
-    {"red",    tostring(frac_qp)},
-    {"white",  "] ["},
-    {"yellow", "Trains"},
-    {"white",  ": "},
-    {"red",    tostring(frac_trains)},
+    {"red",    (secs > 0 and FmtTime(secs) or "n/a")},
     {"white",  "]"},
   }
-  if frac_tp > 0 then
+  local function bracket(label, value)
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"yellow", label}
+    segs[#segs+1] = {"white",  ": "}
+    segs[#segs+1] = {"red",    value}
+    segs[#segs+1] = {"white",  "]"}
+  end
+  if gold   > 0 then bracket("Gold",   tostring(gold))   end
+  if qp     > 0 then bracket("QP",     tostring(qp))     end
+  if trains > 0 then bracket("Trains", tostring(trains)) end
+  if tp     > 0 then
     segs[#segs+1] = {"white",  " ["}
     segs[#segs+1] = {"yellow", "TP"}
     segs[#segs+1] = {"white",  "]"}
   end
+  return segs
+end
 
+---------------------------------------------------------------------------
+-- Finalize: called 1.5s after the last reward line goes quiet
+---------------------------------------------------------------------------
+local function FinalizeRun()
+  collecting = false
+
+  -- Snapshot elapsed time (0 if we never saw a start line this run)
+  elapsed = runStarted and (os.time() - startTime) or 0
+  runStarted = false
+
+  local runs = LoadRuns()
+
+  -- Outlier check against the average of previously *timed* runs
+  if elapsed > 0 then
+    local sum, n = 0, 0
+    for _, r in ipairs(runs) do
+      if r.secs and r.secs > 0 then sum = sum + r.secs ; n = n + 1 end
+    end
+    if n >= OUTLIER_MIN_RUNS then
+      local avg = math.floor(sum / n)
+      if elapsed < avg - OUTLIER_UNDER or elapsed > avg + OUTLIER_OVER then
+        ANote(COL_HDR .. "[Fractal] " .. COL_LBL .. "Run of " .. COL_GOOD ..
+              FmtTime(elapsed) .. COL_LBL .. " outside " ..
+              FmtTime(avg - OUTLIER_UNDER) .. "-" .. FmtTime(avg + OUTLIER_OVER) ..
+              " window (likely a death/resume); counting it at the average " ..
+              COL_GOOD .. FmtTime(avg) .. COL_LBL .. " instead.")
+        elapsed = avg
+      end
+    end
+  end
+
+  local record = { gold=frac_gold, qp=frac_qp, trains=frac_trains, tp=frac_tp, secs=elapsed }
+  runs[#runs+1] = record
+  SaveRuns(runs)
+  local runNum = #runs
+
+  local segs = BuildReportSegs(runNum, elapsed, frac_gold, frac_qp, frac_trains, frac_tp)
   local parts, _, aard = BuildLine(segs)
   Send(GetChannel() .. " " .. aard)
 
@@ -279,8 +344,15 @@ local function FinalizeRun()
     qp     = frac_qp,
     trains = frac_trains,
     tp     = frac_tp,
+    secs   = elapsed,
     runNum = runNum,
   }
+end
+
+function RunStart()
+  startTime  = os.time()
+  runStarted = true
+  ANote(COL_HDR .. "[Fractal] " .. COL_LBL .. "Run timer started.")
 end
 
 function FractalFinalizeCallback()
@@ -354,30 +426,7 @@ function SendReport(name, line, wildcards)
     return
   end
 
-  local segs = {
-    {"cyan",   "Fractal"},
-    {"white",  " #"},
-    {"red",    tostring(last.runNum)},
-    {"white",  " ["},
-    {"yellow", "Gold"},
-    {"white",  ": "},
-    {"red",    tostring(last.gold)},
-    {"white",  "] ["},
-    {"yellow", "QP"},
-    {"white",  ": "},
-    {"red",    tostring(last.qp)},
-    {"white",  "] ["},
-    {"yellow", "Trains"},
-    {"white",  ": "},
-    {"red",    tostring(last.trains)},
-    {"white",  "]"},
-  }
-  if last.tp > 0 then
-    segs[#segs+1] = {"white",  " ["}
-    segs[#segs+1] = {"yellow", "TP"}
-    segs[#segs+1] = {"white",  "]"}
-  end
-
+  local segs = BuildReportSegs(last.runNum, last.secs or 0, last.gold, last.qp, last.trains, last.tp)
   local _, _, aard = BuildLine(segs)
   Send(chan .. " " .. aard)
 end
@@ -402,6 +451,10 @@ function ShowLifetimeStats(name, line, wildcards)
     {"yellow", "Runs"},
     {"white",  ": "},
     {"red",    tostring(stats.runs)},
+    {"white",  "] ["},
+    {"yellow", "Avg Time"},
+    {"white",  ": "},
+    {"red",    (stats.timedRuns > 0 and FmtTime(math.floor(stats.totalSecs / stats.timedRuns)) or "n/a")},
     {"white",  "] ["},
     {"yellow", "Gold"},
     {"white",  ": "},
