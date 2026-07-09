@@ -9,7 +9,7 @@
    purpose="Tracks chaos portal casts - normal vs golden"
    date_written="2026-06-10"
    requires="4.40"
-   version="1.0"
+   version="1.2"
 >
 <description trim="y">
 Tracks how many chaos portals you cast, and what percentage are normal vs golden.
@@ -182,8 +182,6 @@ Commands:
 <script>
 <![CDATA[
 
-require "wait"
-
 -- ─────────────────────────────────────────────
 --  ChaosCast - MushClient Plugin
 -- ─────────────────────────────────────────────
@@ -354,13 +352,62 @@ function OnPortalDestination(name, line, wildcards)
         local goldCode = isGolden and "@x048" or "@x099"
         Execute("gt @WArea: @x048" .. area .. "@x045 | @WRoom: @x048" .. room .. "@x045 | @YGold: " .. goldCode .. goldFlag .. "@w")
     end
+
+    -- Advance a running BCP: this portal landed, so cast the next one.
+    BcpOnPortalRecorded()
 end
 
 -- ─── BCP Bulk Cast ───────────────────────────
+--
+-- Event-driven: cast one chaos blank, then WAIT for the portal to
+-- actually be created (recorded in OnPortalDestination) before casting
+-- the next. This respects the cast's round-time instead of spamming on
+-- a blind timer. A watchdog re-casts if a cast silently fails, and the
+-- 'active' flag lets bcpstop halt cleanly.
 
-local bcp = { total = 0 }
+local bcp = { active = false, remaining = 0, total = 0 }
 
-function BcpTick() end  -- unused
+local BCP_DELAY_SEC    = 1   -- pause after a portal lands before next cast
+local BCP_WATCHDOG_SEC = 6   -- if no portal appears this long, re-cast
+
+local function BcpClearTimers()
+    DeleteTimer("bcp_watchdog")
+    DeleteTimer("bcp_next")
+end
+
+-- Cast one, and arm a watchdog in case the cast produces no portal.
+function BcpDoCast()
+    if not bcp.active then return end
+    Execute("c chaos blank")
+    AddTimer("bcp_watchdog", 0, 0, BCP_WATCHDOG_SEC, "",
+        bit.bor(timer_flag.Enabled, timer_flag.OneShot, timer_flag.Temporary,
+                timer_flag.ActiveWhenClosed, timer_flag.Replace),
+        "BcpDoCast")
+end
+
+-- Timer callback for the pause between a landed portal and the next cast.
+function BcpNext()
+    BcpDoCast()
+end
+
+-- Called from OnPortalDestination when a portal is successfully recorded.
+function BcpOnPortalRecorded()
+    if not bcp.active then return end
+    DeleteTimer("bcp_watchdog")
+    bcp.remaining = bcp.remaining - 1
+    if bcp.remaining <= 0 then
+        bcp.active = false
+        BcpClearTimers()
+        CN("green", BG, "ChaosCast: ", "white", BG, "BCP complete. Cast ",
+           "red",   BG, tostring(bcp.total),
+           "white", BG, " portals.")
+    else
+        AddTimer("bcp_next", 0, 0, BCP_DELAY_SEC, "",
+            bit.bor(timer_flag.Enabled, timer_flag.OneShot, timer_flag.Temporary,
+                    timer_flag.ActiveWhenClosed, timer_flag.Replace),
+            "BcpNext")
+    end
+end
 
 function OnBcpCast(name, line, wildcards)
     local n = tonumber(wildcards[1])
@@ -369,26 +416,22 @@ function OnBcpCast(name, line, wildcards)
         return
     end
 
-    bcp.total = n
+    bcp.active    = true
+    bcp.total     = n
+    bcp.remaining = n
 
     CN("green", BG, "ChaosCast: ", "white", BG, "Starting BCP — casting ",
        "red",   BG, tostring(n),
-       "white", BG, " portals with a 1 second delay each.")
+       "white", BG, " portals (waiting for each to land).")
 
-    wait.make(function()
-        for i = 1, n do
-            Execute("c chaos blank")
-            wait.time(1000)
-        end
-        CN("green", BG, "ChaosCast: ", "white", BG, "BCP complete. Cast ",
-           "red",   BG, tostring(n),
-           "white", BG, " portals.")
-    end)
+    BcpDoCast()
 end
 
 function OnBcpStop(name, line, wildcards)
+    bcp.active    = false
+    bcp.remaining = 0
+    BcpClearTimers()
     CN("green", BG, "ChaosCast: ", "white", BG, "BCP stopped.")
-    wait.cancel_all()
 end
 
 
