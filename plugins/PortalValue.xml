@@ -9,8 +9,8 @@
         across ALL areas, shows the speedwalk (using your saved exits + cexits) FROM
         that portal TO this room, plus a movement count. Also reports the "recall
         walk" (no-portal walking distance from recall), and — using the catalog
-        below — "No normals" / "No chaos" lines (nearest portal excluding random
-        chaos portals).
+        below — "No normals" / "No chaos" / "Gameload" lines (nearest portal
+        excluding, respectively, normal chaos; all chaos; everything but gameload).
 
      2. PORTAL CATALOG (portaldex):
         Builds a saved catalog of your portals by type, by reading Aardwolf 'id'
@@ -41,7 +41,7 @@
    purpose="Find the closest saved portal + speedwalk to your room, and catalog your portals by type."
    date_written="2026-06-27"
    requires="4.73"
-   version="3.1"
+   version="3.2"
 >
 </plugin>
 
@@ -205,16 +205,26 @@ local function pd_load()
 end
 
 -- ---- id-box capture ----
-local in_block = false
+-- We anchor on the "Keywords" line (always the first row of an Aardwolf id box)
+-- rather than toggling on "+----+" borders. Aardwolf prints borders all over the
+-- place (other id's, score, tables); an odd stray one used to desync the old
+-- toggle and silently drop the capture. This is immune to that.
+local collecting = false
 local buf = {}
 
 function pd_border()
-   if in_block then in_block = false; pd_parse(buf)
-   else in_block = true; buf = {} end
+   -- a border while we're collecting a real record = the box just closed
+   if collecting and #buf > 0 then pd_parse(buf); collecting = false; buf = {} end
 end
 
 function pd_line(name, line, wc)
-   if in_block then buf[#buf+1] = wc[1] end
+   local content = wc[1]
+   if content:match("^%s*Keywords%s*:") then
+      if collecting and #buf > 0 then pd_parse(buf) end   -- flush a prior unclosed box
+      buf = { content }; collecting = true
+      return
+   end
+   if collecting then buf[#buf+1] = content end
 end
 
 local function classify(kw, flagset, found)
@@ -612,13 +622,26 @@ local function pv_portal_typer()
       if e.ptype == "chaos" then has_chaos = true
       elseif e.ptype == "golden chaos" then has_golden = true end
    end
-   local typer = function(cmd)
+   local function lookup(cmd)   -- cmd -> catalog record (or nil if uncatalogued)
       local ref = extract_ref(cmd)
       if not ref then return nil end
       local id = resolve_ref(ref, idx)
-      return (id and catalog[id]) and catalog[id].ptype or nil
+      return (id and catalog[id]) or nil
    end
-   return typer, has_chaos, has_golden
+   local typer = function(cmd) local r = lookup(cmd); return r and r.ptype or nil end
+   return typer, has_chaos, has_golden, lookup
+end
+
+-- Short display name for a portal on the pathing lines: its catalog item name
+-- with the leading article stripped, and the long chaos names collapsed. Falls
+-- back to the given room name when the portal isn't catalogued.
+local function short_portal_name(rec, roomname)
+   if not rec then return roomname or "?" end
+   if rec.ptype == "chaos" then return "chaos portal" end
+   if rec.ptype == "golden chaos" then return "golden chaos portal" end
+   local nm = (rec.name or roomname or "?")
+   nm = nm:gsub("^%s*[Aa]n?%s+", ""):gsub("^%s*[Tt]he%s+", "")
+   return nm
 end
 
 local function pv_show_record(r, with_header)
@@ -651,6 +674,15 @@ local function pv_show_record(r, with_header)
               .. C.hdr .. "  from " .. C.val .. esc(r.nc_pname or "?") .. " " .. C.num .. "[" .. esc(r.nc_puid or "?") .. "]")
    else
       pv_echo(C.hdr .. "No chaos    : " .. C.val .. "(none reachable)")
+   end
+   if not r.has_catalog then
+      pv_echo(C.hdr .. "Gameload    : " .. C.bad .. "need to run portaldex scan")
+   elseif r.gl_moves then
+      pv_echo(C.hdr .. "Gameload    : " .. C.num .. r.gl_moves .. C.hdr .. " walk + " .. C.num .. "1"
+              .. C.hdr .. " portal = " .. C.num .. (r.gl_moves + 1)
+              .. C.hdr .. "  from " .. C.val .. esc(r.gl_pname or "?") .. " " .. C.num .. "[" .. esc(r.gl_puid or "?") .. "]")
+   else
+      pv_echo(C.hdr .. "Gameload    : " .. C.val .. "(none reachable)")
    end
    pv_echo(recall_line(r.recall_rooms, r.recall_sw, r.recall_msg))
    if r.have_here then
@@ -749,8 +781,11 @@ local function compute_for_room(T, channel)
    elseif dist[recall_uid] == nil then recall_msg = "no known no-portal walk from recall yet"
    else recall_sw, recall_rooms = build_speedwalk(path_dirs(recall_uid)) end
 
-   local typer, has_chaos, has_golden = pv_portal_typer()
-   local best, best_nn, best_noch
+   local typer, has_chaos, has_golden, lookup = pv_portal_typer()
+   local function pname_of(pt)   -- portal item name (shortened) or fallback room name
+      return short_portal_name(lookup and lookup(pt.cmd) or nil, pt.name)
+   end
+   local best, best_nn, best_noch, best_gl
    for _, pt in ipairs(portals) do
       if pt.uid ~= T and dist[pt.uid] ~= nil then
          local d = dist[pt.uid]
@@ -766,6 +801,11 @@ local function compute_for_room(T, channel)
          if ty ~= "chaos" and ty ~= "golden chaos" then
             if (not best_noch) or d < best_noch.d or (d == best_noch.d and pt.area == area and best_noch.portal.area ~= area) then
                best_noch = { d = d, portal = pt }
+            end
+         end
+         if ty == "gameload" then   -- gameload only: no chaos/golden/trivia/uncatalogued
+            if (not best_gl) or d < best_gl.d or (d == best_gl.d and pt.area == area and best_gl.portal.area ~= area) then
+               best_gl = { d = d, portal = pt }
             end
          end
       end
@@ -785,24 +825,31 @@ local function compute_for_room(T, channel)
    local nn_moves, nn_pname, nn_puid
    if best_nn then
       _, nn_moves = build_speedwalk(path_dirs(best_nn.portal.uid))
-      nn_pname = best_nn.portal.name; nn_puid = best_nn.portal.uid
+      nn_pname = pname_of(best_nn.portal); nn_puid = best_nn.portal.uid
    end
    local nc_moves, nc_pname, nc_puid
    if best_noch then
       _, nc_moves = build_speedwalk(path_dirs(best_noch.portal.uid))
-      nc_pname = best_noch.portal.name; nc_puid = best_noch.portal.uid
+      nc_pname = pname_of(best_noch.portal); nc_puid = best_noch.portal.uid
+   end
+   local gl_moves, gl_pname, gl_puid
+   if best_gl then
+      _, gl_moves = build_speedwalk(path_dirs(best_gl.portal.uid))
+      gl_pname = pname_of(best_gl.portal); gl_puid = best_gl.portal.uid
    end
 
    local rec = {
       time = os.date("%Y-%m-%d %H:%M"), area = area, newname = tname or "?", newuid = T,
-      pname = best.portal.name or "?", puid = best.portal.uid, parea = best.portal.area or "?",
+      pname = pname_of(best.portal), puid = best.portal.uid, parea = best.portal.area or "?",
       same_area = (best.portal.area == area), pcmd = best.portal.cmd or "?",
       plevel = tostring(best.portal.level or 0), sw = sw, moves = walkmoves,
       recall_rooms = recall_rooms, recall_sw = recall_sw, recall_msg = recall_msg,
       have_here = have_portal_here,
       has_chaos = has_chaos or false, has_golden = has_golden or false,
+      has_catalog = (typer ~= nil),
       nn_moves = nn_moves, nn_pname = nn_pname, nn_puid = nn_puid,
       nc_moves = nc_moves, nc_pname = nc_pname, nc_puid = nc_puid,
+      gl_moves = gl_moves, gl_pname = gl_pname, gl_puid = gl_puid,
    }
    table.insert(pv_history, rec)
    save_history()
@@ -811,11 +858,13 @@ local function compute_for_room(T, channel)
       local recall_disp = (recall_rooms ~= nil) and tostring(recall_rooms) or "N/A"
       local nn_disp = (has_chaos and nn_moves) and tostring(nn_moves + 1) or "N/A"
       local nc_disp = (has_chaos and has_golden and nc_moves) and tostring(nc_moves + 1) or "N/A"
+      local gl_disp = (typer and gl_moves) and tostring(gl_moves + 1) or "N/A"
       local summary = C.val .. esc(area) .. " " .. esc(tname or "?") .. C.hdr .. " (" .. C.num .. T .. C.hdr .. "): ["
          .. C.num .. (walkmoves + 1) .. C.hdr .. " movements from " .. C.val .. esc(best.portal.area or "?")
-         .. " " .. esc(best.portal.name or "?") .. C.hdr .. " (" .. C.num .. best.portal.uid .. C.hdr .. ")] ["
+         .. " " .. esc(pname_of(best.portal)) .. C.hdr .. " (" .. C.num .. best.portal.uid .. C.hdr .. ")] ["
          .. C.num .. nn_disp .. C.hdr .. " no normals] ["
          .. C.num .. nc_disp .. C.hdr .. " no chaos] ["
+         .. C.num .. gl_disp .. C.hdr .. " gameload] ["
          .. C.num .. recall_disp .. C.hdr .. " portaless movements from recall" .. C.hdr .. "]"
       Send(channel .. " " .. summary)
       pv_echo(C.hdr .. "[PortalValue] Sent summary to " .. C.val .. esc(channel) .. C.hdr .. "."
@@ -906,7 +955,7 @@ end
 
 -- combined help (both "portalvalue help" and "portaldex help" land here)
 function pv_help_all()
-   pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue " .. C.val .. "3.0" .. C.hdr .. " ===================")
+   pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue " .. C.val .. "3.2" .. C.hdr .. " ===================")
    pv_echo(C.val .. "Find the nearest portal to walk from, and catalog your portals by type.")
    pv_echo(C.hdr .. "-- pathing --")
    pv_echo(C.hdr .. "  pv                 " .. C.val .. "- nearest portal + speedwalk to your room")
