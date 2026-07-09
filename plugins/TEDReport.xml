@@ -7,7 +7,7 @@
    id="B7D4A1F9C83E502D6B1F4C28"
    language="Lua"
    purpose="Times TED (Fury) runs and reports trains/gold/TP rewards"
-   version="1.0"
+   version="1.1"
 >
 </plugin>
 
@@ -295,6 +295,42 @@ local function ParseNum(s)
   return tonumber((s:gsub(",", ""))) or 0
 end
 
+local function Comma(n)
+  local s = tostring(n)
+  local k
+  repeat s, k = s:gsub("^(-?%d+)(%d%d%d)", "%1,%2") until k == 0
+  return s
+end
+
+-- Build a run report listing only the reward actually received (TED gives one)
+local function BuildRunSegs(runNum, elapsed, trains, gold, tp)
+  local segs = {
+    {"cyan",   "TED"},
+    {"white",  " #"},
+    {"red",    tostring(runNum)},
+    {"white",  " ["},
+    {"yellow", "Time"},
+    {"white",  ": "},
+    {"red",    FmtTime(elapsed)},
+    {"white",  "]"},
+  }
+  if trains > 0 then
+    segs[#segs+1] = {"white", " ["} ; segs[#segs+1] = {"yellow", "Trains"}
+    segs[#segs+1] = {"white", ": "} ; segs[#segs+1] = {"red", Comma(trains)}
+    segs[#segs+1] = {"white", "]"}
+  end
+  if gold > 0 then
+    segs[#segs+1] = {"white", " ["} ; segs[#segs+1] = {"yellow", "Gold"}
+    segs[#segs+1] = {"white", ": "} ; segs[#segs+1] = {"red", Comma(gold)}
+    segs[#segs+1] = {"white", "]"}
+  end
+  if tp > 0 then
+    segs[#segs+1] = {"white", " ["} ; segs[#segs+1] = {"yellow", "TP"}
+    segs[#segs+1] = {"white", "]"}
+  end
+  return segs
+end
+
 ---------------------------------------------------------------------------
 -- Run management
 ---------------------------------------------------------------------------
@@ -315,29 +351,7 @@ local function FinalizeRun()
     runNum  = runNum,
   }
 
-  local segs = {
-    {"cyan",   "TED"},
-    {"white",  " #"},
-    {"red",    tostring(runNum)},
-    {"white",  " ["},
-    {"yellow", "Time"},
-    {"white",  ": "},
-    {"red",    FmtTime(ted_elapsed)},
-    {"white",  "] ["},
-    {"yellow", "Trains"},
-    {"white",  ": "},
-    {"red",    tostring(ted_trains)},
-    {"white",  "] ["},
-    {"yellow", "Gold"},
-    {"white",  ": "},
-    {"red",    tostring(ted_gold)},
-    {"white",  "]"},
-  }
-  if ted_tp > 0 then
-    segs[#segs+1] = {"white",  " ["}
-    segs[#segs+1] = {"yellow", "TP"}
-    segs[#segs+1] = {"white",  "]"}
-  end
+  local segs = BuildRunSegs(runNum, ted_elapsed, ted_trains, ted_gold, ted_tp)
   local _, _, aard = BuildLine(segs)
   Send(GetChannel() .. " " .. aard)
 end
@@ -382,7 +396,7 @@ function RunNothing()
   runs[#runs+1] = { secs=ted_elapsed, trains=0, gold=0, tp=0, nothing=true }
   SaveRuns(runs)
   local runNum = #runs
-  _G._ted_last = { elapsed=ted_elapsed, trains=0, gold=0, tp=0, runNum=runNum }
+  _G._ted_last = { elapsed=ted_elapsed, trains=0, gold=0, tp=0, runNum=runNum, nothing=true }
   local segs = {
     {"cyan",   "TED"},
     {"white",  " #"},
@@ -435,28 +449,22 @@ function SendReport(name, line, wildcards)
     return
   end
 
-  local segs = {
-    {"cyan",   "TED"},
-    {"white",  " #"},
-    {"red",    tostring(last.runNum)},
-    {"white",  " ["},
-    {"yellow", "Time"},
-    {"white",  ": "},
-    {"red",    FmtTime(last.elapsed)},
-    {"white",  "] ["},
-    {"yellow", "Trains"},
-    {"white",  ": "},
-    {"red",    tostring(last.trains)},
-    {"white",  "] ["},
-    {"yellow", "Gold"},
-    {"white",  ": "},
-    {"red",    tostring(last.gold)},
-    {"white",  "]"},
-  }
-  if last.tp > 0 then
-    segs[#segs+1] = {"white",  " ["}
-    segs[#segs+1] = {"yellow", "TP"}
-    segs[#segs+1] = {"white",  "]"}
+  local segs
+  if last.nothing then
+    segs = {
+      {"cyan",   "TED"},
+      {"white",  " #"},
+      {"red",    tostring(last.runNum)},
+      {"white",  " ["},
+      {"yellow", "Time"},
+      {"white",  ": "},
+      {"red",    FmtTime(last.elapsed)},
+      {"white",  "] ["},
+      {"red",    "YOU GET NOTHING"},
+      {"white",  "]"},
+    }
+  else
+    segs = BuildRunSegs(last.runNum, last.elapsed, last.trains, last.gold, last.tp)
   end
 
   local _, _, aard = BuildLine(segs)
@@ -473,8 +481,6 @@ function ShowLifetimeStats(name, line, wildcards)
 
   local chan      = (wildcards and wildcards[1] and wildcards[1] ~= "") and wildcards[1]:lower() or GetChannel()
   local avgSecs   = math.floor(stats.totalSecs / stats.runs)
-  local avgTrains = string.format("%.1f", stats.totalTrains / stats.runs)
-  local avgGold   = string.format("%.0f", stats.totalGold   / stats.runs)
   local tpPct      = string.format("%.0f", stats.hadTP      / stats.runs * 100)
   local trainsPct  = string.format("%.0f", stats.hadTrains  / stats.runs * 100)
   local goldPct    = string.format("%.0f", stats.hadGold    / stats.runs * 100)
@@ -492,21 +498,23 @@ function ShowLifetimeStats(name, line, wildcards)
     {"red",    FmtTime(avgSecs)},
     {"white",  "] ["},
     {"yellow", "Trains"},
-    {"white",  ": avg "},
-    {"red",    avgTrains},
+    {"white",  ": "},
+    {"red",    Comma(stats.totalTrains)},
     {"white",  " ("},
     {"red",    trainsPct .. "%"},
     {"white",  ")] ["},
     {"yellow", "Gold"},
-    {"white",  ": avg "},
-    {"red",    avgGold},
+    {"white",  ": "},
+    {"red",    Comma(stats.totalGold)},
     {"white",  " ("},
     {"red",    goldPct .. "%"},
     {"white",  ")] ["},
     {"yellow", "TP"},
     {"white",  ": "},
+    {"red",    tostring(stats.totalTP)},
+    {"white",  " ("},
     {"red",    tpPct .. "%"},
-    {"white",  "] ["},
+    {"white",  ")] ["},
     {"yellow", "Nothing"},
     {"white",  ": "},
     {"red",    nothingPct .. "%"},
