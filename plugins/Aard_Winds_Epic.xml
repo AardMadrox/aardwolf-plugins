@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="1.3"
+   version="1.4"
    save_state="y"
    >
 <description trim="n">
@@ -807,50 +807,51 @@ function say_result(name, line, args)
 					show = true
 				end
 				if rslt == 1 then
-					-- a correct word: count it as one more side confirmed in
-					-- order on this attempt.
-					pedestal_confirmed = pedestal_confirmed + 1
+					-- a correct word. It only counts as the next confirmed side
+					-- (and only then advances the pointer) if it was said IN ORDER,
+					-- i.e. right after the sides already confirmed this attempt.
+					-- Record it green either way, but never let an out-of-order word
+					-- advance `side` and skip past later candidates.
+					local in_order = (i == pedestal_confirmed + 1)
 					v.result = 1
-				elseif side == i and i == pedestal_confirmed + 1 then
-					-- a genuine wrong-word bolt: the guesser first said the
-					-- accepted words for all prior sides in order (i-1 of them),
-					-- so this word really is wrong for this side. Scratch it.
-					v.result = 0
-				else
-					-- a bolt we must NOT trust: either the word isn't on the side
-					-- we're guessing, or it was said out of order (earlier words
-					-- skipped). An out-of-order bolt is an ORDER failure, not proof
-					-- the word is wrong, so leave it as a candidate.
-					if sitter then
-						if side ~= i then
-							Send(chan.."@Y>> @x075Winds of Fate @Y>> @wNot setting result for @W"..word.."@w because it is not on @Wside@D[@x075"..side.."@D]@w.$C")
-						else
-							Send(chan.."@Y>> @x075Winds of Fate @Y>> @wNot scratching @W"..word.."@w - it was said out of order.$C")
+					if in_order then
+						pedestal_confirmed = i
+						if i >= side then -- advance only, never rewind
+							side = i+1
 						end
-					end
-				end
-				if rslt == 1 then
-					-- only ever advance the pointer, never rewind it: re-saying
-					-- an already-solved word on an earlier side must not pull
-					-- `side` backward and break the sequence.
-					if i >= side then
-						side = i+1
 					end
 					if sitter then
 						if not show then
 							return
 						end
-						Send(chan.."@Y>> @x075Winds of Fate @Y>> @Wside@D[@x075"..i.."@D] @Wis @G"..word.."$C")
-						rename_group()
+						if in_order then
+							Send(chan.."@Y>> @x075Winds of Fate @Y>> @Wside@D[@x075"..i.."@D] @Wis @G"..word.."$C")
+							rename_group()
+						end
 						report(side)
 					end
-				else
+				elseif side == i and i == pedestal_confirmed + 1 then
+					-- a genuine wrong-word bolt: the guesser first said the accepted
+					-- words for all prior sides in order (i-1 of them), so this word
+					-- really is wrong for this side. Scratch it.
+					v.result = 0
 					if sitter then
 						if not show then
 							return
 						end
 						report(side)
 						go_try()
+					end
+				else
+					-- a bolt we must NOT trust: either the word isn't on the side
+					-- we're guessing, or it was said out of order (earlier words
+					-- skipped). Leave it as a candidate rather than scratch it.
+					if sitter then
+						if side ~= i then
+							Send(chan.."@Y>> @x075Winds of Fate @Y>> @wNot setting result for @W"..word.."@w because it is not on @Wside@D[@x075"..side.."@D]@w.$C")
+						else
+							Send(chan.."@Y>> @x075Winds of Fate @Y>> @wNot scratching @W"..word.."@w - it was said out of order.$C")
+						end
 					end
 				end
 				return
