@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="1.4"
+   version="1.5"
    save_state="y"
    >
 <description trim="n">
@@ -852,6 +852,10 @@ function say_result(name, line, args)
 						else
 							Send(chan.."@Y>> @x075Winds of Fate @Y>> @wNot scratching @W"..word.."@w - it was said out of order.$C")
 						end
+						-- nothing was resolved, so remind everyone what to actually
+						-- guess by re-showing the side status and the command line.
+						report(side)
+						go_try()
 					end
 				end
 				return
