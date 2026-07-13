@@ -11,7 +11,7 @@
    purpose="Repeatedly cast 'incomp' on self or others until healed"
    date_written="2026-06-21"
    requires="4.94"
-   version="2.2"
+   version="2.3"
 >
 
 <description>
@@ -23,6 +23,8 @@ you run low on mana, or you enter combat.
   fhx <player>     heal another player ('c incomp <player>')
   fhx low          heal the lowest-HP group member in the room
   fhx stop         stop healing immediately
+  fhx regen        switch the spell to regeneration (c regen)
+  fhx incomp       switch the spell back to incomplete healing (c incomp)
   fhx help         show the help screen
 
 Stops automatically on:
@@ -69,6 +71,30 @@ lowest - run it again to retarget.
    <send>OtherHealTick("%1")</send>
    </trigger>
 
+   <!-- regen self pacing: "A great healing power courses through your veins ..." -->
+   <trigger
+      name="fhx_regen_self_tick"
+      enabled="y"
+      regexp="y"
+      match="A great healing power courses through your veins leaving you greatly regenerated\."
+      sequence="100"
+      send_to="12"
+   >
+   <send>HealTick()</send>
+   </trigger>
+
+   <!-- regen other pacing: name = %1, gender word wildcarded (him/her/them/it) -->
+   <trigger
+      name="fhx_regen_other_tick"
+      enabled="y"
+      regexp="y"
+      match="A great healing power courses through the veins of (\w+) leaving \w+ greatly regenerated\."
+      sequence="100"
+      send_to="12"
+   >
+   <send>OtherHealTick("%1")</send>
+   </trigger>
+
    <!-- self-heal done -->
    <trigger
       name="fhx_self_almost"
@@ -79,6 +105,18 @@ lowest - run it again to retarget.
       send_to="12"
    >
    <send>StopHealing("almost fully healed")</send>
+   </trigger>
+
+   <!-- self done (regen prints "already"; incomp prints "almost") -->
+   <trigger
+      name="fhx_self_already"
+      enabled="y"
+      regexp="y"
+      match="You are already fully healed\."
+      sequence="90"
+      send_to="12"
+   >
+   <send>StopHealing("already fully healed")</send>
    </trigger>
 
    <!-- other-target done -->
@@ -177,6 +215,30 @@ lowest - run it again to retarget.
       send_to="12"
    >
    <send>StopHealing("manual stop")</send>
+   </alias>
+
+   <alias
+      name="fhx_regen"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx regen$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>SetHealSpell("regen")</send>
+   </alias>
+
+   <alias
+      name="fhx_incomp"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx incomp$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>SetHealSpell("incomp")</send>
    </alias>
 
    <alias
@@ -305,11 +367,34 @@ local tag = "@x099[@WFHX@x099]:@w "
 
 -- ---- state -------------------------------------------------------------
 healing_active = false
+heal_spell     = "incomp"  -- "incomp" (c incomp) or "regen" (c regen)
 heal_mode      = "self"    -- "self" or "other"
 heal_target    = ""
 heal_gen       = 0         -- bumped on every start/stop to cancel stale resend timers
 heal_watch_id  = 0         -- bumped on every watchdog re-arm so stale watchdogs are ignored
 heal_cast_count = 0
+
+-- ---- spell selection ---------------------------------------------------
+-- Build the cast command for the currently-selected spell. With no target it
+-- casts on self ("c incomp" / "c regen"); with a target it appends the name.
+function SpellCmd (target)
+  local sp = (heal_spell == "regen") and "regen" or "incomp"
+  if target and target ~= "" then return "c " .. sp .. " " .. target end
+  return "c " .. sp
+end
+
+-- Human-readable spell name for the status/started lines.
+function SpellName ()
+  return (heal_spell == "regen") and "regeneration" or "incomplete healing"
+end
+
+-- Toggle alias handler for 'fhx regen' / 'fhx incomp'. Persists the choice.
+function SetHealSpell (sp)
+  heal_spell = (sp == "regen") and "regen" or "incomp"
+  SetVariable ("heal_spell", heal_spell)
+  cnote (tag .. "@x045spell set to @W" .. SpellName () ..
+         "@x045 ('@W" .. SpellCmd () .. "@x045').")
+end
 
 -- ======================================================================
 -- WATCHDOG (shared by both modes): stop if no heal-tick seen in time
@@ -336,10 +421,10 @@ function StartSelfHeal ()
   heal_mode       = "self"
   heal_target     = ""
   heal_cast_count = 1
-  cnote (tag .. "@x045self-heal started@w - sending '@Wc incomp@w'.")
-  dbg ("self cast #1 -> 'c incomp'")
+  cnote (tag .. "@x045self-heal started@w - sending '@W" .. SpellCmd () .. "@w'.")
+  dbg ("self cast #1 -> '" .. SpellCmd () .. "'")
   ArmWatchdog ()
-  Send ("c incomp")
+  Send (SpellCmd ())
 end
 
 -- Fired by the "You are X healed by your magic touch." trigger
@@ -354,8 +439,8 @@ function SelfCast (gen)
   gen = tonumber (gen)
   if healing_active and heal_mode == "self" and gen == heal_gen then
     heal_cast_count = heal_cast_count + 1
-    dbg ("self cast #" .. heal_cast_count .. " -> 'c incomp'")
-    Send ("c incomp")
+    dbg ("self cast #" .. heal_cast_count .. " -> '" .. SpellCmd () .. "'")
+    Send (SpellCmd ())
   end
 end
 
@@ -377,10 +462,10 @@ function BeginOtherHeal (name)
   heal_target     = name
   heal_cast_count = 1
   dbg ("BeginOtherHeal: target='" .. name .. "'  gen=" .. heal_gen)
-  cnote (tag .. "@x045healing @W" .. name .. "@x045 - casting '@Wc incomp " .. name .. "@x045' until healed.")
-  dbg ("cast #1 -> 'c incomp " .. name .. "'")
+  cnote (tag .. "@x045healing @W" .. name .. "@x045 - casting '@W" .. SpellCmd (name) .. "@x045' until healed.")
+  dbg ("cast #1 -> '" .. SpellCmd (name) .. "'")
   ArmWatchdog ()
-  Send ("c incomp " .. name)
+  Send (SpellCmd (name))
 end
 
 -- Fired by the "<who> is X healed by your magic touch." trigger
@@ -401,8 +486,8 @@ function OtherResend (gen)
   gen = tonumber (gen)
   if healing_active and heal_mode == "other" and gen == heal_gen then
     heal_cast_count = heal_cast_count + 1
-    dbg ("cast #" .. heal_cast_count .. " -> 'c incomp " .. heal_target .. "'")
-    Send ("c incomp " .. heal_target)
+    dbg ("cast #" .. heal_cast_count .. " -> '" .. SpellCmd (heal_target) .. "'")
+    Send (SpellCmd (heal_target))
   end
 end
 
@@ -505,6 +590,8 @@ function ShowHelp ()
   cnote ("  @Wfhx <player>@x045    @x099 heal another player ('@Wc incomp <player>@x099')")
   cnote ("  @Wfhx low@x045         @x099 heal the lowest-HP group member in the room")
   cnote ("  @Wfhx stop@x045        @x099 stop healing right now")
+  cnote ("  @Wfhx regen@x045       @x099 use regeneration ('@Wc regen@x099')")
+  cnote ("  @Wfhx incomp@x045      @x099 use incomplete healing ('@Wc incomp@x099')")
   cnote ("  @Wfhx help@x045        @x099 this screen")
   Note ("")
   cnote ("@x099Healing stops automatically when:@w")
@@ -526,7 +613,9 @@ end
 function FHXLoaded ()
   -- ask Aardwolf to start streaming group data over GMCP (needed for 'fhx low')
   pcall (function () Send_GMCP_Packet ("group on") end)
-  cnote (tag .. "@x045loaded@w @x099(v2.2)@w - type '@Wfhx help@w' for commands.")
+  heal_spell = (GetVariable ("heal_spell") == "regen") and "regen" or "incomp"
+  cnote (tag .. "@x045loaded@w @x099(v2.3)@w - spell: @W" .. SpellName () ..
+         "@w - type '@Wfhx help@w' for commands.")
 end
 
 DoAfterSpecial (2, "FHXLoaded()", SENDTO_SCRIPT)
