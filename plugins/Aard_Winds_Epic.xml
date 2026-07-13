@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="1.2"
+   version="1.3"
    save_state="y"
    >
 <description trim="n">
@@ -340,6 +340,7 @@ function init_winds()
 	player = ""
 	word = ""
 	cmd = ""
+	pedestal_confirmed = 0 -- words confirmed in order on the current pedestal attempt
 	side1 = {[1] = {word = "und"}, [2] = {word = "kaje"}, [3] = {word = "exo"}, [4] = {word = "wond"}, [5] = {word = "soberi"}, [6] = {word = "axo"}, [7] = {word = "wangi"}, [8] = {word = "soju"}}
 	side2 = {[1] = {word = "pavi"}, [2] = {word = "ilion"}, [3] = {word = "edi"}, [4] = {word = "itor"}, [5] = {word = "shooey"}, [6] = {word = "opti"}, [7] = {word = "haviar"}, [8] = {word = "rochu"}}
 	side3 = {[1] = {word = "areo"}, [2] = {word = "lapn"}, [3] = {word = "yzi"}, [4] = {word = "agil"}, [5] = {word = "wantoo"}, [6] = {word = "sevar"}, [7] = {word = "bereth"}, [8] = {word = "embao"}}
@@ -738,6 +739,7 @@ end
 
 function player_pedestal(name, line, args)
 	player = args.player
+	pedestal_confirmed = 0 -- new attempt: no words confirmed in order yet
 	player_attempt(player)
 	if cmd ~= "" then
 		ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "white", "", " cmd ", "silver", "", " cleared out because ", "white", "", player, "silver", "", " used it.\n")
@@ -804,11 +806,27 @@ function say_result(name, line, args)
 				if not v.result then
 					show = true
 				end
-				if side == i or rslt == 1 then -- only scratch a word if we know the side matches
-					v.result = rslt
+				if rslt == 1 then
+					-- a correct word: count it as one more side confirmed in
+					-- order on this attempt.
+					pedestal_confirmed = pedestal_confirmed + 1
+					v.result = 1
+				elseif side == i and i == pedestal_confirmed + 1 then
+					-- a genuine wrong-word bolt: the guesser first said the
+					-- accepted words for all prior sides in order (i-1 of them),
+					-- so this word really is wrong for this side. Scratch it.
+					v.result = 0
 				else
+					-- a bolt we must NOT trust: either the word isn't on the side
+					-- we're guessing, or it was said out of order (earlier words
+					-- skipped). An out-of-order bolt is an ORDER failure, not proof
+					-- the word is wrong, so leave it as a candidate.
 					if sitter then
-						Send(chan.."@Y>> @x075Winds of Fate @Y>> @wNot setting result for @W"..word.."@w because it is not on @Wside@D[@x075"..side.."@D]@w.$C")
+						if side ~= i then
+							Send(chan.."@Y>> @x075Winds of Fate @Y>> @wNot setting result for @W"..word.."@w because it is not on @Wside@D[@x075"..side.."@D]@w.$C")
+						else
+							Send(chan.."@Y>> @x075Winds of Fate @Y>> @wNot scratching @W"..word.."@w - it was said out of order.$C")
+						end
 					end
 				end
 				if rslt == 1 then
