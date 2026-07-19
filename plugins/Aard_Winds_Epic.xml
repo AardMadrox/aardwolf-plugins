@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="2.0"
+   version="2.1"
    save_state="y"
    >
 <description trim="n">
@@ -359,7 +359,6 @@ function init_winds()
 	word = ""
 	cmd = ""
 	pedestal_confirmed = 0 -- words confirmed in order on the current pedestal attempt
-	pending_says = {} -- words held until we're confirmed on the pedestal
 	last_cmd = "" -- last command we tried, kept so we can retry a busy pedestal
 	waiting_for_pedestal = false
 	my_attempt = false -- true while WE are the one running a say sequence
@@ -684,52 +683,54 @@ function use_cmd()
 	if cmd == "" then
 		return
 	end
-	-- Split the command into the "stand" step and the words. Send the stand
-	-- first and hold the words until the game confirms we're actually on the
-	-- pedestal, so a failed step (busy pedestal) doesn't waste our guesses.
-	-- There is deliberately no timeout: the words are ONLY ever released by the
-	-- success message, so nothing can be said unless we know we're standing.
-	pending_says = {}
+	-- Send ONLY the stand step. The words are deliberately not queued here:
+	-- other people keep guessing while we wait to get on, so a list captured
+	-- now would be stale. We build it fresh the moment we land instead.
 	last_cmd = cmd -- keep a copy so a busy pedestal can be retried
 	local stand = nil
 	for c in string.gmatch(cmd, "[^;]+") do
-		if string.match(string.lower(c), "^%s*say%s") then
-			table.insert(pending_says, c)
-		else
+		if not string.match(string.lower(c), "^%s*say%s") then
 			stand = c
 		end
 	end
 	cmd = ""
-	if stand then
-		waiting_for_pedestal = true
-		Send(stand)
-	else
-		send_pending()
-	end
+	waiting_for_pedestal = true
+	Send(stand or "stand on pedestal")
 end
 
-function send_pending()
-	waiting_for_pedestal = false
-	says_outstanding = #pending_says
-	my_attempt = (says_outstanding > 0)
-	for _, c in ipairs(pending_says) do
-		Send(c)
+function build_says()
+	-- the current best guess sequence, straight from live results
+	local t = {}
+	for i = 1, 4 do
+		if i <= side then
+			local s = side_result(i)
+			if s ~= "" then
+				table.insert(t, s)
+			end
+		end
 	end
-	pending_says = {}
+	return t
 end
 
 function on_pedestal()
-	-- we're confirmed on the pedestal; safe to say the words now
-	if waiting_for_pedestal then
-		send_pending()
+	-- Confirmed on the pedestal. Build the word list NOW, from the current
+	-- state, so we never say a word that has been scratched while we waited.
+	if not waiting_for_pedestal then
+		return
+	end
+	waiting_for_pedestal = false
+	local says = build_says()
+	says_outstanding = #says
+	my_attempt = (says_outstanding > 0)
+	for _, c in ipairs(says) do
+		Send(c)
 	end
 end
 
 function off_pedestal()
-	-- Someone else is already on the pedestal, so our step failed. Drop the
-	-- queued words, but keep the command so we can retry the moment it frees up.
+	-- Someone else is already on the pedestal, so our step failed. Nothing was
+	-- queued, so just stand down and keep the command for an immediate retry.
 	waiting_for_pedestal = false
-	pending_says = {}
 	my_attempt = false
 	says_outstanding = 0
 	retry_cmd(" pedestal is busy - words not sent. Type ")
