@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="1.6"
+   version="1.7"
    save_state="y"
    >
 <description trim="n">
@@ -44,6 +44,15 @@ commentz
    match="^As you step onto the pedestal, a gust of air rushes around your skin and envelops you\!$"
    regexp="y"
    script="on_pedestal"
+   sequence="100"
+   group="triggers"
+  >
+  </trigger>
+  <trigger
+   enabled="y"
+   match="^A gust of wind rushes by, pushing you off the pedestal\.$"
+   regexp="y"
+   script="off_pedestal"
    sequence="100"
    group="triggers"
   >
@@ -711,6 +720,17 @@ function on_pedestal()
 	if waiting_for_pedestal then
 		send_pending()
 	end
+end
+
+function off_pedestal()
+	-- pushed off: nothing queued should be said, and our run is over
+	if waiting_for_pedestal or #pending_says > 0 then
+		ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "silver", "", " pushed off the pedestal - words not sent.\n")
+	end
+	waiting_for_pedestal = false
+	pending_says = {}
+	my_attempt = false
+	says_outstanding = 0
 end
 
 function clear_pending()
