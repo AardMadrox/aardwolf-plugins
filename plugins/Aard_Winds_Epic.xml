@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="1.9"
+   version="2.0"
    save_state="y"
    >
 <description trim="n">
@@ -687,7 +687,8 @@ function use_cmd()
 	-- Split the command into the "stand" step and the words. Send the stand
 	-- first and hold the words until the game confirms we're actually on the
 	-- pedestal, so a failed step (busy pedestal) doesn't waste our guesses.
-	-- The game answers a stand attempt basically instantly, so 1s is plenty.
+	-- There is deliberately no timeout: the words are ONLY ever released by the
+	-- success message, so nothing can be said unless we know we're standing.
 	pending_says = {}
 	last_cmd = cmd -- keep a copy so a busy pedestal can be retried
 	local stand = nil
@@ -702,7 +703,6 @@ function use_cmd()
 	if stand then
 		waiting_for_pedestal = true
 		Send(stand)
-		DoAfterSpecial(1, "clear_pending()", 12)
 	else
 		send_pending()
 	end
@@ -742,15 +742,6 @@ function retry_cmd(why)
 	cmd = last_cmd
 	EnableAlias("cmd", true)
 	ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "silver", "", why, "yellow", "", "cmd", "silver", "", " again when it's free.\n")
-end
-
-function clear_pending()
-	-- never got on (barrier, moved, etc.) - drop the queued words
-	if waiting_for_pedestal then
-		waiting_for_pedestal = false
-		pending_says = {}
-		retry_cmd(" never made it onto the pedestal - words not sent. Type ")
-	end
 end
 
 function got_pebble(name, line, args)
