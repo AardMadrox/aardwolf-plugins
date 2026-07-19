@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="1.8"
+   version="1.9"
    save_state="y"
    >
 <description trim="n">
@@ -686,7 +686,8 @@ function use_cmd()
 	end
 	-- Split the command into the "stand" step and the words. Send the stand
 	-- first and hold the words until the game confirms we're actually on the
-	-- pedestal, so a failed step (invisible barrier) doesn't waste our guesses.
+	-- pedestal, so a failed step (busy pedestal) doesn't waste our guesses.
+	-- The game answers a stand attempt basically instantly, so 1s is plenty.
 	pending_says = {}
 	last_cmd = cmd -- keep a copy so a busy pedestal can be retried
 	local stand = nil
@@ -701,7 +702,7 @@ function use_cmd()
 	if stand then
 		waiting_for_pedestal = true
 		Send(stand)
-		DoAfterSpecial(5, "clear_pending()", 12)
+		DoAfterSpecial(1, "clear_pending()", 12)
 	else
 		send_pending()
 	end
