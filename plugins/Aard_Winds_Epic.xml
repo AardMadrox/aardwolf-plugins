@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="1.7"
+   version="1.8"
    save_state="y"
    >
 <description trim="n">
@@ -360,6 +360,7 @@ function init_winds()
 	cmd = ""
 	pedestal_confirmed = 0 -- words confirmed in order on the current pedestal attempt
 	pending_says = {} -- words held until we're confirmed on the pedestal
+	last_cmd = "" -- last command we tried, kept so we can retry a busy pedestal
 	waiting_for_pedestal = false
 	my_attempt = false -- true while WE are the one running a say sequence
 	says_outstanding = 0 -- says we've sent that haven't been answered yet
@@ -687,6 +688,7 @@ function use_cmd()
 	-- first and hold the words until the game confirms we're actually on the
 	-- pedestal, so a failed step (invisible barrier) doesn't waste our guesses.
 	pending_says = {}
+	last_cmd = cmd -- keep a copy so a busy pedestal can be retried
 	local stand = nil
 	for c in string.gmatch(cmd, "[^;]+") do
 		if string.match(string.lower(c), "^%s*say%s") then
@@ -723,14 +725,22 @@ function on_pedestal()
 end
 
 function off_pedestal()
-	-- pushed off: nothing queued should be said, and our run is over
-	if waiting_for_pedestal or #pending_says > 0 then
-		ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "silver", "", " pushed off the pedestal - words not sent.\n")
-	end
+	-- Someone else is already on the pedestal, so our step failed. Drop the
+	-- queued words, but keep the command so we can retry the moment it frees up.
 	waiting_for_pedestal = false
 	pending_says = {}
 	my_attempt = false
 	says_outstanding = 0
+	retry_cmd(" pedestal is busy - words not sent. Type ")
+end
+
+function retry_cmd(why)
+	if last_cmd == "" then
+		return
+	end
+	cmd = last_cmd
+	EnableAlias("cmd", true)
+	ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "silver", "", why, "yellow", "", "cmd", "silver", "", " again when it's free.\n")
 end
 
 function clear_pending()
@@ -738,7 +748,7 @@ function clear_pending()
 	if waiting_for_pedestal then
 		waiting_for_pedestal = false
 		pending_says = {}
-		ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "silver", "", " never made it onto the pedestal - words not sent.\n")
+		retry_cmd(" never made it onto the pedestal - words not sent. Type ")
 	end
 end
 
