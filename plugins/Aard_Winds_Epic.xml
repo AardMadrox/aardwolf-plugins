@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="1.5"
+   version="1.6"
    save_state="y"
    >
 <description trim="n">
@@ -35,6 +35,15 @@ commentz
    match="^(?<player>\w+) steps onto the pedestal\; the pedestal shimmers slightly\.$"
    regexp="y"
    script="player_pedestal"
+   sequence="100"
+   group="triggers"
+  >
+  </trigger>
+  <trigger
+   enabled="y"
+   match="^As you step onto the pedestal, a gust of air rushes around your skin and envelops you\!$"
+   regexp="y"
+   script="on_pedestal"
    sequence="100"
    group="triggers"
   >
@@ -341,6 +350,10 @@ function init_winds()
 	word = ""
 	cmd = ""
 	pedestal_confirmed = 0 -- words confirmed in order on the current pedestal attempt
+	pending_says = {} -- words held until we're confirmed on the pedestal
+	waiting_for_pedestal = false
+	my_attempt = false -- true while WE are the one running a say sequence
+	says_outstanding = 0 -- says we've sent that haven't been answered yet
 	side1 = {[1] = {word = "und"}, [2] = {word = "kaje"}, [3] = {word = "exo"}, [4] = {word = "wond"}, [5] = {word = "soberi"}, [6] = {word = "axo"}, [7] = {word = "wangi"}, [8] = {word = "soju"}}
 	side2 = {[1] = {word = "pavi"}, [2] = {word = "ilion"}, [3] = {word = "edi"}, [4] = {word = "itor"}, [5] = {word = "shooey"}, [6] = {word = "opti"}, [7] = {word = "haviar"}, [8] = {word = "rochu"}}
 	side3 = {[1] = {word = "areo"}, [2] = {word = "lapn"}, [3] = {word = "yzi"}, [4] = {word = "agil"}, [5] = {word = "wantoo"}, [6] = {word = "sevar"}, [7] = {word = "bereth"}, [8] = {word = "embao"}}
@@ -658,11 +671,54 @@ function set_cmd_crowley(name, line, args)
 end
 
 function use_cmd()
-	if cmd ~= "" then
-		for c in string.gmatch(cmd, "[^;]+") do
-			Send(c)
+	if cmd == "" then
+		return
+	end
+	-- Split the command into the "stand" step and the words. Send the stand
+	-- first and hold the words until the game confirms we're actually on the
+	-- pedestal, so a failed step (invisible barrier) doesn't waste our guesses.
+	pending_says = {}
+	local stand = nil
+	for c in string.gmatch(cmd, "[^;]+") do
+		if string.match(string.lower(c), "^%s*say%s") then
+			table.insert(pending_says, c)
+		else
+			stand = c
 		end
-		cmd = ""
+	end
+	cmd = ""
+	if stand then
+		waiting_for_pedestal = true
+		Send(stand)
+		DoAfterSpecial(5, "clear_pending()", 12)
+	else
+		send_pending()
+	end
+end
+
+function send_pending()
+	waiting_for_pedestal = false
+	says_outstanding = #pending_says
+	my_attempt = (says_outstanding > 0)
+	for _, c in ipairs(pending_says) do
+		Send(c)
+	end
+	pending_says = {}
+end
+
+function on_pedestal()
+	-- we're confirmed on the pedestal; safe to say the words now
+	if waiting_for_pedestal then
+		send_pending()
+	end
+end
+
+function clear_pending()
+	-- never got on (barrier, moved, etc.) - drop the queued words
+	if waiting_for_pedestal then
+		waiting_for_pedestal = false
+		pending_says = {}
+		ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "silver", "", " never made it onto the pedestal - words not sent.\n")
 	end
 end
 
@@ -783,6 +839,8 @@ end
 function say_result(name, line, args)
 	local rslt
 	if args.portal == "portal" then
+		my_attempt = false
+		says_outstanding = 0
 		-- all done, guessed 4th word
 		--SetTriggerOption("player_says", "match", "this is set by function")
 		if sitter then
@@ -797,6 +855,14 @@ function say_result(name, line, args)
 		rslt = 1
 	elseif args.bolt == "bolt" then
 		rslt = 0
+	end
+	if my_attempt and says_outstanding > 0 then
+		says_outstanding = says_outstanding - 1
+	end
+	if rslt == 0 then
+		-- bolted off the pedestal; our run is over
+		my_attempt = false
+		says_outstanding = 0
 	end
 	for i = 1, 4 do
 		local t = _G["side"..i]
@@ -818,6 +884,15 @@ function say_result(name, line, args)
 						pedestal_confirmed = i
 						if i >= side then -- advance only, never rewind
 							side = i+1
+						end
+						-- If that was the last word we had queued and it was right,
+						-- keep going: say the first candidate on the next side.
+						if my_attempt and says_outstanding <= 0 and side <= 4 then
+							local nxt = side_result(side)
+							if nxt ~= "" then
+								says_outstanding = 1
+								Send(nxt)
+							end
 						end
 					end
 					if sitter then
