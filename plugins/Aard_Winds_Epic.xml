@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="2.2"
+   version="2.3"
    save_state="y"
    >
 <description trim="n">
@@ -921,12 +921,13 @@ function say_result(name, line, args)
 							side = i+1
 						end
 						-- If that was the last word we had queued and it was right,
-						-- keep going: say the first candidate on the next side.
+						-- put the next side's first candidate on the clipboard so it
+						-- can just be pasted to continue (no auto-saying).
 						if my_attempt and says_outstanding <= 0 and side <= 4 then
 							local nxt = side_result(side)
 							if nxt ~= "" then
-								says_outstanding = 1
-								Send(nxt)
+								SetClipboard(nxt)
+								ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "silver", "", " next guess ", "white", "", nxt, "silver", "", " copied - paste to continue.\n")
 							end
 						end
 					end
