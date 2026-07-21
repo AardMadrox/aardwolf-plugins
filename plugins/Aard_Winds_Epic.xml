@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="2.3"
+   version="2.4"
    save_state="y"
    >
 <description trim="n">
@@ -926,8 +926,9 @@ function say_result(name, line, args)
 						if my_attempt and says_outstanding <= 0 and side <= 4 then
 							local nxt = side_result(side)
 							if nxt ~= "" then
+								local w = string.match(nxt, "^%s*say%s+(.+)$") or nxt
 								SetClipboard(nxt)
-								ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "silver", "", " next guess ", "white", "", nxt, "silver", "", " copied - paste to continue.\n")
+								ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "silver", "", " Say ", "white", "", w, "silver", "", " to progress. (copied - paste to continue)\n")
 							end
 						end
 					end
