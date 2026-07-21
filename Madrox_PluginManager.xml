@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-06-27"
    requires="4.00"
-   version="1.0"
+   version="1.1"
    >
 <description trim="y">
 <![CDATA[
@@ -79,8 +79,22 @@ local function parse_field(page, field)
    return page:match('[\r\n]%s*' .. field .. '%s*=%s*"([^"]+)"')
 end
 
-local function ver_num(v)
-   return tonumber((tostring(v):gsub("[^%d%.]", ""))) or 0
+-- split a version into its numeric parts, e.g. "1.10" -> {1, 10}
+local function ver_parts(v)
+   local t = {}
+   for n in tostring(v):gmatch("%d+") do t[#t + 1] = tonumber(n) end
+   return t
+end
+
+-- compare versions part-by-part so 1.10 correctly beats 1.9. returns true if a >= b
+local function ver_ge(a, b)
+   local pa, pb = ver_parts(a), ver_parts(b)
+   local n = math.max(#pa, #pb)
+   for i = 1, n do
+      local x, y = pa[i] or 0, pb[i] or 0
+      if x ~= y then return x > y end
+   end
+   return true  -- all parts equal
 end
 
 local function file_from_url(url)
@@ -173,10 +187,9 @@ function renderMenu()
    ColourNote("white", "slateblue", "      [ Madrox Plugin Manager ]      ")
    ColourNote("cyan", "", "Click a plugin name for info, or a button to act.")
    for i, e in ipairs(cache) do
-      local gh  = ver_num(e.ghver)
-      local loc = ver_num(e.localver)
+      local up_to_date = ver_ge(e.localver, e.ghver)
       if e.installed then
-         if loc >= gh then
+         if up_to_date then
             ColourTell("cyan", "", " [", "green", "", "x", "cyan", "", "] ")
          else
             ColourTell("cyan", "", " [", "yellow", "", "!", "cyan", "", "] ")
@@ -191,7 +204,7 @@ function renderMenu()
 
       if not e.installed then
          Hyperlink("mpm install " .. i, "[Install]", "Install this plugin", "darkorange", "black", 0, 1)
-      elseif loc < gh then
+      elseif not up_to_date then
          Hyperlink("mpm update " .. i, "[Update]", "Download and update", "darkorange", "black", 0, 1)
          Hyperlink("mpm remove " .. i, "[Remove]", "Unload and delete", "red", "black", 0, 1)
       else
@@ -247,7 +260,7 @@ function cmdUpdate(n)
       info(e.name .. " is not installed. Use 'mpm install " .. tostring(n) .. "'.")
       return
    end
-   if ver_num(e.localver) >= ver_num(e.ghver) then
+   if ver_ge(e.localver, e.ghver) then
       info(e.name .. " is already up to date (v" .. tostring(e.localver) .. ").")
       return
    end
@@ -289,7 +302,7 @@ function cmdUpdateAll()
    if not initialized then info("List not ready yet - run 'mpm' first.") return end
    local any = false
    for i, e in ipairs(cache) do
-      if e.id ~= "" and IsPluginInstalled(e.id) and ver_num(e.localver) < ver_num(e.ghver) then
+      if e.id ~= "" and IsPluginInstalled(e.id) and not ver_ge(e.localver, e.ghver) then
          any = true
          cmdUpdate(i)
       end
@@ -303,9 +316,9 @@ end
 
 function mpm_self_check(retval, page, status, headers, full_status, request_url)
    if status ~= 200 or not page then err("Self-update check failed (status " .. tostring(status) .. ").") return end
-   local raw_version = ver_num(parse_field(page, "[Vv][Ee][Rr][Ss][Ii][Oo][Nn]"))
-   local mine = ver_num(GetPluginInfo(GetPluginID(), 19))
-   if raw_version <= mine then
+   local raw_version = parse_field(page, "[Vv][Ee][Rr][Ss][Ii][Oo][Nn]") or "0"
+   local mine = GetPluginInfo(GetPluginID(), 19)
+   if ver_ge(mine, raw_version) then
       info("Madrox Plugin Manager is up to date (v" .. tostring(mine) .. ").")
       return
    end
@@ -337,7 +350,8 @@ end
 function showHelp()
    ColourNote("white", "slateblue", "      Madrox Plugin Manager - help      ")
    local lines = {
-      "mpm              - show the plugin list",
+      "mpm              - re-read from GitHub and show the plugin list",
+      "mpm list         - show the list without re-reading GitHub",
       "mpm update <n>   - update plugin number <n>",
       "mpm install <n>  - install plugin number <n>",
       "mpm reload <n>   - reload plugin number <n>",
@@ -353,7 +367,8 @@ end
 
 function mpmMain(name, line, wc)
    local first, rest = (wc[1] or ""):match("(%S*)%s*(.*)")
-   if first == nil or first == "" then renderMenu(); return end
+   -- plain "mpm" always re-reads from GitHub so versions are live; "mpm list" shows the cached view
+   if first == nil or first == "" then buildCache(true); return end
    first = first:lower()
 
    if     first == "help"      then showHelp()
