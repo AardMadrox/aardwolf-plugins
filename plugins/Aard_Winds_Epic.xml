@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="2.1"
+   version="2.2"
    save_state="y"
    >
 <description trim="n">
@@ -683,43 +683,50 @@ function use_cmd()
 	if cmd == "" then
 		return
 	end
-	-- Send ONLY the stand step. The words are deliberately not queued here:
-	-- other people keep guessing while we wait to get on, so a list captured
-	-- now would be stale. We build it fresh the moment we land instead.
-	last_cmd = cmd -- keep a copy so a busy pedestal can be retried
-	local stand = nil
-	for c in string.gmatch(cmd, "[^;]+") do
-		if not string.match(string.lower(c), "^%s*say%s") then
-			stand = c
-		end
-	end
-	cmd = ""
+	-- Send ONLY the stand step. The words are NOT captured now: while we wait to
+	-- get on, the announcer keeps re-broadcasting an updated command (set_cmd
+	-- refreshes `cmd`) as words get scratched. We read the freshest `cmd` at the
+	-- moment we actually land, so we only ever say the current proper list.
+	last_cmd = cmd -- fallback in case cmd gets cleared before we land
 	waiting_for_pedestal = true
-	Send(stand or "stand on pedestal")
+	Send(cmd_stand(cmd))
 end
 
-function build_says()
-	-- the current best guess sequence, straight from live results
+function cmd_stand(c)
+	-- the non-"say" part of a command (the stand step)
+	for part in string.gmatch(c, "[^;]+") do
+		if not string.match(string.lower(part), "^%s*say%s") then
+			return part
+		end
+	end
+	return "stand on pedestal"
+end
+
+function cmd_says(c)
+	-- the ordered list of "say <word>" parts of a command
 	local t = {}
-	for i = 1, 4 do
-		if i <= side then
-			local s = side_result(i)
-			if s ~= "" then
-				table.insert(t, s)
-			end
+	for part in string.gmatch(c, "[^;]+") do
+		if string.match(string.lower(part), "^%s*say%s") then
+			table.insert(t, part)
 		end
 	end
 	return t
 end
 
 function on_pedestal()
-	-- Confirmed on the pedestal. Build the word list NOW, from the current
-	-- state, so we never say a word that has been scratched while we waited.
+	-- Confirmed on the pedestal. Take the words from the freshest command we
+	-- have (the announcer's latest broadcast), NOT from local tracking, since a
+	-- follower who just arrived may not have watched the earlier guesses.
 	if not waiting_for_pedestal then
 		return
 	end
 	waiting_for_pedestal = false
-	local says = build_says()
+	pedestal_confirmed = 0 -- our own attempt starts fresh
+	local src = cmd
+	if src == "" then
+		src = last_cmd
+	end
+	local says = cmd_says(src)
 	says_outstanding = #says
 	my_attempt = (says_outstanding > 0)
 	for _, c in ipairs(says) do
@@ -737,10 +744,15 @@ function off_pedestal()
 end
 
 function retry_cmd(why)
-	if last_cmd == "" then
-		return
+	-- Make sure a command is available to retry. Prefer whatever the announcer
+	-- has most recently broadcast (cmd); only fall back to our stashed copy if
+	-- cmd was cleared and nothing fresher has arrived yet.
+	if cmd == "" then
+		if last_cmd == "" then
+			return
+		end
+		cmd = last_cmd
 	end
-	cmd = last_cmd
 	EnableAlias("cmd", true)
 	ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "silver", "", why, "yellow", "", "cmd", "silver", "", " again when it's free.\n")
 end
