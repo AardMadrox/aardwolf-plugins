@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-06-27"
    requires="4.00"
-   version="1.1"
+   version="1.2"
    >
 <description trim="y">
 <![CDATA[
@@ -79,22 +79,17 @@ local function parse_field(page, field)
    return page:match('[\r\n]%s*' .. field .. '%s*=%s*"([^"]+)"')
 end
 
--- split a version into its numeric parts, e.g. "1.10" -> {1, 10}
-local function ver_parts(v)
-   local t = {}
-   for n in tostring(v):gmatch("%d+") do t[#t + 1] = tonumber(n) end
-   return t
+-- MUSHclient stores a plugin's version as a decimal NUMBER (so "1.10" == 1.1),
+-- and GetPluginInfo(id,19) hands it back numerically. To stay consistent with the
+-- installed side, compare versions as plain decimal numbers here too. Rule for
+-- version= numbers: keep the minor a single digit; after x.9 roll to (x+1).0.
+local function ver_num(v)
+   return tonumber((tostring(v):gsub("[^%d%.]", ""))) or 0
 end
 
--- compare versions part-by-part so 1.10 correctly beats 1.9. returns true if a >= b
+-- true if version a is >= version b
 local function ver_ge(a, b)
-   local pa, pb = ver_parts(a), ver_parts(b)
-   local n = math.max(#pa, #pb)
-   for i = 1, n do
-      local x, y = pa[i] or 0, pb[i] or 0
-      if x ~= y then return x > y end
-   end
-   return true  -- all parts equal
+   return ver_num(a) >= ver_num(b)
 end
 
 local function file_from_url(url)

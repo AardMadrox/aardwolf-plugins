@@ -9,7 +9,7 @@
    purpose="Step-by-step pup pathing with named routes"
    date_written="2026-06-14"
    requires="4.40"
-   version="1.10"
+   version="2.0"
 >
 <description trim="y">
 PupPaths: Walk named paths one room at a time. Type the path keyword to advance.
