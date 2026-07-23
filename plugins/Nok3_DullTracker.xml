@@ -14,7 +14,7 @@
    purpose="Aardwolf Character Development Tracking (Rewrite of SharpTracker)"
    save_state="y"   
    requires="4.70"
-   version="2.0"
+   version="2.1"
    >
 <description trim="n">
 		<![CDATA[
@@ -1229,7 +1229,7 @@
 		-- Icefall2
 		{ func = "IncrementField", attributes = { field = "gold_epic" }, group="epic_icefall2", enabled="n", match = "^You receive (?<amount>[0-9,]+) gold coins\\.$" },
 		{ func = "IncrementField", attributes = { field = "qp_epic" }, group="epic_icefall2", enabled="n", match = "^You receive (?<amount>[0-9]+) quest points\\.$" },
-		{ func = "IncrementField", attributes = { field = "tr_epic" }, group="epic_icefall2", enabled="n", match = "^An Icefall mystic says, \"I hope that you continue adventuring this realm\\. Hopefully these (?<amount>[0-9]+) training sessions help you\\.\"$" },
+		{ func = "IncrementField", attributes = { field = "tr_epic" }, group="epic_icefall2", enabled="n", match = "^IceHVH says, \"I hope that you continue adventuring this realm\\. Hopefully these (?<amount>[0-9]+) training sessions help you\\.\"$" },
 		{ func = "IncrementField", attributes = { field = "tr_epic" }, group="epic_icefall2", enabled="n", match = "^You receive (?<amount>[0-9]+) training sessions\\.$" },
 		{ func = "IncrementCount", attributes = { field = "tp_epic" }, group="epic_icefall2", enabled="n", match = "^You receive a Trivia Point Token from .*\\.$" },
 
