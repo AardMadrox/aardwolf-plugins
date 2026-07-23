@@ -9,6 +9,7 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 | Plugin | What it does |
 | --- | --- |
 | **PortalValue** | Finds the closest saved portal to a room and shows the value of a portal to it. |
+| **PortalUse** | Tracks how often you use each worn portal, with a top-usage list (`portalusetop`) and optional destination-area lookup. |
 | **FHX** | Repeatedly casts `incomp` on yourself or others until healed. |
 | **PupPaths** | Step-by-step pup pathing with named, saved routes. |
 | **ChaosCast** | Tracks chaos-portal casts (normal vs golden). |
