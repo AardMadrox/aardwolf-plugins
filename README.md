@@ -17,6 +17,7 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 | **MatronReporter** | Times Matron Dragon runs and reports rewards. |
 | **SKDReport** | Times SKD runs and reports trains/gold/TP/Repop Token/Sigil rewards. |
 | **SKDMoonlight** | Finds the good moonlight room during the SKD taunt phase (`ml` / `mlf`). ⚠️ New — still needs live testing. |
+| **Nokfah's Dull with Epic Bonus Reward tracking** | Character development tracker (`dull`) — session/lifetime XP, gold, QP, trains, TP, epics, and per-epic lifetime reward records (`dull epic<name>`). Modified from Nokfah's DullTracker. |
 
 ## Easiest way to install & stay updated: the Plugin Manager
 
