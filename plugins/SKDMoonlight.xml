@@ -1,0 +1,539 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="SKDMoonlight"
+   author="Eric"
+   id="d6634259c460dd095f541e32"
+   language="Lua"
+   purpose="Finds the good moonlight room during SKD taunt phase - NEW, still needs live testing"
+   date_written="2026-07-23"
+   requires="4.00"
+   version="1.0"
+   save_state="n"
+>
+</plugin>
+
+<aliases>
+  <alias match="^ml$"                    enabled="y" regexp="y" sequence="200" script="cmd_ml"></alias>
+  <alias match="^mlf$"                   enabled="y" regexp="y" sequence="200" script="cmd_mlhunt"></alias>
+  <alias match="^mlf stop$"              enabled="y" regexp="y" sequence="200" script="cmd_mlhunt_stop"></alias>
+  <alias match="^mlf help$"              enabled="y" regexp="y" sequence="200" script="cmd_help"></alias>
+  <alias match="^mlf bounces (\d+)$"     enabled="y" regexp="y" sequence="200" script="cmd_set_bounces"></alias>
+</aliases>
+
+<triggers>
+  <!-- Moonlight seen in the room you are standing in (good OR bad) -->
+  <trigger
+   enabled="y"
+   match="^.*Shimmering moonlight floats through the cracks in the ceiling to grace the floor\.$"
+   regexp="y"
+   script="good_ml_line"
+   sequence="100"
+  >
+  </trigger>
+  <!-- Bad moonlight confirmation (the pain room) -->
+  <trigger
+   enabled="y"
+   match="^.*moonlight.*caresses your cheek.*$"
+   regexp="y"
+   script="bad_ml_line"
+   sequence="100"
+  >
+  </trigger>
+
+  <!-- Any taunt landing moves the moonlight - reset tracking / abort hunt -->
+  <trigger
+   enabled="y"
+   match="^You shout ridiculous insults at the Sea King, whose face reddens with rage\.$"
+   regexp="y"
+   script="ml_reset"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="y"
+   match="^From somewhere nearby, you hear (.*?) shout ridiculous insults at the Sea King\.|^(.*?) shouts ridiculous insults at the Sea King, whose face reddens with rage\.$"
+   regexp="y"
+   script="ml_reset"
+   sequence="100"
+  >
+  </trigger>
+
+  <!-- Phase changes - moonlight no longer relevant, reset / abort hunt -->
+  <trigger
+   enabled="y"
+   match="^The Sea King leaps away, clinging to the ceiling overhead\.$"
+   regexp="y"
+   script="ml_reset"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="y"
+   match="^The Sea King drops back down to the floor and glances over the wreckage\.$"
+   regexp="y"
+   script="ml_reset"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="y"
+   match="^His eyes begin to glow red, and you feel your soul start to pull away from your body\.$"
+   regexp="y"
+   script="ml_reset"
+   sequence="100"
+  >
+  </trigger>
+</triggers>
+
+<script>
+<![CDATA[
+dofile(GetInfo(60) .. "aardwolf_colors.lua")
+require "gmcphelper"
+
+-- cnote: echoes @-colour-coded text locally, in colour
+function cnote(s)
+  AnsiNote(stylesToANSI(ColoursToStyles(s)))
+end
+
+-- gtell: sends a colour-coded message to the group, no local echo
+function gtell(msg)
+  SendNoEcho("gtell " .. msg)
+end
+
+-- ===========================================================
+--  Moonlight locator (from Kanaye's SKDAssistant idea)
+--  During the taunt phase there are moonlit arena rooms: bad ones
+--  (shimmering line, then a RANDOM-chance "moonlight caresses your
+--  cheek" + pain on entry) and the good one (shimmering, never a
+--  caress). Standing detection: mark bad rooms off the caress line;
+--  once 2 bad rooms are known, the next moonlit room is good by
+--  elimination and is announced. The mlf hunt auto-walks and tests.
+-- ===========================================================
+
+-- The 12 SKD arena rooms: compass label + adjacent tanking spots.
+-- GMCP room numbers arrive as strings, so keys are strings.
+local ml_rooms = {
+  ["28379"] = { label = "NA", tank = {"N"} },
+  ["28380"] = { label = "N",  tank = {"NA", "NW", "NE"} },
+  ["28381"] = { label = "NW", tank = {"N", "W"} },
+  ["28383"] = { label = "W",  tank = {"NW", "SA", "SW"} },
+  ["28384"] = { label = "WA", tank = {"W"} },
+  ["28387"] = { label = "SW", tank = {"W", "S"} },
+  ["28389"] = { label = "S",  tank = {"SA", "SW", "SE"} },
+  ["28390"] = { label = "SA", tank = {"S"} },
+  ["28388"] = { label = "SE", tank = {"S", "E"} },
+  ["28385"] = { label = "E",  tank = {"EA", "SE", "NE"} },
+  ["28386"] = { label = "EA", tank = {"E"} },
+  ["28382"] = { label = "NE", tank = {"N", "E"} },
+}
+
+local label_to_room = {}
+for num, d in pairs(ml_rooms) do label_to_room[d.label] = num end
+
+local ml_bad       = {}    -- set: room -> true for known bad-moonlight rooms
+local ml_bad_queue = {}    -- same rooms in sighting order (max 2 kept)
+local ml_announced = nil   -- room called as good this cycle, if any
+
+-- A circuit of the arena: N, NE, E, EA, SE, S, SA, SW, W, WA, NW, NA
+local hunt_order = {
+  "28380", "28382", "28385", "28386", "28388", "28389",
+  "28390", "28387", "28383", "28384", "28381", "28379",
+}
+local GMCP_ID        = "3e7dedbe37e44942dd46d264"
+local hunting        = false
+local hunt_route     = {}
+local hunt_index     = 0
+local hunt_laps      = 0     -- completed circuits this hunt
+local HUNT_MAX_LAPS  = 3
+-- The caress is a RANDOM chance each entry (instant when it fires), so a
+-- single entry can never prove a room good - we bounce in/out and only
+-- call a room good after HUNT_BOUNCES clean entries with no caress.
+local HUNT_BOUNCES   = 5    -- clean in/out entries to call a moonlit room good (adjustable: mlf bounces N)
+local HUNT_PEEK      = 0.25 -- short window after each entry to catch the (instant) caress
+local HUNT_MOVE_TIMEOUT = 6 -- seconds before a stuck move aborts the hunt
+-- Navigation is strictly one move at a time: we only ever issue the
+-- next mapper goto once room.info confirms arrival at hunt_await.
+local hunt_await     = nil   -- room number we are waiting to arrive at
+local hunt_mode      = nil   -- "walk" | "bounce_out" | "bounce_in"
+local hunt_move_tok  = 0     -- token so a stale watchdog can't fire
+local eval_room      = nil   -- room we've arrived in and are judging
+local eval_shimmer   = false -- shimmer (moonlit) seen in eval_room
+local eval_caressed  = false -- caress (bad moonlight) seen in eval_room
+local test_room      = nil   -- moonlit room currently being bounce-tested
+local test_partner   = nil   -- adjacent room we bounce out to
+local test_count     = 0     -- clean entries so far this test
+local hunt_alas      = 0     -- consecutive blocked-move messages
+
+local function hunt_note(msg)
+  cnote("@x099[@x045SKDMoonlight@x099]@w " .. msg)
+end
+
+function hunt_abort(reason)
+  if hunting then
+    hunting = false
+    eval_room = nil
+    hunt_await = nil
+    hunt_mode = nil
+    test_room = nil
+    hunt_note(reason .. " - hunt @x196aborted@w. Type @x048mlf@w to go again.")
+  end
+end
+
+function ml_reset(name, line, wildcards)
+  ml_bad = {}
+  ml_bad_queue = {}
+  ml_announced = nil
+  hunt_abort("Moonlight moved")
+end
+
+local function ml_message(details)
+  local t = details.tank
+  local spots
+  if #t == 1 then
+    spots = "@x048" .. t[1]
+  elseif #t == 2 then
+    spots = "@x048" .. t[1] .. "@w or @x048" .. t[2]
+  else
+    spots = "@x048" .. table.concat(t, "@w, @x048", 1, #t - 1) .. "@w or @x048" .. t[#t]
+  end
+  return "@x099(@x045SKD@x099)@w @x048GOOD MOONLIGHT@w at @x045" .. details.label ..
+         "@w! Tank the Sea King at " .. spots .. "@w"
+end
+
+-- Caress line seen: this room is bad moonlight. Records the fact only -
+-- it NEVER drives navigation (the hunt state machine owns movement).
+-- While hunting it just raises eval_caressed for the room we're judging.
+function bad_ml_line(name, line, wildcards)
+  local room_num = gmcp("room.info.num")
+  if not room_num or not ml_rooms[room_num] then return end
+  if hunting and room_num == eval_room then
+    eval_caressed = true
+  end
+  if ml_announced == room_num then
+    gtell("@x099(@x045SKD@x099)@w Scratch that - @x045" .. ml_rooms[room_num].label ..
+          "@w is @x196BAD@w moonlight, keep hunting!")
+    ml_announced = nil
+  end
+  if not ml_bad[room_num] then
+    ml_bad[room_num] = true
+    table.insert(ml_bad_queue, room_num)
+    if #ml_bad_queue > 2 then
+      ml_bad[table.remove(ml_bad_queue, 1)] = nil -- a bad moonlight moved; forget the oldest
+    end
+  end
+end
+
+-- Shimmering line seen: once 2 bad rooms are known, any other room
+-- showing it is the good one by elimination - call it immediately.
+-- During a hunt, the hunt logic owns the decision instead.
+function good_ml_line(name, line, wildcards)
+  if hunting then
+    -- shimmer = this room is moonlit; note it for the room we're judging
+    if eval_room and gmcp("room.info.num") == eval_room then
+      eval_shimmer = true
+    end
+    return
+  end
+  if ml_announced or #ml_bad_queue < 2 then return end
+  local room_num = gmcp("room.info.num")
+  if not room_num or not ml_rooms[room_num] then return end
+  if ml_bad[room_num] then return end
+  ml_announced = room_num
+  gtell(ml_message(ml_rooms[room_num]))
+end
+
+function cmd_ml(name, line, wildcards)
+  local room_num = gmcp("room.info.num")
+  local details = room_num and ml_rooms[room_num]
+  if not details then
+    cnote("@x099[@x045SKDMoonlight@x099]@w Not in the SKD arena - stand in the good moonlight room and try @x048ml@w again.")
+    return
+  end
+  SendNoEcho("gtell " .. ml_message(details))
+end
+
+-- ===========================================================
+--  Moonlight hunt: mlf walks the arena, and in each moonlit room it
+--  bounces in and out - the way a person does it - because the caress
+--  is a RANDOM chance per entry (instant when it fires). Every entry:
+--    * caress this entry  -> BAD moonlight, move on to the next room
+--    * clean entry        -> count it; after HUNT_BOUNCES clean entries
+--                            with no caress, call it GOOD and stop here
+--  Once 2 bad rooms are known, the next moonlit room is GOOD by
+--  elimination (no bouncing). Non-moonlit rooms are skipped after a
+--  quick glance. Navigation is strictly one move at a time. Laps
+--  repeat (up to 3) if nothing found.
+-- ===========================================================
+
+-- Issue exactly one move and arm a watchdog. No other movement command
+-- may be sent until room.info confirms arrival at this target.
+function hunt_go(room, mode)
+  hunt_await = room
+  hunt_mode = mode
+  hunt_move_tok = hunt_move_tok + 1
+  local tok = hunt_move_tok
+  DoAfterSpecial(HUNT_MOVE_TIMEOUT, "hunt_move_watchdog(" .. tok .. ")", 12)
+  Execute("mapper goto " .. room)
+end
+
+-- If a move never lands (mapper confused, blocked, etc.) abort cleanly
+-- instead of letting the hunt wander into walls.
+function hunt_move_watchdog(tok)
+  if not hunting then return end
+  if hunt_await ~= nil and tok == hunt_move_tok then
+    hunt_abort("Navigation stalled (couldn't reach the next room)")
+  end
+end
+
+-- Move on to the next circuit room (ends any test in progress).
+function hunt_next()
+  test_room = nil
+  test_partner = nil
+  test_count = 0
+  hunt_index = hunt_index + 1
+  if hunt_index > #hunt_route then
+    -- circuit done without finding the good room - go around again
+    hunt_laps = hunt_laps + 1
+    if hunt_laps >= HUNT_MAX_LAPS then
+      hunting = false
+      hunt_await = nil
+      hunt_mode = nil
+      hunt_note("Walked the arena " .. HUNT_MAX_LAPS .. " times without finding good moonlight - giving up. @x048mlf@w to retry.")
+      return
+    end
+    hunt_note("Lap done, no good moonlight found yet - going around again.")
+    hunt_index = 1
+  end
+  hunt_go(hunt_route[hunt_index], "walk")
+end
+
+-- Pick an adjacent tank room to bounce out to, preferring one not
+-- already known bad so we take less avoidable pain.
+local function pick_partner(room)
+  local tanks = ml_rooms[room].tank
+  for _, lbl in ipairs(tanks) do
+    local r = label_to_room[lbl]
+    if r and not ml_bad[r] then return r end
+  end
+  return label_to_room[tanks[1]]
+end
+
+function cmd_mlhunt(name, line, wildcards)
+  if hunting then
+    hunt_note("Hunt already running - @x048mlf stop@w to abort.")
+    return
+  end
+  local room_num = gmcp("room.info.num")
+  if not room_num or not ml_rooms[room_num] then
+    hunt_note("You need to be inside the SKD arena to start a moonlight hunt.")
+    return
+  end
+  local start_pos = 1
+  for i, r in ipairs(hunt_order) do
+    if r == room_num then
+      start_pos = i
+      break
+    end
+  end
+  hunt_route = {}
+  for i = 1, #hunt_order do
+    table.insert(hunt_route, hunt_order[((start_pos - 1 + i) % #hunt_order) + 1])
+  end
+  hunting = true
+  hunt_index = 0
+  hunt_laps = 0
+  hunt_await = nil
+  hunt_mode = nil
+  eval_room = nil
+  eval_shimmer = false
+  eval_caressed = false
+  test_room = nil
+  test_partner = nil
+  test_count = 0
+  hunt_alas = 0
+  hunt_note("Moonlight hunt started - walking the arena. @x048mlf stop@w to abort.")
+  hunt_next()
+end
+
+-- A blocked move during a hunt: re-path from where we actually are.
+-- Give up after a few in a row rather than pinball off walls.
+function hunt_alas_line(name, line, wildcards)
+  if not hunting or not hunt_await then return end
+  hunt_alas = hunt_alas + 1
+  if hunt_alas > 3 then
+    hunt_abort("Navigation blocked (kept hitting walls)")
+    return
+  end
+  Execute("mapper goto " .. hunt_await)
+end
+
+function cmd_mlhunt_stop(name, line, wildcards)
+  if hunting then
+    hunting = false
+    eval_room = nil
+    hunt_await = nil
+    hunt_mode = nil
+    test_room = nil
+    hunt_note("Moonlight hunt @x196aborted@w.")
+  else
+    hunt_note("No hunt running.")
+  end
+end
+
+-- Declare a room good and stop the hunt. `reason` explains how we knew.
+local function hunt_stop_good(room, reason)
+  test_room = nil
+  hunting = false
+  hunt_await = nil
+  hunt_mode = nil
+  ml_announced = room
+  gtell(ml_message(ml_rooms[room]))
+  hunt_note(reason .. " - @x045" .. ml_rooms[room].label ..
+            "@w is @x048good moonlight@w, stopping here.")
+end
+
+-- HUNT_PEEK after each entry, judge what we saw.
+--   caress            -> BAD, move on
+--   moonlit, walk-in  -> if the 2 bad rooms are already known, this other
+--                        moonlit room is GOOD by elimination (no bouncing);
+--                        otherwise start bouncing it
+--   moonlit, bounced  -> another clean entry; after HUNT_BOUNCES of them
+--                        with no caress, call it GOOD
+function hunt_judge()
+  if not hunting or not eval_room then return end
+  if eval_caressed then
+    local bad = eval_room
+    hunt_note("@x045" .. ml_rooms[bad].label .. "@w caressed - @x196BAD@w, moving on.")
+    hunt_next()
+    return
+  end
+  if hunt_mode == "walk" then
+    if not eval_shimmer then
+      hunt_next()  -- not moonlit, skip it
+      return
+    end
+    if ml_bad[eval_room] then
+      hunt_next()  -- already known bad, no need to test again
+      return
+    end
+    if #ml_bad_queue >= 2 then
+      -- both bad moonlights are known; this other moonlit room is the good one
+      hunt_stop_good(eval_room, "Both bad moonlights found")
+      return
+    end
+    -- fewer than 2 bads known: bounce-test this moonlit room
+    test_room = eval_room
+    test_partner = pick_partner(eval_room)
+    test_count = 1
+    hunt_note("@x045" .. ml_rooms[test_room].label .. "@w is moonlit - checking in/out...")
+  else
+    test_count = test_count + 1
+  end
+  if test_count >= HUNT_BOUNCES then
+    hunt_stop_good(test_room, "No caress in " .. HUNT_BOUNCES .. " entries")
+  else
+    hunt_go(test_partner, "bounce_out")
+  end
+end
+
+-- GMCP drives the hunt: room.info = arrival (only acted on when it
+-- matches the room we're waiting for), char.status = combat check.
+function OnPluginBroadcast(msg, id, name, text)
+  if id ~= GMCP_ID then return end
+  if not hunting then return end
+  if text == "char.status" then
+    if gmcp("char.status.state") == "8" then
+      hunt_abort("You're being attacked")
+    end
+    return
+  end
+  if text ~= "room.info" then return end
+  local room_num = gmcp("room.info.num")
+  if room_num ~= hunt_await then return end  -- passing through / not there yet
+  hunt_await = nil
+  hunt_alas = 0
+  if hunt_mode == "bounce_out" then
+    hunt_go(test_room, "bounce_in")  -- at the partner, straight back in
+    return
+  end
+  -- walk or bounce_in arrival: judge this entry once the lines have printed
+  eval_room = room_num
+  eval_shimmer = false
+  eval_caressed = false
+  DoAfterSpecial(HUNT_PEEK, "hunt_judge()", 12)
+end
+
+-- Bounce count is user-tunable and saved next to the plugin so it
+-- survives reinstalls (SetVariable would not).
+local BOUNCES_FILE = GetPluginInfo(GetPluginID(), 20) .. "SKDMoonlight_config.txt"
+
+function save_bounces()
+  local f = io.open(BOUNCES_FILE, "w")
+  if f then
+    f:write("bounces=" .. HUNT_BOUNCES .. "\n")
+    f:close()
+  end
+end
+
+function load_bounces()
+  local f = io.open(BOUNCES_FILE, "r")
+  if f then
+    for l in f:lines() do
+      local n = l:match("^bounces=(%d+)")
+      if n then HUNT_BOUNCES = tonumber(n) end
+    end
+    f:close()
+  end
+end
+
+function cmd_set_bounces(name, line, wildcards)
+  local n = tonumber(wildcards[1])
+  if not n or n < 1 or n > 99 then
+    cnote("@x099[@x045SKDMoonlight@x099]@w Bounce count must be @x0481-99@w. Currently @x048" .. HUNT_BOUNCES .. "@w.")
+    return
+  end
+  HUNT_BOUNCES = n
+  save_bounces()
+  cnote("@x099[@x045SKDMoonlight@x099]@w Moonlight bounce count set to @x048" .. HUNT_BOUNCES ..
+        "@w (entries with no caress before a room is called good).")
+end
+
+function cmd_help(name, line, wildcards)
+  cnote("")
+  cnote("@x099===== @x045SKD Moonlight Finder@x099 =====@w")
+  cnote("@wFinds the good moonlight room during the SKD taunt phase.")
+  cnote("@wStanding still: once @x0482@w bad rooms are known it auto-gtells the good one when")
+  cnote("@wyou're in it. Or use @x048mlf@w to auto-walk the arena and find it hands-free.")
+  cnote("")
+  cnote("@wCommands:@w")
+  cnote("  @Wml@w                  gtell good moonlight from the room you're standing in")
+  cnote("  @Wmlf@w                 auto-walk the arena; in each moonlit room bounce in/out -")
+  cnote("                      a caress = bad, move on. Once @x0482@w bad rooms are known the")
+  cnote("                      next moonlight is auto-flagged good; otherwise no caress in")
+  cnote("                      @x048" .. HUNT_BOUNCES .. "@w entries = good. Stops standing in the good room.")
+  cnote("  @Wmlf stop@w            abort a running hunt")
+  cnote("  @Wmlf bounces <#>@w     set the no-caress entry count (now @x048" .. HUNT_BOUNCES .. "@w)")
+  cnote("  @Wmlf help@w            this help")
+  cnote("")
+  cnote("@D(The hunt uses the Aardwolf mapper to move. It stops itself if a taunt lands,")
+  cnote("@D the phase changes, or you get attacked.)@w")
+  cnote("")
+end
+
+-- ===========================================================
+--  Lifecycle
+-- ===========================================================
+function OnPluginInstall()
+  load_bounces()
+  cnote("@x099[@x045SKDMoonlight@x099]@w loaded. Type @x048mlf help@w for commands.")
+end
+
+function OnPluginEnable()
+  load_bounces()
+end
+]]>
+</script>
+</muclient>

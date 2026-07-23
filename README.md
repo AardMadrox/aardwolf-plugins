@@ -16,6 +16,7 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 | **TEDReport** | Times TED (Fury) runs and reports trains/gold/TP rewards. |
 | **MatronReporter** | Times Matron Dragon runs and reports rewards. |
 | **SKDReport** | Times SKD runs and reports trains/gold/TP/Repop Token/Sigil rewards. |
+| **SKDMoonlight** | Finds the good moonlight room during the SKD taunt phase (`ml` / `mlf`). ⚠️ New — still needs live testing. |
 
 ## Easiest way to install & stay updated: the Plugin Manager
 
