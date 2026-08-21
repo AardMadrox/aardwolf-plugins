@@ -7,7 +7,7 @@
    id="C2E8F4A71D9B305E8C3A7F16"
    language="Lua"
    purpose="Tracks Fractal run rewards and reports to channel"
-   version="1.3"
+   version="1.4"
 >
 </plugin>
 
@@ -386,9 +386,10 @@ end
 -- Trigger callbacks
 ---------------------------------------------------------------------------
 function LootGold(name, line, wildcards)
-  -- "The gods award you with" is Fractal-unique; can initiate collection
-  ArmFinalize()
-  frac_gold = ParseNum(wildcards[1])
+  -- "The gods award you with ... gold coins" is NOT Fractal-unique (world bosses,
+  -- quests, etc. also award gold this way). Only extend an already-armed window.
+  ArmFinalizePassive()
+  if collecting then frac_gold = ParseNum(wildcards[1]) end
 end
 
 function LootQuestPoints(name, line, wildcards)
@@ -398,9 +399,10 @@ function LootQuestPoints(name, line, wildcards)
 end
 
 function LootTrains(name, line, wildcards)
-  -- "The gods award you with" is Fractal-unique; can initiate collection
-  ArmFinalize()
-  frac_trains = tonumber(wildcards[1]) or 0
+  -- "The gods award you with ... training sessions" is not Fractal-unique either.
+  -- Only extend an already-armed window.
+  ArmFinalizePassive()
+  if collecting then frac_trains = tonumber(wildcards[1]) or 0 end
 end
 
 function LootTP(name, line, wildcards)
