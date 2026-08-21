@@ -9,7 +9,7 @@
    purpose="Tracks chaos portal casts - normal vs golden"
    date_written="2026-06-10"
    requires="4.40"
-   version="1.5"
+   version="1.6"
 >
 <description trim="y">
 Tracks how many chaos portals you cast, and what percentage are normal vs golden.
@@ -20,9 +20,6 @@ Commands:
   chaoscast rooms  - List mapper rooms the last portal could lead to
 </description>
 </plugin>
-
-<!--  Get our standard constants -->
-<include name="constants.lua"/>
 
 <!--  Triggers  -->
 <triggers>
@@ -471,6 +468,7 @@ local MAPPER_ID = "b6eae87ccedd84f510b74714"
 local ROOM_LIST_LIMIT = 20     -- rooms shown by default before truncating
 local ROOM_LIST_CAP   = 200    -- ceiling even for 'chaoscast rooms all'
 local lastDest        = nil    -- { room = ..., area = ... } from the last portal
+local lookupWarned    = false  -- only nag once if the mapper/db isn't usable
 
 local function SqlStr(s)
     return "'" .. tostring(s or ""):gsub("'", "''") .. "'"
@@ -541,7 +539,9 @@ local function FindRooms(room, area, limit)
     return {}, 0, "none"
 end
 
-function CC_ListRooms(limit)
+-- quiet: called automatically after a portal, so a broken/absent mapper
+-- reports once per session instead of on every single cast.
+function CC_ListRooms(limit, quiet)
     if not lastDest then
         CN("green", BG, "ChaosCast: ", "white", BG,
            "No chaos portal destination seen yet - cast one first.")
@@ -553,7 +553,14 @@ function CC_ListRooms(limit)
 
     local rows, total, how = FindRooms(room, area, limit)
     if not rows then
-        CN("green", BG, "ChaosCast: ", "red", BG, "Room lookup failed - " .. tostring(total))
+        if quiet and lookupWarned then return end
+        lookupWarned = true
+        CN("green", BG, "ChaosCast: ", "red", BG,
+           "Room lookup unavailable - " .. tostring(total))
+        if quiet then
+            CN("white", BG, "  Type ", "cyan", BG, "chaoscast rooms off",
+               "white", BG, " to stop trying after each portal.")
+        end
         return
     end
 
@@ -605,7 +612,7 @@ function CC_PortalDestinationRooms(room, area)
     lastDest = { room = room, area = area }
     if not roomList then return end
     if bcp.active then return end
-    CC_ListRooms(ROOM_LIST_LIMIT)
+    CC_ListRooms(ROOM_LIST_LIMIT, true)
 end
 
 function OnChaosCastRooms(name, line, wildcards)
