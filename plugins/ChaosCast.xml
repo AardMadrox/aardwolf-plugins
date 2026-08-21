@@ -9,7 +9,7 @@
    purpose="Tracks chaos portal casts - normal vs golden"
    date_written="2026-06-10"
    requires="4.40"
-   version="1.4"
+   version="1.5"
 >
 <description trim="y">
 Tracks how many chaos portals you cast, and what percentage are normal vs golden.
@@ -17,6 +17,7 @@ Commands:
   chaoscast        - Show stats
   chaoscast help   - Show help
   chaoscast reset  - Reset stats
+  chaoscast rooms  - List mapper rooms the last portal could lead to
 </description>
 </plugin>
 
@@ -138,6 +139,16 @@ Commands:
   >
   </alias>
 
+  <alias
+    match="^chaoscast rooms\s*(.*)$"
+    enabled="y"
+    name="chaoscast_rooms"
+    sequence="95"
+    regexp="y"
+    script="OnChaosCastRooms"
+  >
+  </alias>
+
   <!-- RaviTrack aliases -->
   <alias
     match="ravitrack help"
@@ -191,6 +202,7 @@ local dataFile = GetPluginInfo(GetPluginID(), 6) .. "ChaosCast.dat"
 local stats = { total = 0, normal = 0, golden = 0, continent = 0, area = 0 }
 local pendingGolden = false
 local gtBroadcast = true  -- gt broadcast toggle
+local roomList    = true  -- auto-list possible destination rooms after each portal
 
 local CONTINENTS = {
     ["alagh, the blood lands"]     = true,
@@ -211,9 +223,9 @@ end
 local function SaveData()
     local f = io.open(dataFile, "w")
     if f then
-        f:write(string.format("total=%d\nnormal=%d\ngolden=%d\ngtbroadcast=%d\ncontinent=%d\narea=%d\n",
+        f:write(string.format("total=%d\nnormal=%d\ngolden=%d\ngtbroadcast=%d\ncontinent=%d\narea=%d\nroomlist=%d\n",
             stats.total, stats.normal, stats.golden, gtBroadcast and 1 or 0,
-            stats.continent, stats.area))
+            stats.continent, stats.area, roomList and 1 or 0))
         f:close()
     end
 end
@@ -229,6 +241,8 @@ local function LoadData()
                     stats[k] = tonumber(v)
                 elseif k == "gtbroadcast" then
                     gtBroadcast = (tonumber(v) == 1)
+                elseif k == "roomlist" then
+                    roomList = (tonumber(v) == 1)
                 end
             end
         end
@@ -305,6 +319,9 @@ local function ShowHelp()
     CN("white",  BG, "chaoscast            ", "cyan", BG, "- Show portal cast statistics")
     CN("white",  BG, "chaoscast help       ", "cyan", BG, "- Show this help message")
     CN("white",  BG, "chaoscast reset      ", "cyan", BG, "- Reset all statistics")
+    CN("white",  BG, "chaoscast rooms      ", "cyan", BG, "- List mapper rooms the last portal could lead to")
+    CN("white",  BG, "chaoscast rooms all  ", "cyan", BG, "- Same, but list every match (or 'rooms <number>')")
+    CN("white",  BG, "chaoscast rooms on|off ", "cyan", BG, "- Auto-list those rooms after every portal")
     CN("white",  BG, "chaoscastbc          ", "cyan", BG, "- Toggle gt broadcast on/off")
     CN("white",  BG, "chaoscast <channel>  ", "cyan", BG, "- Broadcast stats to a channel (eg: chaoscast gt)")
     CN("white",  BG, "bcp <number>         ", "cyan", BG, "- Cast chaos blank X times with 1 second delay (eg: bcp 10)")
@@ -352,6 +369,9 @@ function OnPortalDestination(name, line, wildcards)
         local goldCode = isGolden and "@x048" or "@x099"
         Execute("gt @WArea: @x048" .. area .. "@x045 | @WRoom: @x048" .. room .. "@x045 | @YGold: " .. goldCode .. goldFlag .. "@w")
     end
+
+    -- Show which mapped rooms this portal could lead to (clickable gotos).
+    CC_PortalDestinationRooms(room, area)
 
     -- Advance a running BCP: this portal landed, so cast the next one.
     BcpOnPortalRecorded()
@@ -434,7 +454,179 @@ function OnBcpStop(name, line, wildcards)
     CN("green", BG, "ChaosCast: ", "white", BG, "BCP stopped.")
 end
 
+-- ─── Destination Room Lookup ─────────────────
+--
+-- The portal line tells us the destination room NAME and AREA, but not which
+-- specific room uid it drops you in — and a name like "Ghostly Sands" repeats
+-- many times inside an area. So look the pair up in the mapper's own sqlite
+-- database and print every candidate as a clickable "mapper goto <uid>" link,
+-- styled like the mapper's own 'mapper find' results. That lets you see (and
+-- walk to) where the portal goes without spending the portal.
+--
+-- rooms.area holds the area KEYWORD ('alagh'); areas.name holds the display
+-- name the MUD prints ('Alagh, the Blood Lands'), so we accept either.
 
+local MAPPER_ID = "b6eae87ccedd84f510b74714"
+
+local ROOM_LIST_LIMIT = 20     -- rooms shown by default before truncating
+local ROOM_LIST_CAP   = 200    -- ceiling even for 'chaoscast rooms all'
+local lastDest        = nil    -- { room = ..., area = ... } from the last portal
+
+local function SqlStr(s)
+    return "'" .. tostring(s or ""):gsub("'", "''") .. "'"
+end
+
+local function MapperDbPath()
+    if not IsPluginInstalled(MAPPER_ID) then
+        return nil, "the Aardwolf GMCP mapper plugin is not installed"
+    end
+    local db_name = GetPluginVariable(MAPPER_ID, "db_name")
+    if not db_name or db_name == "" then
+        db_name = (WorldName() or ""):gsub("[^%w%s()_-]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    end
+    if db_name == "" then
+        return nil, "could not work out the mapper's database name"
+    end
+    local path = GetInfo(66) .. db_name .. ".db"
+    local f = io.open(path, "rb")
+    if not f then return nil, "mapper database not found at: " .. path end
+    f:close()
+    return path
+end
+
+-- Returns rows, total, how   (or nil, errormessage)
+-- how: "exact" | "partial" | "anyarea" | "none"
+local function FindRooms(room, area, limit)
+    local path, why = MapperDbPath()
+    if not path then return nil, why end
+
+    local ok, sqlite3 = pcall(require, "sqlite3")
+    if not ok or not sqlite3 then return nil, "the sqlite3 library is unavailable" end
+
+    local db = sqlite3.open(path)
+    if not db then return nil, "could not open the mapper database" end
+
+    local FROM = " FROM rooms r LEFT JOIN areas a ON a.uid = r.area "
+    local la, lr = area:lower(), room:lower()
+    local areaMatch = "(lower(coalesce(a.name, '')) = " .. SqlStr(la) ..
+                      " OR lower(r.area) = " .. SqlStr(la) .. ")"
+    local nameExact = "lower(r.name) = " .. SqlStr(lr)
+    local nameLike  = "lower(r.name) LIKE " .. SqlStr("%" .. lr .. "%")
+
+    local tries = {
+        { where = areaMatch .. " AND " .. nameExact, how = "exact"   },
+        { where = areaMatch .. " AND " .. nameLike,  how = "partial" },
+        { where = nameExact,                         how = "anyarea" },
+    }
+
+    for _, t in ipairs(tries) do
+        local total = 0
+        for r in db:nrows("SELECT count(*) AS c" .. FROM .. "WHERE " .. t.where) do
+            total = r.c
+        end
+        if total > 0 then
+            local rows = {}
+            for r in db:nrows("SELECT r.uid AS uid, r.name AS name, r.area AS areakey," ..
+                              " coalesce(a.name, r.area) AS areaname" .. FROM ..
+                              "WHERE " .. t.where ..
+                              " ORDER BY CAST(r.uid AS INTEGER) LIMIT " .. tostring(limit)) do
+                rows[#rows + 1] = r
+            end
+            db:close()
+            return rows, total, t.how
+        end
+    end
+
+    db:close()
+    return {}, 0, "none"
+end
+
+function CC_ListRooms(limit)
+    if not lastDest then
+        CN("green", BG, "ChaosCast: ", "white", BG,
+           "No chaos portal destination seen yet - cast one first.")
+        return
+    end
+
+    local room, area = lastDest.room, lastDest.area
+    limit = math.min(limit or ROOM_LIST_LIMIT, ROOM_LIST_CAP)
+
+    local rows, total, how = FindRooms(room, area, limit)
+    if not rows then
+        CN("green", BG, "ChaosCast: ", "red", BG, "Room lookup failed - " .. tostring(total))
+        return
+    end
+
+    CN("green", BG, "Portal leads to: ", "cyan", BG, room,
+       "white", BG, " in ", "cyan", BG, area)
+
+    if total == 0 then
+        CN("white", BG, "  Not in your mapper database - you have not walked there yet.")
+        return
+    end
+
+    if how == "partial" then
+        CN("white", BG, "  No exact name match; showing rooms in that area whose name contains it.")
+    elseif how == "anyarea" then
+        CN("white", BG, "  Nothing matched in that area; showing rooms with that name elsewhere.")
+    end
+
+    -- mirror the mapper's own underline preference so this looks like 'mapper find'
+    local noUnderline = (GetPluginVariable(MAPPER_ID, "NoUnderline_hyperlinks") ~= "0")
+
+    for i, r in ipairs(rows) do
+        local label = string.format("[%d] %s (%s) (%s)",
+                                    i, r.name, r.areaname or r.areakey, tostring(r.uid))
+        ColourTell("white", BG, "  ")
+        Hyperlink("mapper goto " .. tostring(r.uid), label,
+                  "Click to speedwalk to " .. r.name .. " (" .. tostring(r.uid) .. ")",
+                  "", "", false, noUnderline)
+        Note("")
+    end
+
+    if total > #rows and #rows >= ROOM_LIST_CAP then
+        CN("white", BG, "  Showing the first ", "red", BG, tostring(#rows),
+           "white", BG, " of ", "red", BG, tostring(total),
+           "white", BG, " - too many rooms share that name to be worth listing.")
+    elseif total > #rows then
+        CN("white", BG, "  ... and ", "red", BG, tostring(total - #rows),
+           "white", BG, " more. Type ", "cyan", BG, "chaoscast rooms all",
+           "white", BG, " to list up to " .. ROOM_LIST_CAP .. ".")
+    else
+        CN("white", BG, "  ", "red", BG, tostring(total),
+           "white", BG, (total == 1) and " possible room." or " possible rooms.")
+    end
+end
+
+-- Called from OnPortalDestination. Always remembers the destination so
+-- 'chaoscast rooms' works later, but only auto-prints when enabled and when
+-- a bulk 'bcp' run isn't in progress (that would bury the screen).
+function CC_PortalDestinationRooms(room, area)
+    lastDest = { room = room, area = area }
+    if not roomList then return end
+    if bcp.active then return end
+    CC_ListRooms(ROOM_LIST_LIMIT)
+end
+
+function OnChaosCastRooms(name, line, wildcards)
+    local arg = Trim((wildcards[1] or "")):lower()
+
+    if arg == "on" or arg == "off" then
+        roomList = (arg == "on")
+        SaveData()
+        CN("green", BG, "ChaosCast: ", "white", BG, "auto room list ",
+           roomList and "green" or "red", BG, roomList and "ENABLED" or "DISABLED")
+    elseif arg == "" then
+        CC_ListRooms(ROOM_LIST_LIMIT)
+    elseif arg == "all" then
+        CC_ListRooms(ROOM_LIST_CAP)
+    elseif tonumber(arg) then
+        CC_ListRooms(math.max(1, math.floor(tonumber(arg))))
+    else
+        CN("green", BG, "ChaosCast: ", "white", BG,
+           "Usage: chaoscast rooms [all | <number> | on | off]")
+    end
+end
 
 function OnChaosCastDisplay(name, line, wildcards)
     ShowStats()
@@ -448,7 +640,7 @@ function OnChaosCastChannel(name, line, wildcards)
     local channel = wildcards[1]
 
     -- Don't intercept reserved commands
-    if channel == "help" or channel == "reset" then
+    if channel == "help" or channel == "reset" or channel == "rooms" then
         return
     end
 
