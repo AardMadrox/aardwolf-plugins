@@ -11,7 +11,7 @@
    purpose="Repeatedly cast 'incomp' on self or others until healed"
    date_written="2026-06-21"
    requires="4.94"
-   version="2.3"
+   version="2.5"
 >
 
 <description>
@@ -23,8 +23,17 @@ you run low on mana, or you enter combat.
   fhx <player>     heal another player ('c incomp <player>')
   fhx low          heal the lowest-HP group member in the room
   fhx stop         stop healing immediately
+
+  hx               cast once on yourself (no repeating)
+  hx <player>      cast once on another player
+  hx low           cast once on the lowest-HP group member in the room
+
   fhx regen        switch the spell to regeneration (c regen)
   fhx incomp       switch the spell back to incomplete healing (c incomp)
+  fhx ignore add <player>     never let 'fhx low' target <player>
+  fhx ignore remove <player>  allow 'fhx low' to target <player> again
+  fhx ignore list             show the current ignore list
+  fhx ignore clear            empty the ignore list
   fhx help         show the help screen
 
 Stops automatically on:
@@ -39,6 +48,9 @@ Stops automatically on:
 'fhx low' uses GMCP group data, so you must be grouped with the target.
 It locks onto one target and will not jump to whoever later becomes the
 lowest - run it again to retarget.
+
+The 'hx' commands mirror the 'fhx' ones but send exactly one cast and
+then stop - no pacing, no watchdog, nothing to stop.
 ]]>
 </description>
 
@@ -276,6 +288,91 @@ lowest - run it again to retarget.
    >
    <send>StartHealPlayer("%1")</send>
    </alias>
+
+   <!-- one-shot casts: same targeting as fhx, but a single cast -->
+   <alias
+      name="hx_low"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^hx low$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>HealOnceLow()</send>
+   </alias>
+
+   <alias
+      name="hx_self"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^hx$"
+      sequence="20"
+      send_to="12"
+   >
+   <send>HealOnceSelf()</send>
+   </alias>
+
+   <alias
+      name="hx_player"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^hx ([A-Za-z]+)$"
+      sequence="50"
+      send_to="12"
+   >
+   <send>HealOncePlayer("%1")</send>
+   </alias>
+
+   <alias
+      name="fhx_ignore_add"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx ignore add ([A-Za-z]+)$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>IgnoreAdd("%1")</send>
+   </alias>
+
+   <alias
+      name="fhx_ignore_remove"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx ignore (?:remove|del|delete) ([A-Za-z]+)$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>IgnoreRemove("%1")</send>
+   </alias>
+
+   <alias
+      name="fhx_ignore_list"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx ignore list$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>IgnoreList()</send>
+   </alias>
+
+   <alias
+      name="fhx_ignore_clear"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx ignore clear$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>IgnoreClear()</send>
+   </alias>
 </aliases>
 
 <!-- ============================== SCRIPT ============================== -->
@@ -290,6 +387,7 @@ lowest - run it again to retarget.
 -- "fhx <player>" heals another player          - paced by heal-tick lines
 -- "fhx low"      heals lowest-HP group member in the room
 -- "fhx stop"     stops immediately
+-- "hx" / "hx <player>" / "hx low"  - same targeting, but ONE cast only
 -- "fhx help"     shows the help screen
 
 require "gmcphelper"
@@ -373,6 +471,9 @@ heal_target    = ""
 heal_gen       = 0         -- bumped on every start/stop to cancel stale resend timers
 heal_watch_id  = 0         -- bumped on every watchdog re-arm so stale watchdogs are ignored
 heal_cast_count = 0
+
+-- names 'fhx low' will never pick, lower-cased name -> true. Persisted.
+ignore_list = {}
 
 -- ---- spell selection ---------------------------------------------------
 -- Build the cast command for the currently-selected spell. With no target it
@@ -501,6 +602,67 @@ function OtherHealedStop (who, reason)
 end
 
 -- ======================================================================
+-- IGNORE LIST ('fhx low' will never pick these names)
+-- ======================================================================
+function SaveIgnoreList ()
+  local names = {}
+  for name in pairs (ignore_list) do names[#names + 1] = name end
+  table.sort (names)
+  SetVariable ("ignore_list", table.concat (names, ","))
+end
+
+function LoadIgnoreList ()
+  ignore_list = {}
+  local raw = GetVariable ("ignore_list") or ""
+  for name in raw:gmatch ("[^,]+") do
+    ignore_list[string.lower (name)] = true
+  end
+end
+
+function IgnoreAdd (who)
+  who = tostring (who or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
+  if who == "" then return end
+  local key = string.lower (who)
+  if ignore_list[key] then
+    cnote (tag .. "@x045" .. who .. "@x099 is already on the ignore list.@w")
+    return
+  end
+  ignore_list[key] = true
+  SaveIgnoreList ()
+  cnote (tag .. "@x045" .. who .. "@x099 added to the ignore list - '@Wfhx low@x099' will never target them.@w")
+end
+
+function IgnoreRemove (who)
+  who = tostring (who or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
+  if who == "" then return end
+  local key = string.lower (who)
+  if not ignore_list[key] then
+    cnote (tag .. "@x045" .. who .. "@x099 is not on the ignore list.@w")
+    return
+  end
+  ignore_list[key] = nil
+  SaveIgnoreList ()
+  cnote (tag .. "@x045" .. who .. "@x099 removed from the ignore list.@w")
+end
+
+function IgnoreClear ()
+  ignore_list = {}
+  SaveIgnoreList ()
+  cnote (tag .. "@x045ignore list cleared.@w")
+end
+
+function IgnoreList ()
+  local names = {}
+  for name in pairs (ignore_list) do names[#names + 1] = name end
+  table.sort (names)
+  if #names == 0 then
+    cnote (tag .. "@x045ignore list is empty.@w")
+  else
+    cnote (tag .. "@x045ignore list@x099 (" .. #names .. "): @W" .. table.concat (names, ", "))
+  end
+end
+
+-- ======================================================================
 -- HEAL LOWEST-HP GROUP MEMBER IN THE ROOM
 -- ======================================================================
 function FindLowestGroupMember ()
@@ -524,7 +686,11 @@ function FindLowestGroupMember ()
       local hp   = tonumber (info.hp)
       local mhp  = tonumber (info.mhp)
       local isme = string.lower (tostring (m.name or "")) == myname
-      if here and not isme and hp and mhp and mhp > 0 then
+      local ignored = ignore_list[string.lower (tostring (m.name or ""))]
+      if ignored then
+        dbg ("  skipping " .. tostring (m.name) .. " (on ignore list)")
+      end
+      if here and not isme and not ignored and hp and mhp and mhp > 0 then
         local ratio = hp / mhp
         dbg ("  candidate " .. tostring (m.name) .. ": hp=" .. hp .. "/" .. mhp ..
              " (" .. string.format ("%.0f%%", ratio * 100) .. ")")
@@ -546,6 +712,35 @@ function StartHealLow ()
     return
   end
   BeginOtherHeal (target)
+end
+
+-- ======================================================================
+-- ONE-SHOT CASTS ('hx')
+-- Mirrors the 'fhx' commands, but sends a single cast and stops there.
+-- These never set healing_active, so no pacing, watchdog or stop is involved.
+-- ======================================================================
+function HealOnceSelf ()
+  dbg ("hx: one cast on self -> '" .. SpellCmd () .. "'")
+  cnote (tag .. "@x045one cast on yourself@w - '@W" .. SpellCmd () .. "@w'.")
+  Send (SpellCmd ())
+end
+
+function HealOncePlayer (who)
+  who = tostring (who or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
+  if who == "" then return end
+  dbg ("hx: one cast on " .. who .. " -> '" .. SpellCmd (who) .. "'")
+  cnote (tag .. "@x045one cast on @W" .. who .. "@x045 - '@W" .. SpellCmd (who) .. "@x045'.")
+  Send (SpellCmd (who))
+end
+
+function HealOnceLow ()
+  local target = FindLowestGroupMember ()
+  dbg ("hx low picked: " .. (target or "nobody"))
+  if not target then
+    cnote (tag .. "@x045no hurt group member found in the room@w. (Are you grouped, and is group GMCP on?)")
+    return
+  end
+  HealOncePlayer (target)
 end
 
 -- ======================================================================
@@ -592,7 +787,16 @@ function ShowHelp ()
   cnote ("  @Wfhx stop@x045        @x099 stop healing right now")
   cnote ("  @Wfhx regen@x045       @x099 use regeneration ('@Wc regen@x099')")
   cnote ("  @Wfhx incomp@x045      @x099 use incomplete healing ('@Wc incomp@x099')")
+  cnote ("  @Wfhx ignore add <player>@x045     @x099 'fhx low' will never target them")
+  cnote ("  @Wfhx ignore remove <player>@x045  @x099 allow them to be targeted again")
+  cnote ("  @Wfhx ignore list@x045             @x099 show the ignore list")
+  cnote ("  @Wfhx ignore clear@x045            @x099 empty the ignore list")
   cnote ("  @Wfhx help@x045        @x099 this screen")
+  Note ("")
+  cnote ("@x099One-shot versions@x045 (single cast, no repeating)@x099:@w")
+  cnote ("  @Whx@x045              @x099 cast once on yourself")
+  cnote ("  @Whx <player>@x045     @x099 cast once on another player")
+  cnote ("  @Whx low@x045          @x099 cast once on the lowest-HP group member")
   Note ("")
   cnote ("@x099Healing stops automatically when:@w")
   cnote ("  @x045-@x099 the target is almost / already / fully healed")
@@ -604,6 +808,8 @@ function ShowHelp ()
   cnote ("       whoever later becomes the lowest - run it again to retarget.")
   cnote ("  @x045-@x099 '@Wfhx low@x099' reads group HP via GMCP, so you must be grouped")
   cnote ("       with the target.")
+  cnote ("  @x045-@x099 '@Whx low@x099' picks its target the same way (and honours the")
+  cnote ("       ignore list), it just casts once instead of repeating.")
   Note ("")
 end
 
@@ -614,7 +820,8 @@ function FHXLoaded ()
   -- ask Aardwolf to start streaming group data over GMCP (needed for 'fhx low')
   pcall (function () Send_GMCP_Packet ("group on") end)
   heal_spell = (GetVariable ("heal_spell") == "regen") and "regen" or "incomp"
-  cnote (tag .. "@x045loaded@w @x099(v2.3)@w - spell: @W" .. SpellName () ..
+  LoadIgnoreList ()
+  cnote (tag .. "@x045loaded@w @x099(v2.5)@w - spell: @W" .. SpellName () ..
          "@w - type '@Wfhx help@w' for commands.")
 end
 
