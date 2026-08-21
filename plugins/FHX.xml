@@ -11,7 +11,7 @@
    purpose="Repeatedly cast 'incomp' on self or others until healed"
    date_written="2026-06-21"
    requires="4.94"
-   version="2.5"
+   version="2.8"
 >
 
 <description>
@@ -21,12 +21,17 @@ you run low on mana, or you enter combat.
 
   fhx              self-heal (cast 'c incomp' on yourself)
   fhx <player>     heal another player ('c incomp <player>')
-  fhx low          heal the lowest-HP group member in the room
+  fhx low          heal whoever in the room is lowest on HP - you included
   fhx stop         stop healing immediately
 
   hx               cast once on yourself (no repeating)
   hx <player>      cast once on another player
-  hx low           cast once on the lowest-HP group member in the room
+  hx low           cast once on whoever is lowest on HP - you included
+
+  Any of the above take a count: 'hx low x3', 'fhx low 2'.
+
+  fhx queue        show what's waiting
+  fhx queue clear  drop everything waiting (keeps the current cast)
 
   fhx regen        switch the spell to regeneration (c regen)
   fhx incomp       switch the spell back to incomplete healing (c incomp)
@@ -46,11 +51,25 @@ Stops automatically on:
   - you enter combat (GMCP char.status.state)
 
 'fhx low' uses GMCP group data, so you must be grouped with the target.
+You are a candidate too: if you're the lowest one in the room it heals you,
+and if you're not grouped at all it falls back to your own HP.
+
+Pets and charmed mobs in the group are never targeted - they're identified
+by the GMCP 'qs' field (3 = the group member is a mob, not a player), so a
+pet golem in the room can't soak up your heals.
 It locks onto one target and will not jump to whoever later becomes the
 lowest - run it again to retarget.
 
 The 'hx' commands mirror the 'fhx' ones but send exactly one cast and
 then stop - no pacing, no watchdog, nothing to stop.
+
+QUEUE: every fhx/hx command becomes a queue item and they run strictly in
+order, one at a time. If you're in combat (or in a note, at a pager prompt,
+or asleep) they wait instead of firing, and start on their own once you're
+free again. A repeating 'fhx' item holds the queue until it finishes, so
+'fhx' then 'fhx low' self-heals first and heals the lowest afterwards.
+'low' is resolved when the item actually runs, so 'hx low x3' re-checks who
+the lowest person in the room is before each cast.
 ]]>
 </description>
 
@@ -226,7 +245,7 @@ then stop - no pacing, no watchdog, nothing to stop.
       sequence="10"
       send_to="12"
    >
-   <send>StopHealing("manual stop")</send>
+   <send>StopAll()</send>
    </alias>
 
    <alias
@@ -258,11 +277,11 @@ then stop - no pacing, no watchdog, nothing to stop.
       enabled="y"
       regexp="y"
       ignore_case="y"
-      match="^fhx low$"
+      match="^fhx low(?:\s+x?\s*(\d+))?$"
       sequence="10"
       send_to="12"
    >
-   <send>StartHealLow()</send>
+   <send>Request("rep", "low", "", "%1")</send>
    </alias>
 
    <alias
@@ -270,11 +289,11 @@ then stop - no pacing, no watchdog, nothing to stop.
       enabled="y"
       regexp="y"
       ignore_case="y"
-      match="^fhx$"
+      match="^fhx(?:\s+x?\s*(\d+))?$"
       sequence="20"
       send_to="12"
    >
-   <send>StartSelfHeal()</send>
+   <send>Request("rep", "self", "", "%1")</send>
    </alias>
 
    <alias
@@ -282,11 +301,11 @@ then stop - no pacing, no watchdog, nothing to stop.
       enabled="y"
       regexp="y"
       ignore_case="y"
-      match="^fhx ([A-Za-z]+)$"
+      match="^fhx ([A-Za-z]+)(?:\s+x?\s*(\d+))?$"
       sequence="50"
       send_to="12"
    >
-   <send>StartHealPlayer("%1")</send>
+   <send>Request("rep", "name", "%1", "%2")</send>
    </alias>
 
    <!-- one-shot casts: same targeting as fhx, but a single cast -->
@@ -295,11 +314,11 @@ then stop - no pacing, no watchdog, nothing to stop.
       enabled="y"
       regexp="y"
       ignore_case="y"
-      match="^hx low$"
+      match="^hx low(?:\s+x?\s*(\d+))?$"
       sequence="10"
       send_to="12"
    >
-   <send>HealOnceLow()</send>
+   <send>Request("one", "low", "", "%1")</send>
    </alias>
 
    <alias
@@ -307,11 +326,11 @@ then stop - no pacing, no watchdog, nothing to stop.
       enabled="y"
       regexp="y"
       ignore_case="y"
-      match="^hx$"
+      match="^hx(?:\s+x?\s*(\d+))?$"
       sequence="20"
       send_to="12"
    >
-   <send>HealOnceSelf()</send>
+   <send>Request("one", "self", "", "%1")</send>
    </alias>
 
    <alias
@@ -319,11 +338,35 @@ then stop - no pacing, no watchdog, nothing to stop.
       enabled="y"
       regexp="y"
       ignore_case="y"
-      match="^hx ([A-Za-z]+)$"
+      match="^hx ([A-Za-z]+)(?:\s+x?\s*(\d+))?$"
       sequence="50"
       send_to="12"
    >
-   <send>HealOncePlayer("%1")</send>
+   <send>Request("one", "name", "%1", "%2")</send>
+   </alias>
+
+   <alias
+      name="fhx_queue_clear"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx (?:queue|q) clear$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>QueueClear()</send>
+   </alias>
+
+   <alias
+      name="fhx_queue_show"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx (?:queue|q)$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>QueueShow()</send>
    </alias>
 
    <alias
@@ -400,6 +443,8 @@ local GMCP_ID = "3e7dedbe37e44942dd46d264"
 -- if no heal-tick is seen within FHX_WATCHDOG seconds.
 local FHX_CAST_DELAY = 1     -- pause after each heal-tick before resending
 local FHX_WATCHDOG   = 10    -- stop if no heal-tick seen within this long
+local FHX_ONESHOT_TO = 8     -- give up waiting for a single 'hx' cast to land
+local FHX_QUEUE_MAX  = 20    -- most items one command may queue at once
 local SENDTO_SCRIPT  = 12    -- "execute as script" send-to code
 
 -- Diagnostics: flip to true to print [FHX dbg] lines while troubleshooting.
@@ -472,6 +517,16 @@ heal_gen       = 0         -- bumped on every start/stop to cancel stale resend 
 heal_watch_id  = 0         -- bumped on every watchdog re-arm so stale watchdogs are ignored
 heal_cast_count = 0
 
+-- ---- queue -------------------------------------------------------------
+-- Every fhx/hx command becomes an item here and they run strictly in order,
+-- one at a time. Items wait while you're in combat (or otherwise can't cast)
+-- and start on their own once you're free.
+--   item = { kind = "rep" | "one", mode = "self" | "low" | "name", name = "" }
+fhx_queue       = {}
+queue_current   = nil      -- item running right now (re-queued if combat interrupts)
+oneshot_pending = false    -- a single 'hx' cast is in flight
+oneshot_gen     = 0        -- invalidates stale one-shot timeouts
+
 -- names 'fhx low' will never pick, lower-cased name -> true. Persisted.
 ignore_list = {}
 
@@ -530,6 +585,7 @@ end
 
 -- Fired by the "You are X healed by your magic touch." trigger
 function HealTick ()
+  if OneshotDone () then return end
   if healing_active and heal_mode == "self" then
     ArmWatchdog ()
     DoAfterSpecial (FHX_CAST_DELAY, "SelfCast(" .. heal_gen .. ")", SENDTO_SCRIPT)
@@ -576,6 +632,7 @@ function OtherHealTick (who)
   -- We deliberately do NOT name-match: the game line is prefixed with the
   -- target's title ("Sqrrlchasr Sletch is ..."), and the user may target by a
   -- partial name ("zarg" -> "Zargulis").
+  if OneshotDone () then return end
   if healing_active and heal_mode == "other" then
     dbg ("heal-tick (" .. tostring (who) .. ") -> next cast in " .. FHX_CAST_DELAY .. "s")
     ArmWatchdog ()
@@ -596,7 +653,7 @@ end
 function OtherHealedStop (who, reason)
   -- Same reasoning as OtherHealTick: one active target, so any "is almost/already
   -- fully healed." line during a heal is our target. Don't name-match.
-  if healing_active and heal_mode == "other" then
+  if oneshot_pending or (healing_active and heal_mode == "other") then
     StopHealing (tostring (who) .. " " .. reason)
   end
 end
@@ -665,53 +722,122 @@ end
 -- ======================================================================
 -- HEAL LOWEST-HP GROUP MEMBER IN THE ROOM
 -- ======================================================================
-function FindLowestGroupMember ()
-  local g = gmcp ("group")
-  if type (g) ~= "table" or type (g.members) ~= "table" then
-    dbg ("FindLowestGroupMember: no group data (type=" .. type (g) .. "). Is group GMCP on / are you grouped?")
-    return nil
-  end
-
-  local myname = ""
+function MyName ()
   local base = gmcp ("char.base")
-  if type (base) == "table" and base.name then
-    myname = string.lower (tostring (base.name))
-  end
+  if type (base) == "table" and base.name then return tostring (base.name) end
+  return ""
+end
 
-  local best, best_ratio = nil, 2
+-- Your own HP as a 0-1 ratio, for when the group data doesn't list you
+-- (or you aren't grouped at all). nil if the GMCP data isn't there.
+function SelfRatio ()
+  local v = gmcp ("char.vitals")
+  local m = gmcp ("char.maxstats")
+  local hp  = (type (v) == "table") and tonumber (v.hp) or nil
+  local mhp = (type (m) == "table") and tonumber (m.maxhp) or nil
+  if hp and mhp and mhp > 0 then return hp / mhp end
+  return nil
+end
+
+-- Aardwolf marks group members that are mobs (pet golems, charmed mobs,
+-- clan pets) with qs = 3 in the GMCP group data - see References/
+-- gmcp-aardwolf.md. Players carry qs 0/1/2. A missing qs is treated as a
+-- player so we never over-filter on odd data.
+function IsGroupPet (info)
+  return type (info) == "table" and tonumber (info.qs) == 3
+end
+
+-- If a typed name matches a pet in the group (in full or as a prefix, the
+-- way 'gol' matches 'Golem'), returns that pet's name, otherwise nil.
+function GroupPetNamed (typed)
+  local g = gmcp ("group")
+  if type (g) ~= "table" or type (g.members) ~= "table" then return nil end
+  local key = string.lower (tostring (typed or ""))
+  if key == "" then return nil end
   for _, m in ipairs (g.members) do
-    local info = m.info
-    if type (info) == "table" then
-      local here = tostring (info.here) == "1"
-      local hp   = tonumber (info.hp)
-      local mhp  = tonumber (info.mhp)
-      local isme = string.lower (tostring (m.name or "")) == myname
-      local ignored = ignore_list[string.lower (tostring (m.name or ""))]
-      if ignored then
-        dbg ("  skipping " .. tostring (m.name) .. " (on ignore list)")
-      end
-      if here and not isme and not ignored and hp and mhp and mhp > 0 then
-        local ratio = hp / mhp
-        dbg ("  candidate " .. tostring (m.name) .. ": hp=" .. hp .. "/" .. mhp ..
-             " (" .. string.format ("%.0f%%", ratio * 100) .. ")")
-        if ratio < 1 and ratio < best_ratio then
-          best_ratio = ratio
-          best = m.name
+    if IsGroupPet (m.info) then
+      local name  = tostring (m.name or "")
+      local lname = string.lower (name)
+      if lname == key or lname:sub (1, #key) == key then return name end
+    end
+  end
+  return nil
+end
+
+-- Returns (name, is_me): the hurt person in the room with the lowest HP
+-- ratio. You are a candidate like anyone else - if you're the lowest one
+-- here, this returns your name with is_me true and the caller heals you
+-- instead of casting at someone. Returns nil if nobody here is hurt.
+function FindLowestGroupMember ()
+  local myname   = MyName ()
+  local mykey    = string.lower (myname)
+  local my_ratio = nil
+  local best, best_ratio = nil, 2
+
+  local g = gmcp ("group")
+  if type (g) == "table" and type (g.members) == "table" then
+    for _, m in ipairs (g.members) do
+      local info = m.info
+      if type (info) == "table" then
+        local name    = tostring (m.name or "")
+        local here    = tostring (info.here) == "1"
+        local hp      = tonumber (info.hp)
+        local mhp     = tonumber (info.mhp)
+        local isme    = string.lower (name) == mykey and mykey ~= ""
+        local ignored = ignore_list[string.lower (name)]
+        if IsGroupPet (info) then
+          dbg ("  skipping " .. name .. " (pet/mob, qs=3)")
+        elseif ignored then
+          dbg ("  skipping " .. name .. " (on ignore list)")
+        elseif hp and mhp and mhp > 0 then
+          local ratio = hp / mhp
+          if isme then
+            my_ratio = ratio
+            dbg ("  candidate " .. name .. " (you): hp=" .. hp .. "/" .. mhp ..
+                 " (" .. string.format ("%.0f%%", ratio * 100) .. ")")
+          elseif here then
+            dbg ("  candidate " .. name .. ": hp=" .. hp .. "/" .. mhp ..
+                 " (" .. string.format ("%.0f%%", ratio * 100) .. ")")
+            if ratio < 1 and ratio < best_ratio then
+              best_ratio = ratio
+              best = name
+            end
+          end
         end
       end
     end
+  else
+    dbg ("FindLowestGroupMember: no group data - considering only yourself")
   end
-  return best
+
+  -- group data didn't list you (or there is none): fall back to your vitals
+  if not my_ratio and not ignore_list[mykey] then
+    my_ratio = SelfRatio ()
+    if my_ratio then
+      dbg ("  candidate you (from vitals): " ..
+           string.format ("%.0f%%", my_ratio * 100))
+    end
+  end
+
+  if my_ratio and my_ratio < 1 and my_ratio < best_ratio then
+    return (myname ~= "" and myname or "you"), true
+  end
+  return best, false
 end
 
 function StartHealLow ()
-  local target = FindLowestGroupMember ()
-  dbg ("fhx low picked: " .. (target or "nobody"))
+  local target, is_me = FindLowestGroupMember ()
+  dbg ("fhx low picked: " .. (target or "nobody") .. (is_me and " (you)" or ""))
   if not target then
-    cnote (tag .. "@x045no hurt group member found in the room@w. (Are you grouped, and is group GMCP on?)")
+    cnote (tag .. "@x045nobody here needs healing@w - including you.")
     return
   end
-  BeginOtherHeal (target)
+  if is_me then
+    cnote (tag .. "@x045you're the lowest here@x099 - healing yourself.@w")
+    StartSelfHeal ()
+  else
+    BeginOtherHeal (target)
+  end
 end
 
 -- ======================================================================
@@ -722,6 +848,7 @@ end
 function HealOnceSelf ()
   dbg ("hx: one cast on self -> '" .. SpellCmd () .. "'")
   cnote (tag .. "@x045one cast on yourself@w - '@W" .. SpellCmd () .. "@w'.")
+  ArmOneshot ()
   Send (SpellCmd ())
 end
 
@@ -730,30 +857,261 @@ function HealOncePlayer (who)
   if who == "" then return end
   dbg ("hx: one cast on " .. who .. " -> '" .. SpellCmd (who) .. "'")
   cnote (tag .. "@x045one cast on @W" .. who .. "@x045 - '@W" .. SpellCmd (who) .. "@x045'.")
+  ArmOneshot ()
   Send (SpellCmd (who))
 end
 
 function HealOnceLow ()
-  local target = FindLowestGroupMember ()
-  dbg ("hx low picked: " .. (target or "nobody"))
+  local target, is_me = FindLowestGroupMember ()
+  dbg ("hx low picked: " .. (target or "nobody") .. (is_me and " (you)" or ""))
   if not target then
-    cnote (tag .. "@x045no hurt group member found in the room@w. (Are you grouped, and is group GMCP on?)")
+    cnote (tag .. "@x045nobody here needs healing@w - including you.")
     return
   end
-  HealOncePlayer (target)
+  if is_me then
+    cnote (tag .. "@x045you're the lowest here@x099 - healing yourself.@w")
+    HealOnceSelf ()
+  else
+    HealOncePlayer (target)
+  end
+end
+
+-- A single cast has no heal-tick pacing of its own, so we mark one as "in
+-- flight" and let the normal heal-tick / stop triggers close it out. The
+-- timeout is the backstop for a cast that produces no line we recognise.
+function ArmOneshot ()
+  oneshot_pending = true
+  oneshot_gen     = oneshot_gen + 1
+  DoAfterSpecial (FHX_ONESHOT_TO, "OneshotTimeout(" .. oneshot_gen .. ")", SENDTO_SCRIPT)
+end
+
+-- Called from the heal-tick triggers. Returns true if it closed a one-shot.
+function OneshotDone ()
+  if not oneshot_pending then return false end
+  dbg ("one-shot landed -> next queue item in " .. FHX_CAST_DELAY .. "s")
+  oneshot_pending = false
+  oneshot_gen     = oneshot_gen + 1
+  queue_current   = nil
+  DoAfterSpecial (FHX_CAST_DELAY, "PumpQueue()", SENDTO_SCRIPT)
+  return true
+end
+
+function OneshotTimeout (gen)
+  gen = tonumber (gen)
+  if oneshot_pending and gen == oneshot_gen then
+    dbg ("one-shot timed out after " .. FHX_ONESHOT_TO .. "s -> moving on")
+    oneshot_pending = false
+    queue_current   = nil
+    PumpQueue ()
+  end
+end
+
+-- ======================================================================
+-- QUEUE
+-- ======================================================================
+
+-- char.status.state values we refuse to cast in. 3 (active), 4 (afk),
+-- 11 (resting/sitting) and 12 (running) are all treated as castable.
+local HOLD_STATES = { [1] = true, [2] = true, [5] = true, [6] = true,
+                      [7] = true, [8] = true, [9] = true }
+local HOLD_WHY    = { [1] = "not in the game", [2] = "not in the game",
+                      [5] = "in the note editor", [6] = "in build mode",
+                      [7] = "at a pager prompt", [8] = "in combat",
+                      [9] = "asleep" }
+
+function CharState ()
+  local st = gmcp ("char.status")
+  if type (st) ~= "table" then return nil end
+  return tonumber (st.state)
+end
+
+-- No GMCP status at all -> assume we can cast, rather than block forever.
+function FHXReady ()
+  local s = CharState ()
+  if not s then return true end
+  return not HOLD_STATES[s]
+end
+
+function WhyNotReady ()
+  local s = CharState ()
+  return (s and HOLD_WHY[s]) or "busy"
+end
+
+function Busy ()
+  return healing_active or oneshot_pending
+end
+
+function ItemLabel (item)
+  local cmd = (item.kind == "one") and "hx" or "fhx"
+  if item.mode == "self" then return cmd .. " (self)" end
+  if item.mode == "low"  then return cmd .. " low" end
+  return cmd .. " " .. item.name
+end
+
+-- Every alias lands here. The item only runs now if nothing else is running
+-- and we're allowed to cast; otherwise it waits its turn.
+function Request (kind, mode, name, count)
+  name = tostring (name or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
+  if mode == "name" and name == "" then return end
+
+  -- don't waste casts on a pet golem / charmed mob, even if named directly
+  if mode == "name" then
+    local pet = GroupPetNamed (name)
+    if pet then
+      cnote (tag .. "@x045" .. pet .. "@x099 is a pet, not a player - not healing it.@w")
+      return
+    end
+  end
+
+  count = tonumber (count) or 1
+  if count < 1 then count = 1 end
+  if count > FHX_QUEUE_MAX then count = FHX_QUEUE_MAX end
+
+  local item    = { kind = kind, mode = mode, name = name }
+  local waiting = Busy () or not FHXReady ()
+
+  for i = 1, count do
+    fhx_queue[#fhx_queue + 1] = { kind = kind, mode = mode, name = name }
+  end
+  dbg ("queued " .. count .. "x " .. ItemLabel (item) .. " (queue=" .. #fhx_queue ..
+       ", busy=" .. tostring (Busy ()) .. ", ready=" .. tostring (FHXReady ()) .. ")")
+
+  if waiting then
+    local why = Busy () and "busy healing" or WhyNotReady ()
+    cnote (tag .. "@x045queued @W" .. count .. "x " .. ItemLabel (item) ..
+           "@x045 - @W" .. why .. "@x045. @W" .. #fhx_queue .. "@x045 waiting.@w")
+  elseif count > 1 then
+    cnote (tag .. "@x045queued @W" .. count .. "x " .. ItemLabel (item) .. "@x045.@w")
+  end
+
+  PumpQueue ()
+end
+
+-- Start the next item, if there is one and we're free to send it.
+function PumpQueue ()
+  if Busy () then return end
+  queue_current = nil
+  if #fhx_queue == 0 then return end
+  if not FHXReady () then
+    dbg ("queue held (" .. WhyNotReady () .. "), " .. #fhx_queue .. " waiting")
+    return
+  end
+  local item = table.remove (fhx_queue, 1)
+  queue_current = item
+  RunItem (item)
+end
+
+-- 'low' is resolved HERE, not when the command was typed, so a queue of
+-- 'hx low' items re-picks the lowest player before each cast.
+function RunItem (item)
+  local target = nil
+  local is_me  = (item.mode == "self")
+
+  if item.mode == "low" then
+    target, is_me = FindLowestGroupMember ()
+    dbg ("running " .. ItemLabel (item) .. " -> " .. (target or "nobody") ..
+         (is_me and " (you)" or ""))
+    if not target then
+      cnote (tag .. "@x045nobody here needs healing - skipping @W" ..
+             ItemLabel (item) .. "@x045.@w")
+      queue_current = nil
+      DoAfterSpecial (FHX_CAST_DELAY, "PumpQueue()", SENDTO_SCRIPT)
+      return
+    end
+    if is_me then
+      cnote (tag .. "@x045you're the lowest here@x099 - healing yourself.@w")
+    end
+  elseif item.mode == "name" then
+    target = item.name
+  end
+
+  if item.kind == "rep" then
+    if is_me then StartSelfHeal () else BeginOtherHeal (target) end
+  else
+    if is_me then HealOnceSelf () else HealOncePlayer (target) end
+  end
+end
+
+function QueueShow ()
+  if queue_current and Busy () then
+    cnote (tag .. "@x045running now: @W" .. ItemLabel (queue_current))
+  end
+  if #fhx_queue == 0 then
+    cnote (tag .. "@x045nothing waiting in the queue.@w")
+  else
+    local parts = {}
+    for i, item in ipairs (fhx_queue) do
+      parts[#parts + 1] = i .. ". " .. ItemLabel (item)
+    end
+    cnote (tag .. "@x045waiting@x099 (" .. #fhx_queue .. "): @W" .. table.concat (parts, "   "))
+  end
+  if not FHXReady () then
+    cnote (tag .. "@x099held for now - you're @W" .. WhyNotReady () .. "@x099.@w")
+  end
+end
+
+function QueueClear ()
+  local n = #fhx_queue
+  fhx_queue = {}
+  cnote (tag .. "@x045queue cleared@x099 (" .. n ..
+         " dropped)@w - anything already casting keeps going.")
+end
+
+-- 'fhx stop' = stop everything: the current heal and the whole queue.
+function StopAll ()
+  local n = #fhx_queue
+  fhx_queue     = {}
+  queue_current = nil
+  if Busy () then
+    StopHealing ("manual stop")
+  elseif n == 0 then
+    cnote (tag .. "@x045nothing is healing right now.@w")
+  end
+  if n > 0 then
+    cnote (tag .. "@x045dropped @W" .. n .. "@x045 queued item(s).@w")
+  end
 end
 
 -- ======================================================================
 -- STOP
 -- ======================================================================
-function StopHealing (reason)
-  if healing_active then
-    dbg ("StopHealing: reason='" .. reason .. "' after " .. heal_cast_count .. " cast(s)")
+-- pause=true means "combat interrupted us": the item goes back to the front
+-- of the queue instead of being dropped, and the queue does not advance.
+function StopHealing (reason, pause)
+  local had_repeat  = healing_active
+  local had_oneshot = oneshot_pending
+  if not had_repeat and not had_oneshot then return end
+
+  local what = "single cast"
+  if had_repeat then
     healing_active = false
     heal_gen = heal_gen + 1   -- invalidate any pending timers
-    local what = (heal_mode == "other" and heal_target ~= "")
-                 and ("healing " .. heal_target) or "self-heal"
-    cnote (tag .. "@x045stopped@w @x099(" .. what .. ")@w - @W" .. reason .. ".")
+    what = (heal_mode == "other" and heal_target ~= "")
+           and ("healing " .. heal_target) or "self-heal"
+  end
+  if had_oneshot then
+    oneshot_pending = false
+    oneshot_gen = oneshot_gen + 1
+  end
+  dbg ("StopHealing: reason='" .. reason .. "' after " .. heal_cast_count .. " cast(s)")
+  if had_oneshot and not had_repeat and not pause then
+    -- a single cast that simply landed: just report what happened
+    cnote (tag .. "@x045" .. reason .. ".@w")
+  else
+    cnote (tag .. "@x045" .. (pause and "paused" or "stopped") .. "@w @x099(" .. what ..
+           ")@w - @W" .. reason .. ".")
+  end
+
+  if pause then
+    if queue_current then table.insert (fhx_queue, 1, queue_current) end
+    queue_current = nil
+    if #fhx_queue > 0 then
+      cnote (tag .. "@x099holding @W" .. #fhx_queue ..
+             "@x099 item(s) until you're out of combat.@w")
+    end
+  else
+    queue_current = nil
+    DoAfterSpecial (FHX_CAST_DELAY, "PumpQueue()", SENDTO_SCRIPT)
   end
 end
 
@@ -761,13 +1119,22 @@ end
 -- COMBAT DETECTION (stop healing when we enter a fight)
 -- ======================================================================
 function OnPluginBroadcast (msg, id, name, text)
-  if id == GMCP_ID and text == "char.status" and healing_active then
-    local st = gmcp ("char.status")
-    local state = (type (st) == "table") and tostring (st.state) or "?"
-    if state == "8" then
-      dbg ("char.status state=8 -> stopping for combat")
-      StopHealing ("entered combat")
+  if id ~= GMCP_ID or text ~= "char.status" then return end
+  local state = CharState ()
+
+  -- entering combat pauses whatever is casting and holds the queue
+  if state == 8 then
+    if Busy () then
+      dbg ("char.status state=8 -> pausing for combat")
+      StopHealing ("entered combat", true)
     end
+    return
+  end
+
+  -- free again (fight over, left the pager/note editor, woke up): carry on
+  if #fhx_queue > 0 and not Busy () and FHXReady () then
+    dbg ("state=" .. tostring (state) .. " -> resuming queue (" .. #fhx_queue .. " waiting)")
+    PumpQueue ()
   end
 end
 
@@ -783,7 +1150,7 @@ function ShowHelp ()
   cnote ("@x099Commands:@w")
   cnote ("  @Wfhx@x045             @x099 self-heal (cast '@Wc incomp@x099' on yourself)")
   cnote ("  @Wfhx <player>@x045    @x099 heal another player ('@Wc incomp <player>@x099')")
-  cnote ("  @Wfhx low@x045         @x099 heal the lowest-HP group member in the room")
+  cnote ("  @Wfhx low@x045         @x099 heal whoever here is lowest on HP (you included)")
   cnote ("  @Wfhx stop@x045        @x099 stop healing right now")
   cnote ("  @Wfhx regen@x045       @x099 use regeneration ('@Wc regen@x099')")
   cnote ("  @Wfhx incomp@x045      @x099 use incomplete healing ('@Wc incomp@x099')")
@@ -796,7 +1163,17 @@ function ShowHelp ()
   cnote ("@x099One-shot versions@x045 (single cast, no repeating)@x099:@w")
   cnote ("  @Whx@x045              @x099 cast once on yourself")
   cnote ("  @Whx <player>@x045     @x099 cast once on another player")
-  cnote ("  @Whx low@x045          @x099 cast once on the lowest-HP group member")
+  cnote ("  @Whx low@x045          @x099 cast once on whoever here is lowest (you included)")
+  cnote ("  @x045-@x099 add a count to any of them: '@Whx low x3@x099', '@Wfhx low 2@x099'")
+  Note ("")
+  cnote ("@x099Queue@x045 (commands wait their turn instead of being lost)@x099:@w")
+  cnote ("  @Wfhx queue@x045       @x099 show what's running and what's waiting")
+  cnote ("  @Wfhx queue clear@x045 @x099 drop everything waiting")
+  cnote ("  @x045-@x099 commands typed in combat @Wwait@x099 and fire when the fight ends")
+  cnote ("  @x045-@x099 they run in the order you typed them, one at a time")
+  cnote ("  @x045-@x099 '@Wfhx@x099' then '@Wfhx low@x099' = self-heal first, lowest afterwards")
+  cnote ("  @x045-@x099 '@Wlow@x099' is worked out when the item runs, so a queue of")
+  cnote ("       '@Whx low@x099' re-checks who is lowest before every cast")
   Note ("")
   cnote ("@x099Healing stops automatically when:@w")
   cnote ("  @x045-@x099 the target is almost / already / fully healed")
@@ -806,10 +1183,16 @@ function ShowHelp ()
   cnote ("@x099Notes:@w")
   cnote ("  @x045-@x099 '@Wfhx low@x099' locks onto one target and will @Wnot@x099 jump to")
   cnote ("       whoever later becomes the lowest - run it again to retarget.")
+  cnote ("  @x045-@x099 pets and charmed mobs in the group are never targeted,")
+  cnote ("       by '@Wlow@x099' or by name.")
   cnote ("  @x045-@x099 '@Wfhx low@x099' reads group HP via GMCP, so you must be grouped")
-  cnote ("       with the target.")
+  cnote ("       with the target. @WYou@x099 count as a candidate - if you're the")
+  cnote ("       lowest in the room it heals you instead.")
   cnote ("  @x045-@x099 '@Whx low@x099' picks its target the same way (and honours the")
   cnote ("       ignore list), it just casts once instead of repeating.")
+  cnote ("  @x045-@x099 a heal interrupted by combat goes back to the front of the")
+  cnote ("       queue and resumes when the fight is over.")
+  cnote ("  @x045-@x099 '@Wfhx stop@x099' stops the current heal @Wand@x099 empties the queue.")
   Note ("")
 end
 
@@ -821,7 +1204,7 @@ function FHXLoaded ()
   pcall (function () Send_GMCP_Packet ("group on") end)
   heal_spell = (GetVariable ("heal_spell") == "regen") and "regen" or "incomp"
   LoadIgnoreList ()
-  cnote (tag .. "@x045loaded@w @x099(v2.5)@w - spell: @W" .. SpellName () ..
+  cnote (tag .. "@x045loaded@w @x099(v2.8)@w - spell: @W" .. SpellName () ..
          "@w - type '@Wfhx help@w' for commands.")
 end
 
