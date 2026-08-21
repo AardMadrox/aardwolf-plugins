@@ -7,7 +7,7 @@
    id="A3F9C2E7B14D608F5A2C9E31"
    language="Lua"
    purpose="Times Matron Dragon runs and reports rewards"
-   version="1.4"
+   version="1.6"
 >
 </plugin>
 
@@ -66,6 +66,22 @@
     sequence="200"
     regexp="y"
     script="SendReport"
+  >
+  </alias>
+  <alias
+    match="^matronstatus\s+(\S+)$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="ShowStatus"
+  >
+  </alias>
+  <alias
+    match="^matronstatus$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="ShowStatus"
   >
   </alias>
   <alias
@@ -219,6 +235,65 @@ local COL_ITEM = "@x099"
 local SEP = COL_SEP .. string.rep("-", 60) .. "@w"
 
 ---------------------------------------------------------------------------
+-- Date / time helpers
+-- Matron is on a 23 hour lockout, so we also work out the next legal run.
+---------------------------------------------------------------------------
+local COOLDOWN = 23 * 3600
+
+local MONTH_NAMES = {
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"
+}
+
+-- Format an os.time() value as "August 21 2026 3:45pm"
+local function FmtStamp(ts)
+  if not ts or ts == 0 then return "unknown" end
+  local t = os.date("*t", ts)
+  local h = t.hour % 12
+  if h == 0 then h = 12 end
+  return string.format("%s %d %d %d:%02d%s",
+    MONTH_NAMES[t.month], t.day, t.year, h, t.min,
+    (t.hour < 12) and "am" or "pm")
+end
+
+-- Format a duration in seconds as "8h 12m" / "45m" / "30s"
+local function FmtDur(secs)
+  if not secs or secs < 0 then secs = 0 end
+  local h = math.floor(secs / 3600)
+  local m = math.floor((secs % 3600) / 60)
+  if h > 0 then return string.format("%dh %02dm", h, m) end
+  if m > 0 then return string.format("%dm", m) end
+  return string.format("%ds", secs)
+end
+
+-- "available now" or "August 22 2026 2:45pm (in 8h 12m)"
+local function NextRunLabel(ts)
+  if not ts or ts == 0 then return "unknown" end
+  local nextTs = ts + COOLDOWN
+  local now = os.time()
+  if now >= nextTs then return "available now" end
+  return FmtStamp(nextTs) .. " (in " .. FmtDur(nextTs - now) .. ")"
+end
+
+-- Tack [<label>: date] (and optionally [Next: ...]) onto a report line
+local function AppendStampSegs(segs, ts, label, withNext)
+  if not ts or ts == 0 then return segs end
+  segs[#segs+1] = {"white",  " ["}
+  segs[#segs+1] = {"yellow", label}
+  segs[#segs+1] = {"white",  ": "}
+  segs[#segs+1] = {"red",    FmtStamp(ts)}
+  segs[#segs+1] = {"white",  "]"}
+  if withNext then
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"yellow", "Next"}
+    segs[#segs+1] = {"white",  ": "}
+    segs[#segs+1] = {"red",    NextRunLabel(ts)}
+    segs[#segs+1] = {"white",  "]"}
+  end
+  return segs
+end
+
+---------------------------------------------------------------------------
 -- Known reward types for per-run % tracking
 -- Each run record stores which of these appeared (0 or 1 per run)
 ---------------------------------------------------------------------------
@@ -278,7 +353,8 @@ local function SaveRuns(runs)
     for _, loot in ipairs(r.loots) do
       lparts[#lparts+1] = string.format("%q", loot)
     end
-    entries[#entries+1] = string.format("{secs=%d,loots={%s}}", r.secs, table.concat(lparts, ","))
+    entries[#entries+1] = string.format("{secs=%d,ts=%d,loots={%s}}",
+      r.secs, r.ts or 0, table.concat(lparts, ","))
   end
   local f = io.open(DATA_FILE, "w")
   if not f then
@@ -287,6 +363,16 @@ local function SaveRuns(runs)
   end
   f:write("{" .. table.concat(entries, ",") .. "}")
   f:close()
+end
+
+-- Timestamp of the most recent run that has one. Runs recorded before v1.5
+-- have no timestamp, so walk backwards until we find a real one.
+local function LastRunTS()
+  local runs = LoadRuns()
+  for i = #runs, 1, -1 do
+    if runs[i].ts and runs[i].ts > 0 then return runs[i].ts end
+  end
+  return nil
 end
 
 -- Normalize a raw loot string to one of the REWARD_KEYS categories
@@ -369,12 +455,13 @@ function FinalizeRun()
     end
   end
 
-  runs[#runs+1] = { secs=elapsed, loots=pendingLoots }
+  local finishedAt = os.time()
+  runs[#runs+1] = { secs=elapsed, ts=finishedAt, loots=pendingLoots }
   SaveRuns(runs)
   local stats  = CalcTotals(runs)
   local runNum = #runs
 
-  _G._matron_last = { elapsed=elapsed, loots=pendingLoots, runNum=runNum }
+  _G._matron_last = { elapsed=elapsed, loots=pendingLoots, runNum=runNum, ts=finishedAt }
 
   local segs = {
     {"cyan",   "Matron"},
@@ -479,7 +566,7 @@ function InjectRun(name, line, wildcards)
     loots[#loots+1] = item:match("^%s*(.-)%s*$")  -- trim whitespace
   end
   local runs = LoadRuns()
-  runs[#runs+1] = { secs=secs, loots=loots }
+  runs[#runs+1] = { secs=secs, ts=os.time(), loots=loots }
   SaveRuns(runs)
   ColourNote("#00FF87", "", "[MatronReporter] Injected run #" .. #runs .. ": " .. secs .. "s | " .. table.concat(loots, ", "))
 end
@@ -515,6 +602,7 @@ function SendReport(name, line, wildcards)
     segs[#segs+1] = {"red", r}
   end
   segs[#segs+1] = {"white", "]"}
+  AppendStampSegs(segs, last.ts or LastRunTS(), "Ran", true)
   local _, _, aard = BuildLine(segs)
   Send(chan .. " " .. aard)
 end
@@ -551,7 +639,24 @@ function ShowLifetimeStats(name, line, wildcards)
     segs[#segs+1] = {"red",    pct .. "%"}
     segs[#segs+1] = {"white",  "]"}
   end
+  AppendStampSegs(segs, LastRunTS(), "Last", true)
 
+  local _, _, aard = BuildLine(segs)
+  Send(chan .. " " .. aard)
+end
+
+-- One-line status sent to the report channel, same as the other reports.
+function ShowStatus(name, line, wildcards)
+  local ts = LastRunTS()
+  if not ts then
+    ANote(COL_HDR .. "[Matron] " .. COL_LBL ..
+          "No timestamped run recorded yet - finish one run and this starts tracking.")
+    return
+  end
+  local chan = (wildcards and wildcards[1] and wildcards[1] ~= "")
+               and wildcards[1]:lower() or GetChannel()
+  local segs = { {"cyan", "Matron Status"} }
+  AppendStampSegs(segs, ts, "Last", true)
   local _, _, aard = BuildLine(segs)
   Send(chan .. " " .. aard)
 end
@@ -566,6 +671,8 @@ function ShowHelp()
         COL_LBL .. "     - Resend last run report to <channel>")
   ANote(COL_LBL .. "  " .. COL_ACC .. "matronreportlife <channel>" ..
         COL_LBL .. "      - Send lifetime stats to <channel>")
+  ANote(COL_LBL .. "  " .. COL_ACC .. "matronstatus <channel>" ..
+        COL_LBL .. "      - Last run + when the 23h lockout is up")
   ANote(COL_LBL .. "  " .. COL_ACC .. "matronreporthelp" ..
         COL_LBL .. "           - Show this help")
   ANote(SEP)

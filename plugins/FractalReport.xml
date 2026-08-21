@@ -7,7 +7,7 @@
    id="C2E8F4A71D9B305E8C3A7F16"
    language="Lua"
    purpose="Tracks Fractal run rewards and reports to channel"
-   version="1.4"
+   version="1.5"
 >
 </plugin>
 
@@ -182,6 +182,36 @@ local COL_ITEM = "@x099"
 local SEP = COL_SEP .. string.rep("-", 60) .. "@w"
 
 ---------------------------------------------------------------------------
+-- Date / time helpers (Fractal has no lockout, so no "next run" here)
+---------------------------------------------------------------------------
+local MONTH_NAMES = {
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"
+}
+
+-- Format an os.time() value as "August 21 2026 3:45pm"
+local function FmtStamp(ts)
+  if not ts or ts == 0 then return "unknown" end
+  local t = os.date("*t", ts)
+  local h = t.hour % 12
+  if h == 0 then h = 12 end
+  return string.format("%s %d %d %d:%02d%s",
+    MONTH_NAMES[t.month], t.day, t.year, h, t.min,
+    (t.hour < 12) and "am" or "pm")
+end
+
+-- Tack [<label>: date] onto a report line
+local function AppendStampSegs(segs, ts, label)
+  if not ts or ts == 0 then return segs end
+  segs[#segs+1] = {"white",  " ["}
+  segs[#segs+1] = {"yellow", label}
+  segs[#segs+1] = {"white",  ": "}
+  segs[#segs+1] = {"red",    FmtStamp(ts)}
+  segs[#segs+1] = {"white",  "]"}
+  return segs
+end
+
+---------------------------------------------------------------------------
 -- Plugin state - no timing, just reward accumulation per run
 ---------------------------------------------------------------------------
 local collecting  = false   -- true once the first reward line fires
@@ -234,14 +264,24 @@ local function SaveRuns(runs)
   local entries = {}
   for _, r in ipairs(runs) do
     entries[#entries+1] = string.format(
-      "{gold=%d,qp=%d,trains=%d,tp=%d,secs=%d}",
-      r.gold, r.qp, r.trains, r.tp, r.secs or 0
+      "{gold=%d,qp=%d,trains=%d,tp=%d,secs=%d,ts=%d}",
+      r.gold, r.qp, r.trains, r.tp, r.secs or 0, r.ts or 0
     )
   end
   local f = io.open(DATA_FILE, "w")
   if not f then return end
   f:write("{" .. table.concat(entries, ",") .. "}")
   f:close()
+end
+
+-- Timestamp of the most recent run that has one. Runs recorded before v1.5
+-- have no timestamp, so walk backwards until we find a real one.
+local function LastRunTS()
+  local runs = LoadRuns()
+  for i = #runs, 1, -1 do
+    if runs[i].ts and runs[i].ts > 0 then return runs[i].ts end
+  end
+  return nil
 end
 
 local function CalcTotals(runs)
@@ -330,7 +370,9 @@ local function FinalizeRun()
     end
   end
 
-  local record = { gold=frac_gold, qp=frac_qp, trains=frac_trains, tp=frac_tp, secs=elapsed }
+  local finishedAt = os.time()
+  local record = { gold=frac_gold, qp=frac_qp, trains=frac_trains, tp=frac_tp,
+                   secs=elapsed, ts=finishedAt }
   runs[#runs+1] = record
   SaveRuns(runs)
   local runNum = #runs
@@ -346,6 +388,7 @@ local function FinalizeRun()
     tp     = frac_tp,
     secs   = elapsed,
     runNum = runNum,
+    ts     = finishedAt,
   }
 end
 
@@ -429,6 +472,7 @@ function SendReport(name, line, wildcards)
   end
 
   local segs = BuildReportSegs(last.runNum, last.secs or 0, last.gold, last.qp, last.trains, last.tp)
+  AppendStampSegs(segs, last.ts or LastRunTS(), "Ran")
   local _, _, aard = BuildLine(segs)
   Send(chan .. " " .. aard)
 end
@@ -483,8 +527,7 @@ function ShowLifetimeStats(name, line, wildcards)
     {"red",    tpPct .. "%"},
     {"white",  ")]"},
   }
-
-  local chan = (wildcards and wildcards[1] and wildcards[1] ~= "") and wildcards[1]:lower() or GetChannel()
+  AppendStampSegs(segs, LastRunTS(), "Last")
 
   local _, _, aard = BuildLine(segs)
   Send(chan .. " " .. aard)
@@ -505,6 +548,7 @@ function ShowHelp()
   ANote(SEP)
   ANote(COL_LBL .. "  Rewards are captured automatically whenever the reward")
   ANote(COL_LBL .. "  lines appear. No start trigger required.")
+  ANote(COL_LBL .. "  Reports show the date/time the run finished.")
   ANote(SEP)
 end
 

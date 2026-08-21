@@ -10,7 +10,7 @@
    purpose="Times Spectre of the Deep (SKD) fights and reports trains/gold/TP/Repop Token/Sigil rewards"
    date_written="2026-06-21"
    requires="4.71"
-   version="1.1"
+   version="1.2"
    save_state="y"
    >
 </plugin>
@@ -251,6 +251,21 @@ local function FormatNumber(n)
   return formatted
 end
 
+-- Formats an os.time() value as "August 21 2026 3:45pm"
+local MONTH_NAMES = {
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"
+}
+local function FmtStamp(ts)
+  if not ts or ts == 0 then return "unknown" end
+  local t = os.date("*t", ts)
+  local h = t.hour % 12
+  if h == 0 then h = 12 end
+  return string.format("%s %d %d %d:%02d%s",
+    MONTH_NAMES[t.month], t.day, t.year, h, t.min,
+    (t.hour < 12) and "am" or "pm")
+end
+
 -- MUSHclient hex colors for ColourNote (xterm indices -> RGB)
 local MUSH_COLOR = {
   white  = "white",
@@ -347,6 +362,17 @@ local function ComputeLifeTotals()
     t.sigil   = t.sigil   + (r.si or 0)
   end
   return t
+end
+
+-- Timestamp of the most recent run that has one. Legacy batch entries carry
+-- no real timestamp, so walk backwards until a real one turns up.
+local function LastRunTS()
+  local runs = DeserializeRuns()
+  for i = #runs, 1, -1 do
+    local r = runs[i]
+    if not r.legacy and r.ts and r.ts > 0 then return r.ts end
+  end
+  return nil
 end
 
 -- ===========================================================
@@ -573,6 +599,7 @@ function FinishSKD(name, line, wildcards)
   end
 
   skd_last_run_aard = aard
+  skd_last_run_ts   = os.time()
 
   -- Save this run to the persistent history table
   if elapsed then
@@ -630,7 +657,19 @@ function SendLastRun(name, line, wildcards)
     ColourNote("white", "", "SKDReport: no completed run to report yet.")
     return
   end
-  Send(dest .. " " .. skd_last_run_aard)
+  local ts = skd_last_run_ts or LastRunTS()
+  local suffix = ""
+  if ts then
+    local _, _, a = BuildLine({
+      {"white",  " ["},
+      {"yellow", "Ran"},
+      {"white",  ": "},
+      {"red",    FmtStamp(ts)},
+      {"white",  "]"},
+    })
+    suffix = a
+  end
+  Send(dest .. " " .. skd_last_run_aard .. suffix)
 end
 
 -- ===========================================================
@@ -718,6 +757,15 @@ local function BuildSummaryLine(label, t)
     segs[#segs+1] = {"yellow", "Sigils"}
     segs[#segs+1] = {"white",  ": "}
     segs[#segs+1] = {"red",    tostring(t.sigil)}
+    segs[#segs+1] = {"white",  "]"}
+  end
+
+  local last_ts = LastRunTS()
+  if last_ts then
+    segs[#segs+1] = {"white",  " ["}
+    segs[#segs+1] = {"yellow", "Last Run"}
+    segs[#segs+1] = {"white",  ": "}
+    segs[#segs+1] = {"red",    FmtStamp(last_ts)}
     segs[#segs+1] = {"white",  "]"}
   end
 
@@ -845,6 +893,11 @@ function ShowSKDHelp(name, line, wildcards)
   P({
     {"white","  "},{"cyan","skdreport help"},
     {"white","  - show this help"},
+  })
+  P({
+    {"white","  "},{"yellow","Note:"},
+    {"white"," run reports and summaries show the date/time the run finished (e.g. "},
+    {"red","August 21 2026 3:45pm"},{"white",")."},
   })
   P({
     {"white","  "},{"yellow","Automatic:"},
