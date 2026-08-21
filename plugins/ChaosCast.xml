@@ -9,7 +9,7 @@
    purpose="Tracks chaos portal casts - normal vs golden"
    date_written="2026-06-10"
    requires="4.40"
-   version="1.2"
+   version="1.4"
 >
 <description trim="y">
 Tracks how many chaos portals you cast, and what percentage are normal vs golden.
@@ -516,16 +516,16 @@ local ravi_data_file = "RaviTrack.dat"
 
 local RAVI_TYPES = {
     "a blank chaos portal",
-    "A blank chaos portal with a silvery tint",
-    "A shiny platinum blank chaos portal",
-    "A glittering diamond blank chaos portal",
+    "a blank chaos portal with a silvery tint",
+    "a shiny platinum blank chaos portal",
+    "a glittering diamond blank chaos portal",
 }
 
 local ravi_counts = {
     ["a blank chaos portal"]                    = 0,
-    ["A blank chaos portal with a silvery tint"] = 0,
-    ["A shiny platinum blank chaos portal"]     = 0,
-    ["A glittering diamond blank chaos portal"] = 0,
+    ["a blank chaos portal with a silvery tint"] = 0,
+    ["a shiny platinum blank chaos portal"]     = 0,
+    ["a glittering diamond blank chaos portal"] = 0,
 }
 
 function ravi_save_data()
@@ -537,16 +537,35 @@ function ravi_save_data()
     f:close()
 end
 
+-- Maps old (pre-fix) capitalized keys to the corrected lowercase keys, so
+-- counts saved before the case fix aren't silently lost on load.
+local RAVI_LEGACY_KEYS = {
+    ["A blank chaos portal with a silvery tint"] = "a blank chaos portal with a silvery tint",
+    ["A shiny platinum blank chaos portal"]     = "a shiny platinum blank chaos portal",
+    ["A glittering diamond blank chaos portal"] = "a glittering diamond blank chaos portal",
+}
+
 function ravi_load_data()
     local f = io.open(ravi_data_file, "r")
     if not f then return end
+    local migrated = false
     for line in f:lines() do
         local name, num = line:match("^(.*)|(%d+)$")
-        if name and num and ravi_counts[name] ~= nil then
-            ravi_counts[name] = tonumber(num)
+        if name and num then
+            if ravi_counts[name] ~= nil then
+                ravi_counts[name] = tonumber(num)
+            elseif RAVI_LEGACY_KEYS[name] then
+                local newkey = RAVI_LEGACY_KEYS[name]
+                ravi_counts[newkey] = tonumber(num)
+                migrated = true
+            end
         end
     end
     f:close()
+    if migrated then
+        ravi_save_data()
+        ColourNote("green", "", "[ChaosCast] Migrated legacy Ravi portal counts to corrected keys.")
+    end
 end
 
 function OnRaviBuy(name, line, wildcards)
@@ -570,9 +589,9 @@ function OnRaviTrack()
     end
 
     local blank    = ravi_counts["a blank chaos portal"]
-    local silver   = ravi_counts["A blank chaos portal with a silvery tint"]
-    local platinum = ravi_counts["A shiny platinum blank chaos portal"]
-    local diamond  = ravi_counts["A glittering diamond blank chaos portal"]
+    local silver   = ravi_counts["a blank chaos portal with a silvery tint"]
+    local platinum = ravi_counts["a shiny platinum blank chaos portal"]
+    local diamond  = ravi_counts["a glittering diamond blank chaos portal"]
 
     CN("green", BG, "Ravi Portal Tracker")
 
@@ -604,9 +623,9 @@ function OnRaviChannel(name, line, wildcards)
     for _, v in pairs(ravi_counts) do total = total + v end
 
     local blank    = ravi_counts["a blank chaos portal"]
-    local silver   = ravi_counts["A blank chaos portal with a silvery tint"]
-    local platinum = ravi_counts["A shiny platinum blank chaos portal"]
-    local diamond  = ravi_counts["A glittering diamond blank chaos portal"]
+    local silver   = ravi_counts["a blank chaos portal with a silvery tint"]
+    local platinum = ravi_counts["a shiny platinum blank chaos portal"]
+    local diamond  = ravi_counts["a glittering diamond blank chaos portal"]
 
     local function P(amt)
         local w, f = Pct(amt, total)
