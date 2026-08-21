@@ -9,7 +9,7 @@
    purpose="Tracks chaos portal casts - normal vs golden"
    date_written="2026-06-10"
    requires="4.40"
-   version="1.6"
+   version="1.7"
 >
 <description trim="y">
 Tracks how many chaos portals you cast, and what percentage are normal vs golden.
@@ -194,7 +194,20 @@ Commands:
 --  ChaosCast - MushClient Plugin
 -- ─────────────────────────────────────────────
 
-local dataFile = GetPluginInfo(GetPluginID(), 6) .. "ChaosCast.dat"
+-- GetPluginInfo(id, 6) is the plugin FILE path, not its folder, so strip the
+-- filename off to get the directory. Both data files live there.
+local pluginFile = GetPluginInfo(GetPluginID(), 6) or ""
+local pluginDir  = pluginFile:match("^(.*[\\/])") or ""
+
+local dataFile       = pluginDir .. "ChaosCast.dat"
+local ravi_data_file = pluginDir .. "RaviTrack.dat"
+
+-- Where these two used to end up before v1.7: the stats file got the plugin
+-- path glued straight onto it ("ChaosCast.xmlChaosCast.dat"), and RaviTrack
+-- used a bare relative name, so it landed in whatever directory MUSHclient
+-- happened to be started from.
+local LEGACY_STATS = { pluginFile .. "ChaosCast.dat" }
+local LEGACY_RAVI  = { "RaviTrack.dat", pluginFile .. "RaviTrack.dat" }
 
 local stats = { total = 0, normal = 0, golden = 0, continent = 0, area = 0 }
 local pendingGolden = false
@@ -263,6 +276,65 @@ local BG = "black"
 
 local function CN(...)
     ColourNote(...)
+end
+
+-- ─── Data File Migration ─────────────────────
+--
+-- Move the two data files to <plugin folder>\<name>.dat, once. The copy is
+-- read back and compared before the original is removed, so a failed move
+-- leaves the old file untouched rather than losing the counts.
+
+local migrationDone = false
+
+local function ReadWhole(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local body = f:read("*a")
+    f:close()
+    return body
+end
+
+-- returns oldpath, verified  (or nil if there was nothing to move)
+local function MigrateOne(newPath, oldPaths)
+    if ReadWhole(newPath) then return nil end   -- already in the right place
+    for _, old in ipairs(oldPaths) do
+        if old ~= newPath then
+            local body = ReadWhole(old)
+            if body and body ~= "" then
+                local out = io.open(newPath, "wb")
+                if not out then return nil end
+                out:write(body)
+                out:close()
+                if ReadWhole(newPath) ~= body then
+                    return old, false
+                end
+                os.remove(old)
+                return old, true
+            end
+        end
+    end
+    return nil
+end
+
+local function MigrateDataFiles()
+    if migrationDone then return end
+    migrationDone = true
+
+    local function report(what, old, verified)
+        if not old then return end
+        if verified then
+            CN("green", BG, "ChaosCast: ", "white", BG, "moved your ", "cyan", BG, what,
+               "white", BG, " into the plugin folder (was ", "cyan", BG, old,
+               "white", BG, ").")
+        else
+            CN("green", BG, "ChaosCast: ", "white", BG, "copied your ", "cyan", BG, what,
+               "white", BG, " into the plugin folder; left the original at ",
+               "cyan", BG, old, "white", BG, " just in case.")
+        end
+    end
+
+    report("portal stats", MigrateOne(dataFile, LEGACY_STATS))
+    report("Ravi counts", MigrateOne(ravi_data_file, LEGACY_RAVI))
 end
 
 -- ─── Display ─────────────────────────────────
@@ -692,12 +764,14 @@ end
 -- ─── Plugin Lifecycle ────────────────────────
 
 function OnPluginInstall()
+    MigrateDataFiles()
     LoadData()
     ravi_load_data()
     CN("green", BG, "ChaosCast loaded. Type 'chaoscast help' for commands.")
 end
 
 function OnPluginConnect()
+    MigrateDataFiles()
     LoadData()
     ravi_load_data()
 end
@@ -711,7 +785,7 @@ end
 --  RaviTrack - merged into ChaosCast
 -- ─────────────────────────────────────────────
 
-local ravi_data_file = "RaviTrack.dat"
+-- ravi_data_file is declared up top, alongside dataFile.
 
 local RAVI_TYPES = {
     "a blank chaos portal",
