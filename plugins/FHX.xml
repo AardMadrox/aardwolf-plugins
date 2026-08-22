@@ -11,7 +11,7 @@
    purpose="Repeatedly cast 'incomp' on self or others until healed"
    date_written="2026-06-21"
    requires="4.94"
-   version="2.8"
+   version="2.9"
 >
 
 <description>
@@ -30,8 +30,7 @@ you run low on mana, or you enter combat.
 
   Any of the above take a count: 'hx low x3', 'fhx low 2'.
 
-  fhx queue        show what's waiting
-  fhx queue clear  drop everything waiting (keeps the current cast)
+  fhx queue        show what's waiting ('fhx stop' empties it)
 
   fhx regen        switch the spell to regeneration (c regen)
   fhx incomp       switch the spell back to incomplete healing (c incomp)
@@ -343,18 +342,6 @@ the lowest person in the room is before each cast.
       send_to="12"
    >
    <send>Request("one", "name", "%1", "%2")</send>
-   </alias>
-
-   <alias
-      name="fhx_queue_clear"
-      enabled="y"
-      regexp="y"
-      ignore_case="y"
-      match="^fhx (?:queue|q) clear$"
-      sequence="10"
-      send_to="12"
-   >
-   <send>QueueClear()</send>
    </alias>
 
    <alias
@@ -1050,14 +1037,8 @@ function QueueShow ()
   end
 end
 
-function QueueClear ()
-  local n = #fhx_queue
-  fhx_queue = {}
-  cnote (tag .. "@x045queue cleared@x099 (" .. n ..
-         " dropped)@w - anything already casting keeps going.")
-end
-
--- 'fhx stop' = stop everything: the current heal and the whole queue.
+-- 'fhx stop' is the one off switch: it stops whatever is casting and
+-- empties the queue. There is no separate queue-clear command.
 function StopAll ()
   local n = #fhx_queue
   fhx_queue     = {}
@@ -1065,10 +1046,10 @@ function StopAll ()
   if Busy () then
     StopHealing ("manual stop")
   elseif n == 0 then
-    cnote (tag .. "@x045nothing is healing right now.@w")
+    cnote (tag .. "@x045nothing is healing and the queue is empty.@w")
   end
   if n > 0 then
-    cnote (tag .. "@x045dropped @W" .. n .. "@x045 queued item(s).@w")
+    cnote (tag .. "@x045queue emptied@x099 (" .. n .. " item(s) dropped)@w.")
   end
 end
 
@@ -1168,7 +1149,8 @@ function ShowHelp ()
   Note ("")
   cnote ("@x099Queue@x045 (commands wait their turn instead of being lost)@x099:@w")
   cnote ("  @Wfhx queue@x045       @x099 show what's running and what's waiting")
-  cnote ("  @Wfhx queue clear@x045 @x099 drop everything waiting")
+  cnote ("  @x045-@x099 '@Wfhx stop@x099' is the off switch: it stops the current heal")
+  cnote ("       @Wand@x099 empties the queue")
   cnote ("  @x045-@x099 commands typed in combat @Wwait@x099 and fire when the fight ends")
   cnote ("  @x045-@x099 they run in the order you typed them, one at a time")
   cnote ("  @x045-@x099 '@Wfhx@x099' then '@Wfhx low@x099' = self-heal first, lowest afterwards")
@@ -1192,7 +1174,6 @@ function ShowHelp ()
   cnote ("       ignore list), it just casts once instead of repeating.")
   cnote ("  @x045-@x099 a heal interrupted by combat goes back to the front of the")
   cnote ("       queue and resumes when the fight is over.")
-  cnote ("  @x045-@x099 '@Wfhx stop@x099' stops the current heal @Wand@x099 empties the queue.")
   Note ("")
 end
 
@@ -1204,7 +1185,7 @@ function FHXLoaded ()
   pcall (function () Send_GMCP_Packet ("group on") end)
   heal_spell = (GetVariable ("heal_spell") == "regen") and "regen" or "incomp"
   LoadIgnoreList ()
-  cnote (tag .. "@x045loaded@w @x099(v2.8)@w - spell: @W" .. SpellName () ..
+  cnote (tag .. "@x045loaded@w @x099(v2.9)@w - spell: @W" .. SpellName () ..
          "@w - type '@Wfhx help@w' for commands.")
 end
 
