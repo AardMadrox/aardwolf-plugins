@@ -1,0 +1,1735 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<!-- MarketWatch
+     One watch list, two places to buy from:
+       * the marketplace  ('marketw' scans 'market list')
+       * the live auction channel  (watched passively, always on)
+     Both offer a one-click bid at the maximum price you set per item.
+
+     Commands (see "marketw help"):
+       market add <name> <max>   add a watch entry  (also: marketw add)
+       marketw                        scan the market now
+       marketw list                   show your watch list
+       marketw bids                   what you already have a bid on
+       marketw auc debug              DEBUG: echo every Auction:/Market: line
+       marketw probe <num>            DEBUG: dump the raw 'lbid <num>' box
+
+     Design notes:
+       * 'market list' truncates the item description to 28 characters, and a
+         name cut off ON a space shows only 27, so any row 27+ long is treated
+         as suspect and re-read with 'lbid <num>' (silently) before its
+         name is trusted.  Auction lines carry the full item name, so those
+         matches are exact and need no probe.
+       * Market numbers (64817) and auction numbers (97) are separate spaces,
+         so the two "already bid" ledgers are kept separate too.
+       * Nothing is ever bid automatically.  A bid is only sent when you click
+         the link, and the market links re-verify against a fresh
+         'lbid <num>' read at click time.
+-->
+
+<muclient>
+<plugin
+   name="MarketWatch"
+   author="Eric"
+   id="3f8c1a7d92b4e06c5a71d8e3"
+   language="Lua"
+   purpose="Watch the market and auction channel for wanted items; one-click bids."
+   date_written="2026-08-21"
+   requires="4.73"
+   version="3.0"
+>
+</plugin>
+
+<!-- ============ TRIGGERS: the live auction channel ============
+     keep_evaluating is essential here - MUSHclient stops the trigger chain on
+     the first match, and the soundpack / channel plugins want these lines too.
+-->
+<triggers>
+  <!-- "Auction: Betrayal is auctioning a Trivia Point Token (Level 1, Num 97). Current bid is 100." -->
+  <trigger
+   enabled="y" regexp="y" keep_evaluating="y" sequence="100"
+   match="is auctioning .+\(Level \d+, Num \d+\)"
+   script="MW_AuctionLine">
+  </trigger>
+  <!-- "Market: Kalista is selling the Essence of Negativity (Level 201, Num 64964). Auction is for Gold." -->
+  <trigger
+   enabled="y" regexp="y" keep_evaluating="y" sequence="100"
+   match="is selling .+\(Level \d+, Num \d+\)"
+   script="MW_MarketLine">
+  </trigger>
+  <!-- "Market: This item has a buyout price of 1,000,000."  (follows the above) -->
+  <trigger
+   enabled="y" regexp="y" keep_evaluating="y" sequence="100"
+   match="buyout price of [\d,]+"
+   script="MW_MarketBuyoutLine">
+  </trigger>
+  <!-- A bid that failed for want of gold.  Confirmed wording:
+       "You are only carrying 0 gold pieces."
+       Handily it states the gold on hand, so the shortfall is exact.
+       Only acts if we sent a bid in the last few seconds. -->
+  <trigger
+   enabled="y" regexp="y" keep_evaluating="y" sequence="100"
+   match="only carrying [\d,]+ gold piece"
+   script="MW_NotEnoughGold">
+  </trigger>
+  <!-- diagnostic only: "marketw auc debug" turns this on to capture line variants -->
+  <trigger
+   enabled="n" regexp="y" keep_evaluating="y" sequence="99"
+   name="mw_auc_debug"
+   match="^(?:Auction|Market):"
+   script="MW_AuctionDebug">
+  </trigger>
+</triggers>
+
+<!-- ============ ALIASES ============ -->
+<aliases>
+  <alias match="^marketw$"                    enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Scan"   sequence="100"></alias>
+  <alias match="^marketwatch$"           enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Scan"   sequence="100"></alias>
+
+  <alias match="^(?:marketw|marketwatch) help$"       enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Help"   sequence="90"></alias>
+  <alias match="^(?:marketw|marketwatch|market) add (.+)$"  enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Add"    sequence="90"></alias>
+  <alias match="^(?:marketw|marketwatch|market) (?:del|delete|remove|rem) (.+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Del" sequence="90"></alias>
+  <alias match="^(?:marketw|marketwatch) (?:list|watch)$"   enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_List"   sequence="90"></alias>
+  <alias match="^market watch$"                  enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_List"   sequence="90"></alias>
+  <alias match="^(?:marketw|marketwatch) clear$"      enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Clear"  sequence="90"></alias>
+  <alias match="^(?:marketw|marketwatch) deep$"       enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Deep"   sequence="90"></alias>
+  <alias match="^(?:marketw|marketwatch) throttle ?(.*)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Throttle" sequence="86"></alias>
+  <alias match="^(?:marketw|marketwatch) debug ?(.*)$"  enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Debug"  sequence="85"></alias>
+  <alias match="^(?:marketw|marketwatch) probe (\d+)$"  enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Probe"  sequence="85"></alias>
+  <alias match="^(?:marketw|marketwatch) bids$"         enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Bids"   sequence="88"></alias>
+  <alias match="^(?:marketw|marketwatch) auc ?(.*)$"    enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Auc"    sequence="85"></alias>
+  <alias match="^(?:marketw|marketwatch) mkt ?(.*)$"    enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Mkt"    sequence="85"></alias>
+  <alias match="^(?:marketw|marketwatch) withdrawroom(?: (.*))?$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_WithdrawRoom" sequence="86"></alias>
+  <alias match="^(?:marketw|marketwatch) withdraw(?: (.*))?$"     enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Withdraw"     sequence="85"></alias>
+
+  <!-- internal: fired by the hyperlinks -->
+  <alias match="^mwaucbid (\d+)$"   enabled="y" regexp="y" ignore_case="y" script="MW_Click_AucBid"   sequence="80"></alias>
+  <alias match="^mwbid (\d+)$"      enabled="y" regexp="y" ignore_case="y" script="MW_Click_Bid"      sequence="80"></alias>
+  <alias match="^mwbidforce (\d+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Click_BidForce" sequence="80"></alias>
+  <alias match="^mwbuy (\d+)$"      enabled="y" regexp="y" ignore_case="y" script="MW_Click_Buy"      sequence="80"></alias>
+</aliases>
+
+<script>
+<![CDATA[
+
+require "serialize"
+
+-- Aardwolf's shipped silent command-capture module (MUSHclient/lua/
+-- wrapped_captures.lua).  Brackets a command with echo tags and gags the whole
+-- response, so we can read "market list" without it hitting the screen.
+local gHaveCapture = pcall (require, "wrapped_captures")
+
+-- gmcphelper gives us gmcp("room.info.num"), which asks the GMCP handler
+-- plugin for its CURRENT cached value.  That matters: room.info is only
+-- broadcast when you change rooms, so a plugin that only listens would not
+-- know where you are until you next moved.
+local gHaveGmcp = pcall (require, "gmcphelper")
+
+-- =====================================================================
+-- Colours / echo helpers  (standard theme)
+-- =====================================================================
+-- Only these four colours are used anywhere in this plugin.
+local CLR_TAG  = "#875FFF"   -- x099  brackets, and muted secondary detail
+local CLR_NAME = "#00D7FF"   -- x045  plugin name, and anything needing notice
+local CLR_MSG  = "#FFFFFF"   -- W     message text
+local CLR_HI   = "#00FF87"   -- x048  values, commands, clickable actions
+
+-- Roles mapped onto the four, so the rest of the code can stay readable.
+local CLR_WARN = CLR_NAME    -- refusals / attention
+local CLR_DIM  = CLR_TAG     -- secondary detail lines
+
+local TAG = "MarketWatch"
+
+local function echo (msg)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", msg)
+end
+
+local function echoHi (msg, hi, tail)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", msg, CLR_HI, "", hi, CLR_MSG, "", tail or "")
+end
+
+local function warn (msg)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_WARN, "", msg)
+end
+
+local function helpLine (left, right)
+  ColourNote (CLR_HI, "", string.format ("  %-26s", left), CLR_MSG, "", right)
+end
+
+local function dbg (msg)
+  if gCfg and gCfg.debug then
+    ColourNote (CLR_DIM, "", "[marketw] " .. msg)
+  end
+end
+
+-- =====================================================================
+-- Small utilities
+-- =====================================================================
+local function trim (s) return (tostring (s or ""):match ("^%s*(.-)%s*$")) end
+
+-- Amounts go into commands, so they must always render as plain digits -
+-- never "1.2e+15", never a trailing ".0".
+local function intstr (n)
+  return string.format ("%d", math.floor (tonumber (n) or 0))
+end
+
+local function commafy (n)
+  local s = tostring (math.floor (tonumber (n) or 0))
+  local k
+  repeat s, k = s:gsub ("^(%-?%d+)(%d%d%d)", "%1,%2") until k == 0
+  return s
+end
+
+-- "1200000000", "1,200,000,000", "1.2b", "500m", "25k"  ->  number
+local function parseAmount (s)
+  s = trim (s):gsub (",", ""):lower ()
+  local n, suf = s:match ("^(%d+%.?%d*)([kmb]?)$")
+  if not n then return nil end
+  n = tonumber (n)
+  if not n then return nil end
+  if     suf == "k" then n = n * 1000
+  elseif suf == "m" then n = n * 1000000
+  elseif suf == "b" then n = n * 1000000000 end
+  if n < 1 then return nil end
+  return math.floor (n)
+end
+
+-- Reduce a name to a comparable form: lowercase, and every character that is
+-- not a letter or digit becomes a space.  This makes decorated / restrung
+-- names like "|10[Ten of Earth]10|" compare as "10 ten of earth 10", so the
+-- user never has to type the decoration.
+local function norm (s)
+  s = tostring (s or ""):lower ()
+  s = s:gsub ("[^a-z0-9]", " ")
+  s = s:gsub ("%s+", " ")
+  return trim (s)
+end
+
+-- Split a watch pattern on "*" into normalised literal pieces.  Matching then
+-- means "these pieces appear, in this order" - which is exactly glob
+-- semantics, without ever building a Lua pattern out of user text.
+local function splitGlob (raw)
+  local parts, out = {}, {}
+  local start = 1
+  while true do
+    local s = raw:find ("*", start, true)
+    if not s then parts [#parts + 1] = raw:sub (start) break end
+    parts [#parts + 1] = raw:sub (start, s - 1)
+    start = s + 1
+  end
+  for _, p in ipairs (parts) do
+    local n = norm (p)
+    if n ~= "" then out [#out + 1] = n end
+  end
+  return out
+end
+
+-- Do all pieces appear in order inside hay?  (plain find, no pattern magic)
+local function piecesMatch (hay, pieces)
+  if not pieces or #pieces == 0 then return false end
+  local pos = 1
+  for _, p in ipairs (pieces) do
+    local s, e = hay:find (p, pos, true)
+    if not s then return false end
+    pos = e + 1
+  end
+  return true
+end
+
+-- Does a prefix of p (>= 4 chars) sit at the very end of vis?  That means the
+-- match may simply have been cut off by the 28-char column.
+local function straddles (vis, p)
+  local maxk = math.min (#vis, #p)
+  for k = maxk, 4, -1 do
+    if vis:sub (-k) == p:sub (1, k) then return true end
+  end
+  return false
+end
+
+-- Could this pattern still match once the truncated tail is known?
+local function couldMatchTruncated (vis, pieces)
+  if not pieces or #pieces == 0 then return false end
+  local pos = 1
+  for i, p in ipairs (pieces) do
+    local s, e = vis:find (p, pos, true)
+    if not s then
+      -- earlier pieces matched, so the rest may live in the cut-off tail
+      if i > 1 then return true end
+      return straddles (vis, p)
+    end
+    pos = e + 1
+  end
+  return true
+end
+
+-- flatten one captured style-run list into plain text
+local function styleText (styles)
+  if type (styles) ~= "table" then return "" end
+  local parts = {}
+  for _, run in ipairs (styles) do
+    parts [#parts + 1] = run.text or ""
+  end
+  return table.concat (parts)
+end
+
+local function textsOf (lines)
+  local t = {}
+  for _, s in ipairs (lines or {}) do t [#t + 1] = styleText (s) end
+  return t
+end
+
+-- =====================================================================
+-- Persistent data  (own file - SetVariable is lost on manual reinstall)
+-- =====================================================================
+-- =====================================================================
+-- The commands sent to the MUD.  Fixed, not configurable.
+--   marketplace ("long auction"): one command does both jobs
+--     lbid <num>                        read an item's stats box
+--     lbid <num> <amt> proxy confirm    place a proxy bid
+--     lbid <num> <buyout>               buy it outright ("proxy" is
+--                                       meaningless - there is nothing to
+--                                       bid up to - so the short form)
+--   live auction channel: a different system entirely
+--     bid <num> <amt>
+-- =====================================================================
+local CMD_BID   = "lbid $num $amt proxy confirm"
+local CMD_BUY   = "lbid $num $amt"
+local CMD_PROBE = "lbid $num"
+local CMD_AUC   = "bid $num $amt"
+
+local DATA_FILE = "MarketWatch_data.lua"
+
+gCfg = {
+  -- $num and $amt are substituted before sending
+  auc         = true,                        -- watch the auction channel at all
+  mkt         = true,                        -- watch the market channel too
+  aucdebug    = false,
+  withdraw     = false,   -- pull gold from the bank when a bid falls short
+  withdrawroom = 0,       -- only ever do that in this room (0 = unset)
+  deep        = false,    -- probe EVERY truncated row, not just likely ones
+  probe_delay = 0.6,      -- seconds between silent stats probes
+  probe_max   = 30,       -- hard cap on probes per scan
+  debug       = false,
+}
+
+local gWatch = {}         -- { {raw=, pieces=, max=, added=}, ... }
+
+local function dataPath () return GetInfo (66) .. DATA_FILE end
+
+-- Items we have already put a bid (or buyout) on.  num -> os.time().
+-- Persisted: a proxy bid stands until the auction ends, so re-offering the
+-- link would only ever waste gold.  Pruned when the item leaves the market.
+gBid = {}
+
+-- Same idea for the LIVE auction channel.  Kept separate because auction item
+-- numbers are a completely different, small, recycled namespace ("Num 97") and
+-- would otherwise collide with market numbers ("64817").
+gAucBid = {}
+
+-- Buyout prices learned from the market channel ("This item has a buyout price
+-- of N").  That announcement is the one place a buyout is stated in a form we
+-- have actually seen, so it is remembered and reused by 'marketw' scans later.
+gKnownBuyout = {}
+
+local AUC_BID_TTL = 3600   -- forget an auction bid after an hour
+local AUC_TTL     = 300    -- an auction line's link goes stale after 5 minutes
+
+local function saveData ()
+  local plain = {}
+  for i, w in ipairs (gWatch) do
+    plain [i] = { raw = w.raw, max = w.max, added = w.added }
+  end
+  -- serialize wants string keys for a sparse map
+  local bid = {}
+  for num, t in pairs (gBid) do bid [tostring (num)] = t end
+  local abid = {}
+  for num, t in pairs (gAucBid) do abid [tostring (num)] = t end
+  local buy = {}
+  for num, p in pairs (gKnownBuyout) do buy [tostring (num)] = p end
+  local body = "return " .. serialize.save_simple (
+    { watch = plain, cfg = gCfg, bid = bid, aucbid = abid, buyout = buy })
+  local tmp = dataPath () .. ".tmp"
+  local f, err = io.open (tmp, "w")
+  if not f then warn ("cannot save watch list: " .. tostring (err)) return false end
+  f:write (body)
+  f:close ()
+  os.remove (dataPath ())
+  os.rename (tmp, dataPath ())
+  return true
+end
+
+local function loadData ()
+  local f = io.open (dataPath (), "r")
+  if not f then return end
+  local body = f:read ("*a")
+  f:close ()
+  local chunk = loadstring (body)
+  if not chunk then warn ("watch list file is corrupt - starting empty") return end
+  local ok, t = pcall (chunk)
+  if not ok or type (t) ~= "table" then return end
+  if type (t.cfg) == "table" then
+    -- Only keys that still exist are restored, so settings retired in later
+    -- versions (the old bidcmd / buycmd / cap) are ignored, not resurrected.
+    for k, v in pairs (t.cfg) do
+      if gCfg [k] ~= nil then gCfg [k] = v end
+    end
+  end
+  gWatch = {}
+  for _, w in ipairs (t.watch or {}) do
+    if w.raw and w.max then
+      gWatch [#gWatch + 1] = {
+        raw = w.raw, max = w.max, added = w.added or 0,
+        pieces = splitGlob (w.raw),
+      }
+    end
+  end
+  gBid = {}
+  for num, when in pairs (t.bid or {}) do
+    local n = tonumber (num)
+    if n then gBid [n] = when end
+  end
+  gAucBid = {}
+  local now = os.time ()
+  for num, when in pairs (t.aucbid or {}) do
+    local n = tonumber (num)
+    if n and now - when < AUC_BID_TTL then gAucBid [n] = when end
+  end
+  gKnownBuyout = {}
+  for num, price in pairs (t.buyout or {}) do
+    local n = tonumber (num)
+    if n then gKnownBuyout [n] = price end
+  end
+end
+
+-- =====================================================================
+-- Scan state
+-- =====================================================================
+local gScanning   = false
+local gScanStart  = 0
+
+-- Live state from GMCP
+local gRoom = nil         -- room.info  "num"
+local gGold = nil         -- char.worth "gold"   (on hand)
+local gBank = nil         -- char.worth "bank"
+
+-- The last bid we actually sent, so that a "not enough gold" reply can be
+-- tied back to it.  { num, amt, auction, when }
+local gLastBid = nil
+local BID_FAIL_WINDOW = 20   -- seconds a failure may still refer to that bid
+
+-- Where are we?  Ask the GMCP handler for its cached room.info first - it
+-- always knows, even if we have not moved since loading.  The value fed to us
+-- by room.info broadcasts is only a fallback.
+local function currentRoom ()
+  if gHaveGmcp then
+    -- gmcphelper's gmcp() stores its result in a global called "data" and
+    -- returns that global.  If the lookup fails it leaves the PREVIOUS value
+    -- in place, so clear it first - otherwise a failed read hands back the
+    -- last room we successfully saw.
+    data = nil
+    local ok, v = pcall (gmcp, "room.info.num")
+    if ok then
+      local n = tonumber (v)
+      if n then return n end
+    end
+  end
+  return gRoom
+end
+local gRows       = {}    -- num -> row table for the CURRENT scan only
+local gOrder      = {}    -- nums, in market-list order, that we will report
+local gQueue      = {}    -- nums still to probe
+local gProbeCount = 0
+local gHidBid     = 0    -- matches skipped this scan: we already bid
+local gHidPrice   = 0    -- matches skipped this scan: bidding is already over our max
+
+local SCAN_TTL = 600      -- a scan's results go stale after 10 minutes
+
+-- =====================================================================
+-- Parsing 'market list'
+-- =====================================================================
+-- Fixed-width layout, verified against real output:
+--   1..6 num | 7 sp | 8..35 item (28) | 36 sp | 37..39 lvl | 40 sp
+--   41..45 type | 46 sp | 47..62 last bid | 63 sp | 64..67 bids | 68 sp | 69.. time
+local function parseListRow (line)
+  if #line < 68 then return nil end
+  local num = tonumber (trim (line:sub (1, 6)))
+  if not num then return nil end
+  if line:sub (7, 7) ~= " " or line:sub (36, 36) ~= " " then return nil end
+
+  local rawname = line:sub (8, 35)
+  local lvl     = tonumber (trim (line:sub (37, 39)))
+  local typefld = line:sub (41, 45)
+  local bidtxt  = trim (line:sub (47, 62))
+  local bids    = tonumber (trim (line:sub (64, 67)))
+  local timeft  = trim (line:sub (69))
+
+  local star  = typefld:find ("*", 1, true) ~= nil
+  local ctype = trim (typefld:gsub ("%*", ""))
+  local vis   = trim (rawname)
+
+  -- The description column is 28 wide.  Obviously cut off if char 28 is not a
+  -- space.  But a name cut exactly ON a space shows only 27 characters and
+  -- looks complete, so anything 27 or longer has to be treated as suspect.
+  local maybeCut = #vis >= 27
+
+  return {
+    num       = num,
+    visible   = vis,
+    truncated = maybeCut,
+    level     = lvl,
+    ctype     = ctype,              -- "Gold" / "QP" / ...
+    star      = star,               -- meaning of '*' is not yet confirmed
+    bid       = tonumber ((bidtxt:gsub (",", ""))),
+    bidtxt    = bidtxt,
+    bids      = bids or 0,
+    timeleft  = timeft,
+  }
+end
+
+-- =====================================================================
+-- Parsing the item box from 'lbid <num>'
+--
+-- Verified against real output (2026-08-21).  The whole reply is a box of
+-- "| Label      : value        |" lines:
+--
+--   | Keywords   : daily blessing qreset reset token   |
+--   | Name       : Daily Blessing Qreset Token         |
+--   | Type       : Treasure          Level  :     1    |
+--   ...
+--   | Market Item Number    : 64911                    |
+--   | Item is being sold by : Granuaile                |
+--   | Auction will end in   : 3 days and 16:40:04      |
+--   | Current bid           : 25,000,000 gold (Ultimate) |
+--
+-- Still unknown: the label used for a buyout price (this item has none), so
+-- any label containing "buyout" is accepted.  Unreadable fields stay nil, and
+-- a nil name means no bid link is offered for a truncated row.
+-- =====================================================================
+local function boxValue (line)
+  -- "| Label   : value    |"  ->  "label", "value"
+  local inner = line:match ("^%s*|(.*)|%s*$")
+  if not inner then return nil end
+  local label, value = inner:match ("^%s*([%a][%a%s]-)%s*:%s*(.*)$")
+  if not label then return nil end
+  return (label:lower ():gsub ("%s+", " ")), trim (value)
+end
+
+local function firstNumber (s)
+  local n = s and s:match ("([%d,]+)")
+  return n and tonumber ((n:gsub (",", ""))) or nil
+end
+
+-- The command that prints the box above.  'lbid <num>' is the verified form;
+-- the market list footer suggests 'market bid <num>' does the same.
+local function probeCmd (num)
+  return (CMD_PROBE:gsub ("%$num", intstr (num)))
+end
+
+local function parseStats (num, lines)
+  local st = { num = num }
+
+  for _, t in ipairs (lines) do
+    local label, value = boxValue (t)
+    if label and value ~= "" then
+      if label == "name" then
+        -- first one wins: the stats box comes before the description text
+        if not st.name then st.name = value end
+      elseif label == "keywords" then
+        if not st.keywords then st.keywords = value end
+      elseif label == "market item number" then
+        st.listnum = firstNumber (value)
+      elseif label == "item is being sold by" then
+        st.seller = value:match ("^(%S+)")
+      elseif label == "auction will end in" then
+        st.endsin = value
+      elseif label == "current bid" then
+        -- "25,000,000 gold (Ultimate)"
+        st.bid      = firstNumber (value)
+        st.currency = value:match ("^[%d,]+%s+(%a+)")
+        -- The name in brackets is the high bidder as far as I can tell, but
+        -- that is an inference from one sample - it is only ever used to skip
+        -- bidding against yourself, so a wrong guess costs nothing.
+        st.bidder   = value:match ("%(([^)]+)%)")
+      elseif label:find ("buyout", 1, true) then
+        st.buyout = firstNumber (value)
+      elseif label:find ("minimum", 1, true) and label:find ("bid", 1, true) then
+        st.minbid = firstNumber (value)
+      end
+    end
+  end
+
+  -- The box states its own item number.  If it disagrees with the one we asked
+  -- about, the reply is not for our item - throw the whole thing away rather
+  -- than bid on the strength of it.
+  if st.listnum and st.listnum ~= num then
+    return { num = num, mismatch = st.listnum }
+  end
+
+  return st
+end
+
+-- =====================================================================
+-- Matching a row against the watch list
+-- =====================================================================
+-- Returns: "sure" | "maybe" | nil, entry
+-- "sure"  = the pattern matched text we can actually see, so it will also
+--           match the full name (a match inside a prefix implies a match in
+--           the whole string).
+-- "maybe" = the row is truncated and the pattern could still match the part
+--           we cannot see.  Needs an 'lbid <num>' probe to decide.
+local function classifyRow (row)
+  local best, bestKind = nil, nil
+  local vis = norm (row.visible)
+  for _, w in ipairs (gWatch) do
+    local kind = nil
+    if piecesMatch (vis, w.pieces) then
+      kind = "sure"
+    elseif row.truncated and couldMatchTruncated (vis, w.pieces) then
+      kind = "maybe"
+    elseif row.truncated and gCfg.deep then
+      kind = "maybe"
+    end
+    if kind then
+      -- prefer a sure match, then the higher maximum
+      if not best
+         or (kind == "sure" and bestKind == "maybe")
+         or (kind == bestKind and w.max > best.max) then
+        best, bestKind = w, kind
+      end
+    end
+  end
+  return bestKind, best
+end
+
+-- =====================================================================
+-- Rendering
+-- =====================================================================
+local function renderRow (row)
+  local w  = row.entry
+  local st = row.stats
+  -- A buyout heard on the market channel is authoritative; fall back to it
+  -- when the stats box did not yield one.
+  if st and not st.buyout then st.buyout = gKnownBuyout [row.num] end
+  local name = (st and st.name) or (row.visible .. (row.truncated and "..." or ""))
+
+  -- header line: number, name, level, currency
+  ColourNote (
+    CLR_HI,  "", string.format (" %-6d ", row.num),
+    CLR_MSG, "", string.format ("%-44s ", name:sub (1, 44)),
+    CLR_DIM, "", string.format ("L%-4s %s", tostring (row.level or "?"), row.ctype or "?"))
+
+  -- detail line: bid / bidder / time / buyout
+  local detail = string.format ("        bid %s (%d bid%s)",
+                                commafy (row.bid or 0), row.bids,
+                                row.bids == 1 and "" or "s")
+  if st and st.bidder then detail = detail .. "  high: " .. st.bidder end
+  detail = detail .. "   ends " .. (row.timeleft or "?")
+  if st and st.buyout then detail = detail .. "   buyout " .. commafy (st.buyout) end
+  ColourNote (CLR_DIM, "", detail)
+  if st and st.seller then
+    ColourNote (CLR_DIM, "", "        sold by " .. st.seller)
+  end
+
+  -- action line
+  ColourNote (CLR_DIM, "", string.format ("        watch %q   your max %s",
+                                          w.raw, commafy (w.max)))
+
+  -- Items already bid on never reach here - they are filtered out of the scan
+  -- entirely, because a standing proxy bid needs no further attention.
+  local reasons = {}
+  if row.ctype ~= "Gold" then
+    reasons [#reasons + 1] = "not a gold auction"
+  end
+  -- Rows priced past our max are filtered out before this point, both from
+  -- the list and again after the stats probe.
+  if row.kind == "maybe" and not (st and st.name) then
+    reasons [#reasons + 1] = "name is cut off and could not be confirmed"
+  end
+
+  local canBuy = st and st.buyout and w.max >= st.buyout
+                 and row.ctype == "Gold"
+                 and not (row.kind == "maybe" and not st.name)
+
+  if #reasons > 0 then
+    ColourNote (CLR_WARN, "", "        no bid link: " .. table.concat (reasons, "; "))
+    if not canBuy then return end
+  end
+
+  ColourTell (CLR_MSG, "", "        ")
+  if #reasons == 0 then
+    local bidPreview = CMD_BID:gsub ("%$num", intstr (row.num))
+                                  :gsub ("%$amt", intstr (w.max))
+    Hyperlink ("mwbid " .. row.num,
+               "[ BID up to " .. commafy (w.max) .. " ]",
+               "Re-check this item, then send: " .. bidPreview,
+               CLR_HI, "black", 0, 1)
+    if canBuy then ColourTell (CLR_MSG, "", "  ") end
+  end
+  if canBuy then
+    Hyperlink ("mwbuy " .. row.num,
+               "[ BUY OUT " .. commafy (st.buyout) .. " ]",
+               "Buy this item outright for " .. commafy (st.buyout),
+               CLR_NAME, "black", 0, 1)
+  end
+  ColourNote (CLR_MSG, "", "")
+end
+
+local function renderResults ()
+  gScanning = false
+  local n = #gOrder
+
+  -- say what was left out, so "hidden" never means "silently lost"
+  local skipped = {}
+  if gHidBid   > 0 then skipped [#skipped + 1] = gHidBid   .. " already bid" end
+  if gHidPrice > 0 then skipped [#skipped + 1] = gHidPrice .. " over your max" end
+  local hidden = #skipped > 0
+                 and ("  (" .. table.concat (skipped, ", ") .. ", hidden)")
+                 or ""
+
+  if n == 0 then
+    if #skipped > 0 then
+      echoHi ("nothing to act on - ", table.concat (skipped, " and "),
+              " among your watched items.")
+    else
+      echoHi ("nothing on the market matches your ", tostring (#gWatch), " watched item(s).")
+    end
+    return
+  end
+  echoHi ("", tostring (n), " match" .. (n == 1 and "" or "es") ..
+          " on the market" .. hidden)
+  Note ("")
+  for _, num in ipairs (gOrder) do
+    local row = gRows [num]
+    if row and row.entry then renderRow (row) end
+  end
+  ColourNote (CLR_DIM, "", "  Links re-verify the item with a fresh 'lbid' read before anything is sent.")
+end
+
+-- =====================================================================
+-- Probe queue: resolve full names / buyout / high bidder
+-- =====================================================================
+function MW_ProbeDone (num, lines)
+  local row = gRows [num]
+  if row then
+    row.stats = parseStats (num, textsOf (lines))
+    dbg ("probe " .. num .. " name=" .. tostring (row.stats.name) ..
+         " buyout=" .. tostring (row.stats.buyout) ..
+         " bidder=" .. tostring (row.stats.bidder))
+    -- a "maybe" row is only kept if the full name really does match
+    if row.kind == "maybe" then
+      local full = row.stats.name
+      if full and piecesMatch (norm (full), row.entry.pieces) then
+        row.kind = "sure"
+      elseif full then
+        row.entry = nil          -- confirmed NOT a match - drop it
+        dbg ("probe " .. num .. " ruled out")
+      end
+      -- full == nil: parser could not read the name; renderRow refuses a link
+    end
+    -- The stats box is fresher than the list, so the bid may have moved past
+    -- our max in between.  Drop it rather than show something unactionable.
+    if row.entry and row.stats.bid and row.stats.bid >= row.entry.max then
+      row.entry = nil
+      gHidPrice = gHidPrice + 1
+      dbg ("probe " .. num .. " dropped - bidding is past our max")
+    end
+  end
+  DoAfterSpecial (gCfg.probe_delay, "MW_NextProbe ()", sendto.script)
+end
+
+function MW_ProbeTimeout (num)
+  dbg ("probe " .. tostring (num) .. " timed out")
+  DoAfterSpecial (gCfg.probe_delay, "MW_NextProbe ()", sendto.script)
+end
+
+function MW_NextProbe ()
+  if #gQueue == 0 then
+    -- drop rows that the probe ruled out
+    local keep = {}
+    for _, num in ipairs (gOrder) do
+      if gRows [num] and gRows [num].entry then keep [#keep + 1] = num end
+    end
+    gOrder = keep
+    renderResults ()
+    return
+  end
+  local num = table.remove (gQueue, 1)
+  gProbeCount = gProbeCount + 1
+  local ok, err = pcall (Capture.untagged_output, probeCmd (num),
+    true, true, true,
+    function (lines) MW_ProbeDone (num, lines) end,
+    false,
+    function () MW_ProbeTimeout (num) end,
+    12)
+  if not ok then
+    dbg ("probe " .. num .. " failed to start: " .. tostring (err))
+    MW_ProbeTimeout (num)
+  end
+end
+
+-- =====================================================================
+-- 'market list' capture
+-- =====================================================================
+function MW_ListCaptured (lines)
+  gOrder, gQueue, gProbeCount, gHidBid, gHidPrice = {}, {}, 0, 0, 0
+
+  -- Rows are NOT cleared: an item announced on the market channel lives here
+  -- too, and a scan should not kill its links.  Drop only what has expired.
+  local cutoff = os.time () - SCAN_TTL
+  for num, r in pairs (gRows) do
+    if (r.seen or 0) < cutoff then gRows [num] = nil end
+  end
+
+  local seen, onMarket, sawFooter = 0, {}, false
+  for _, styles in ipairs (lines or {}) do
+    local text = styleText (styles)
+    -- the list ends with "Type: 'market bid <num>' to see stats and ..."
+    if text:find ("to see stats", 1, true) then sawFooter = true end
+    local row = parseListRow (text)
+    if row then
+      seen = seen + 1
+      onMarket [row.num] = true
+      local kind, entry = classifyRow (row)
+      if kind then
+        if gBid [row.num] then
+          -- Already bid: the proxy stands until the auction ends, so there is
+          -- nothing left to decide.  Drop it before it costs an lbid probe.
+          gHidBid = gHidBid + 1
+        elseif row.bid and row.bid >= entry.max then
+          -- Bidding has already passed what we are willing to pay.  The list
+          -- gives us the current bid, so this costs no probe either.
+          gHidPrice = gHidPrice + 1
+        else
+          row.kind  = kind
+          row.entry = entry
+          row.seen  = os.time ()
+          gRows [row.num] = row
+          gOrder [#gOrder + 1] = row.num
+        end
+      end
+    end
+  end
+
+  dbg ("market list: " .. seen .. " rows, " .. #gOrder .. " candidate(s)")
+
+  if seen == 0 then
+    gScanning = false
+    warn ("could not read 'market list' - is the market up?  Try: marketw debug on")
+    return
+  end
+
+  -- Forget bids on items that have left the market, so the ledger cannot grow
+  -- without bound or block a number the market later reuses.
+  --
+  -- A bid item STAYS in 'market list' until its auction ends - that is exactly
+  -- how we know to keep ignoring it.  So absence from the list is only
+  -- meaningful if we actually read the whole list: a capture that got cut off
+  -- would otherwise un-ignore everything it missed and offer it all again.
+  -- Only prune when the closing "Type: 'market bid ...'" footer was seen.
+  if sawFooter then
+    local pruned = 0
+    for num in pairs (gBid) do
+      if not onMarket [num] then gBid [num] = nil pruned = pruned + 1 end
+    end
+    for num in pairs (gKnownBuyout) do
+      if not onMarket [num] then gKnownBuyout [num] = nil pruned = pruned + 1 end
+    end
+    if pruned > 0 then
+      saveData ()
+      dbg ("pruned " .. pruned .. " finished auction(s) from the ledgers")
+    end
+  else
+    dbg ("no list footer seen - capture may be partial, ledgers left alone")
+  end
+
+  -- probe every candidate: needed for the full name, the high bidder and the
+  -- buyout price
+  for _, num in ipairs (gOrder) do
+    if #gQueue < gCfg.probe_max then gQueue [#gQueue + 1] = num end
+  end
+  if #gOrder > gCfg.probe_max then
+    warn ("more than " .. gCfg.probe_max .. " candidates - only the first " ..
+          gCfg.probe_max .. " were checked in detail.")
+  end
+
+  if #gQueue == 0 then
+    renderResults ()
+  else
+    echoHi ("checking ", tostring (#gQueue), " item(s) in detail...")
+    MW_NextProbe ()
+  end
+end
+
+function MW_ListTimeout ()
+  gScanning = false
+  warn ("'market list' timed out.")
+end
+
+-- =====================================================================
+-- The LIVE auction channel
+--
+-- Sample line this was written against:
+--   Auction: Betrayal is auctioning a Trivia Point Token (Level 1, Num 97).
+--   Current bid is 100.
+--
+-- Unlike the market list, the auction line carries the FULL item name, so a
+-- match here is exact and needs no probing.  The bid also uses a different
+-- command and a different number space - see CMD_AUC and gAucBid.
+-- =====================================================================
+local gAuc     = {}   -- auction num -> { name, level, bid, entry, when }
+local gAucLast = { line = "", when = 0 }
+
+-- Pick the best watch entry for a full, untruncated item name.
+local function matchWatch (fullname)
+  local hay, best = norm (fullname), nil
+  for _, w in ipairs (gWatch) do
+    if piecesMatch (hay, w.pieces) then
+      if not best or w.max > best.max then best = w end
+    end
+  end
+  return best
+end
+
+function MW_AuctionDebug (name, line, wildcards)
+  if gCfg.aucdebug then
+    ColourNote (CLR_DIM, "", "[marketw auc] " .. tostring (line))
+  end
+end
+
+function MW_AuctionLine (name, line, wildcards)
+  if not gCfg.auc then return end
+  line = tostring (line)
+
+  -- the channel repeats itself; ignore an identical line seen seconds ago
+  local now = os.time ()
+  if line == gAucLast.line and now - gAucLast.when < 5 then return end
+  gAucLast.line, gAucLast.when = line, now
+
+  -- "<seller> is auctioning <ITEM> (Level <n>, Num <n>)"
+  local item, level, num = line:match ("is auctioning%s+(.-)%s*%(Level%s+(%d+),%s*Num%s+(%d+)%)")
+  num   = tonumber (num)
+  level = tonumber (level)
+  if not item or item == "" or not num then
+    if gCfg.aucdebug then
+      ColourNote (CLR_DIM, "", "[marketw auc] could not parse: " .. line)
+    end
+    return
+  end
+
+  -- "Current bid is 100." - absent on some lines, so it stays nil
+  local cur = line:match ("[Cc]urrent bid is%s+([%d,]+)")
+  cur = cur and tonumber ((cur:gsub (",", ""))) or nil
+
+  local w = matchWatch (item)
+  if gCfg.aucdebug then
+    ColourNote (CLR_DIM, "", string.format ("[marketw auc] item=%q level=%s num=%d bid=%s match=%s",
+                item, tostring (level), num, tostring (cur), w and w.raw or "none"))
+  end
+  if not w then return end
+  -- already bid: the bid stands, so say nothing at all
+  if gAucBid [num] then return end
+  -- bidding is already past what we would pay: nothing to act on, stay quiet
+  if cur and cur >= w.max then return end
+
+  gAuc [num] = { name = item, level = level, bid = cur, entry = w, when = now }
+
+  echoHi ("auction match: ", item,
+          string.format ("   (Num %d, L%s%s)", num, tostring (level or "?"),
+                         cur and (", bid " .. commafy (cur)) or ""))
+
+  local reasons = {}
+  if #reasons > 0 then
+    ColourNote (CLR_WARN, "", "        no bid link: " .. table.concat (reasons, "; "))
+    return
+  end
+
+  local preview = CMD_AUC:gsub ("%$num", intstr (num)):gsub ("%$amt", intstr (w.max))
+  ColourTell (CLR_MSG, "", "        ")
+  Hyperlink ("mwaucbid " .. num,
+             "[ BID " .. commafy (w.max) .. " ]",
+             "Send: " .. preview,
+             CLR_HI, "black", 0, 1)
+  ColourNote (CLR_DIM, "", "   matches " .. string.format ("%q", w.raw))
+end
+
+function MW_Click_AucBid (name, line, wildcards)
+  local num = tonumber (wildcards [1])
+  local a = gAuc [num]
+  if not a or not a.entry then
+    warn ("auction " .. tostring (num) .. " is not one I have seen.")
+    return
+  end
+  if os.time () - a.when > AUC_TTL then
+    warn ("that auction line is over " .. math.floor (AUC_TTL / 60) ..
+          " minutes old - the auction has probably moved on.  Nothing sent.")
+    return
+  end
+  if gAucBid [num] then
+    warn ("you already bid on auction " .. num .. " - nothing sent.")
+    return
+  end
+  local amt = a.entry.max
+  if a.bid and a.bid >= amt then
+    warn ("refused: current bid " .. commafy (a.bid) ..
+          " already meets your max " .. commafy (amt) .. ".")
+    return
+  end
+  -- The name came from the auction line in full, so it is already an exact
+  -- match - re-check it anyway in case the watch list changed since.
+  if not piecesMatch (norm (a.name), a.entry.pieces) then
+    warn ("refused: " .. string.format ("%q", a.name) .. " no longer matches " ..
+          string.format ("%q", a.entry.raw) .. ".")
+    return
+  end
+
+  local cmd = CMD_AUC:gsub ("%$num", intstr (num)):gsub ("%$amt", intstr (amt))
+  gAucBid [num] = os.time ()
+  gLastBid = { num = num, amt = amt, auction = true, when = os.time () }
+  saveData ()
+  echoHi ("sending: ", cmd, "   (" .. a.name .. ")")
+  Send (cmd)
+end
+
+-- =====================================================================
+-- The MARKET channel - a new listing being announced
+--
+-- Two lines, the second only when the item has a buyout:
+--   Market: Kalista is selling the Essence of Negativity (Level 201, Num 64964). Auction is for Gold.
+--   Market: This item has a buyout price of 1,000,000.
+--
+-- These are marketplace items, so they share gRows / gBid / bidcmd / buycmd
+-- with the 'marketw' scan.  The name is full and untruncated here, so no probe is
+-- needed.  Output is held back briefly so the buyout line can join it.
+-- =====================================================================
+local gPendingAnnounce = nil   -- num awaiting its (optional) buyout line
+
+function MW_MarketLine (name, line, wildcards)
+  if not gCfg.mkt then return end
+  line = tostring (line)
+
+  local item, level, num =
+    line:match ("is selling%s+(.-)%s*%(Level%s+(%d+),%s*Num%s+(%d+)%)")
+  num   = tonumber (num)
+  level = tonumber (level)
+  if not item or item == "" or not num then return end
+
+  local currency = line:match ("[Aa]uction is for%s+(%a+)") or "Gold"
+
+  if gCfg.aucdebug then
+    ColourNote (CLR_DIM, "", string.format ("[marketw mkt] item=%q level=%s num=%d cur=%s",
+                item, tostring (level), num, currency))
+  end
+
+  local w = matchWatch (item)
+  if not w then gPendingAnnounce = nil return end
+  -- already bid: nothing left to decide, stay quiet
+  if gBid [num] then gPendingAnnounce = nil return end
+
+  -- Reuse the market row machinery so the links get the same click-time
+  -- re-verification as anything found by a scan.
+  gRows [num] = {
+    num = num, visible = item, truncated = false, level = level,
+    ctype = currency, bids = 0, bid = nil, timeleft = nil,
+    kind = "sure", entry = w, seen = os.time (),
+    stats = { num = num, name = item, buyout = gKnownBuyout [num] },
+    announced = true,
+  }
+  gPendingAnnounce = num
+  -- give the buyout line (if any) a moment to arrive before printing
+  DoAfterSpecial (0.8, "MW_AnnounceRender (" .. num .. ")", sendto.script)
+end
+
+function MW_MarketBuyoutLine (name, line, wildcards)
+  if not gCfg.mkt then return end
+  local price = tostring (line):match ("buyout price of%s+([%d,]+)")
+  price = price and tonumber ((price:gsub (",", "")))
+  if not price then return end
+
+  local num = gPendingAnnounce
+  if not num then return end
+  gKnownBuyout [num] = price
+  saveData ()
+  if gRows [num] and gRows [num].stats then
+    gRows [num].stats.buyout = price
+  end
+  if gCfg.aucdebug then
+    ColourNote (CLR_DIM, "", "[marketw mkt] buyout " .. commafy (price) .. " for " .. num)
+  end
+end
+
+function MW_AnnounceRender (num)
+  num = tonumber (num)
+  local row = gRows [num]
+  if not row or not row.entry or not row.announced then return end
+  if row.rendered then return end
+  row.rendered = true
+  gPendingAnnounce = nil
+
+  local w  = row.entry
+  local st = row.stats
+
+  echoHi ("market listing: ", row.visible,
+          string.format ("   (Num %d, L%s, %s)", num,
+                         tostring (row.level or "?"), tostring (row.ctype)))
+
+  local detail = string.format ("        matches %q   your max %s", w.raw, commafy (w.max))
+  if st and st.buyout then detail = detail .. "   buyout " .. commafy (st.buyout) end
+  ColourNote (CLR_DIM, "", detail)
+
+  local reasons = {}
+  if row.ctype ~= "Gold" then
+    reasons [#reasons + 1] = "not a gold auction"
+  end
+
+  local canBuy = st and st.buyout and w.max >= st.buyout
+                 and row.ctype == "Gold"
+
+  if #reasons > 0 then
+    ColourNote (CLR_WARN, "", "        no bid link: " .. table.concat (reasons, "; "))
+    if not canBuy then return end
+  end
+
+  ColourTell (CLR_MSG, "", "        ")
+  if #reasons == 0 then
+    local preview = CMD_BID:gsub ("%$num", intstr (num)):gsub ("%$amt", intstr (w.max))
+    Hyperlink ("mwbid " .. num,
+               "[ BID up to " .. commafy (w.max) .. " ]",
+               "Re-check this item, then send: " .. preview,
+               CLR_HI, "black", 0, 1)
+    if canBuy then ColourTell (CLR_MSG, "", "  ") end
+  end
+  if canBuy then
+    local preview = CMD_BUY:gsub ("%$num", intstr (num))
+                               :gsub ("%$amt", intstr (st.buyout))
+    Hyperlink ("mwbuy " .. num,
+               "[ BUY OUT NOW " .. commafy (st.buyout) .. " ]",
+               "Win it outright - sends: " .. preview,
+               CLR_NAME, "black", 0, 1)
+  end
+  ColourNote (CLR_MSG, "", "")
+end
+
+-- =====================================================================
+-- Topping up from the bank when a bid falls short
+--
+-- Only ever fires in the one room you nominate, and only within a few
+-- seconds of a bid we actually sent.  It withdraws, it never re-bids: the
+-- retry is a link you click, so nothing is ever spent without a click.
+--
+-- The failure line is the same for both systems (confirmed 2026-08-21):
+--   lbid 64940 1001  ->  You are only carrying 0 gold pieces.
+--   bid  27    1000  ->  You are only carrying 0 gold pieces.
+-- It states the gold on hand, so the shortfall needs no guessing.
+-- The bank command is "withdraw <amount>" (confirmed 2026-08-21).
+-- =====================================================================
+local CMD_WITHDRAW = "withdraw $amt"
+
+function MW_NotEnoughGold (name, line, wildcards)
+  local b = gLastBid
+  if not b then return end
+  if os.time () - b.when > BID_FAIL_WINDOW then gLastBid = nil return end
+  gLastBid = nil
+
+  -- "You are only carrying 0 gold pieces." - authoritative, and fresher than
+  -- the GMCP figure, so it wins when present.
+  local carrying = tostring (line):match ("only carrying%s+([%d,]+)%s+gold")
+  carrying = carrying and tonumber ((carrying:gsub (",", "")))
+
+  -- The bid did NOT happen, so undo the record of it - otherwise the item
+  -- would stay hidden from every future scan for something we never bought.
+  if b.auction then gAucBid [b.num] = nil else gBid [b.num] = nil end
+  saveData ()
+
+  local retryAlias = b.auction and ("mwaucbid " .. b.num) or ("mwbid " .. b.num)
+
+  echoHi ("bid on item ", tostring (b.num), " failed - not enough gold on hand.")
+  ColourNote (CLR_DIM, "", "        it is no longer marked as bid, so it will be offered again.")
+
+  if not gCfg.withdraw then
+    ColourTell (CLR_MSG, "", "        ")
+    Hyperlink (retryAlias, "[ RETRY BID ]", "Try the bid again", CLR_HI, "black", 0, 1)
+    ColourNote (CLR_DIM, "", "   ('marketw withdraw on' to top up from the bank automatically)")
+    return
+  end
+
+  if gCfg.withdrawroom == 0 then
+    warn ("withdraw is on but no room is set - stand in your bank and use 'marketw withdrawroom here'.")
+    return
+  end
+  local here = currentRoom ()
+  if here ~= gCfg.withdrawroom then
+    warn ("not withdrawing: you are in room " .. tostring (here or "unknown") ..
+          ", withdrawals are only done in room " .. gCfg.withdrawroom .. ".")
+    if not here then
+      ColourNote (CLR_DIM, "", "        (room unknown - is aard_GMCP_handler loaded?)")
+    end
+    return
+  end
+
+  -- Take out what is missing, not the whole bid - the shortfall is what
+  -- actually needs covering.
+  local have = carrying or gGold
+  local need = b.amt
+  if have then
+    need = b.amt - have
+    if need <= 0 then
+      warn ("you appear to have enough gold already - nothing withdrawn.")
+      return
+    end
+  end
+  if gBank and gBank < need then
+    warn ("not withdrawing: need " .. commafy (need) ..
+          " but the bank holds " .. commafy (gBank) .. ".")
+    return
+  end
+
+  local cmd = CMD_WITHDRAW:gsub ("%$amt", intstr (need))
+  echoHi ("withdrawing ", commafy (need),
+          have and ("  (carrying " .. commafy (have) .. ", bid needs " ..
+                    commafy (b.amt) .. ")") or "")
+  Send (cmd)
+  -- Hold the retry link back for a second.  The bank prints your account
+  -- details right after a withdrawal, and that would scroll the link away.
+  DoAfterSpecial (1, "MW_ShowRetry (" .. intstr (b.num) .. ", " ..
+                     tostring (b.auction) .. ")", sendto.script)
+end
+
+-- Shown a second after a withdrawal, once the bank has finished talking.
+function MW_ShowRetry (num, auction)
+  num = tonumber (num)
+  if not num then return end
+  local alias = auction and ("mwaucbid " .. num) or ("mwbid " .. num)
+  ColourTell (CLR_MSG, "", "        ")
+  Hyperlink (alias, "[ RETRY BID ]", "Try the bid again now the gold is in hand",
+             CLR_HI, "black", 0, 1)
+  ColourNote (CLR_MSG, "", "")
+end
+
+function MW_Cmd_Withdraw (name, line, wildcards)
+  local arg = trim (wildcards [1]):lower ()
+  if arg == "on"  then gCfg.withdraw = true
+  elseif arg == "off" then gCfg.withdraw = false
+  elseif arg == "" then
+    echoHi ("bank top-up is ", gCfg.withdraw and "ON" or "OFF", "")
+    if gCfg.withdrawroom == 0 then
+      ColourNote (CLR_DIM, "", "  no room set - stand in your bank and use 'marketw withdrawroom here'")
+    else
+      ColourNote (CLR_DIM, "", "  only in room " .. gCfg.withdrawroom ..
+                  "  (you are in " .. tostring (currentRoom () or "unknown") .. ")")
+    end
+    return
+  else
+    warn ("usage: marketw withdraw on|off")
+    return
+  end
+  saveData ()
+  echoHi ("bank top-up is ", gCfg.withdraw and "ON" or "OFF",
+          (gCfg.withdraw and gCfg.withdrawroom == 0)
+            and " - now set the room with 'marketw withdrawroom here'." or "")
+end
+
+function MW_Cmd_WithdrawRoom (name, line, wildcards)
+  local arg = trim (wildcards [1]):lower ()
+  if arg == "" then
+    if gCfg.withdrawroom == 0 then
+      echo ("no withdraw room set.  Stand in your bank and use 'marketw withdrawroom here'.")
+    else
+      echoHi ("withdrawals are only done in room ", tostring (gCfg.withdrawroom),
+              "  (you are in " .. tostring (currentRoom () or "unknown") .. ")")
+    end
+    return
+  end
+  local num
+  if arg == "here" then
+    num = currentRoom ()
+    if not num then
+      warn ("I cannot tell what room you are in - is aard_GMCP_handler loaded?")
+      return
+    end
+  else
+    num = tonumber (arg)
+    if not num then warn ("usage: marketw withdrawroom <number|here>") return end
+  end
+  gCfg.withdrawroom = num
+  saveData ()
+  echoHi ("withdrawals will only be done in room ", tostring (num), ".")
+end
+
+function MW_Cmd_Mkt (name, line, wildcards)
+  local arg = trim (wildcards [1]):lower ()
+  if arg == "on"  then gCfg.mkt = true
+  elseif arg == "off" then gCfg.mkt = false
+  elseif arg == "" then
+    echoHi ("market channel watching is ", gCfg.mkt and "ON" or "OFF", "")
+    ColourNote (CLR_DIM, "", "  marketw mkt on|off")
+    return
+  else
+    warn ("usage: marketw mkt on|off")
+    return
+  end
+  saveData ()
+  echoHi ("market channel watching is ", gCfg.mkt and "ON" or "OFF", "")
+end
+
+function MW_Cmd_Auc (name, line, wildcards)
+  local arg = trim (wildcards [1]):lower ()
+  if arg == "debug" then
+    gCfg.aucdebug = not gCfg.aucdebug
+    EnableTrigger ("mw_auc_debug", gCfg.aucdebug)
+    saveData ()
+    echoHi ("auction diagnostics are ", gCfg.aucdebug and "ON" or "OFF",
+            gCfg.aucdebug and " - every 'Auction:' line will be echoed dimmed." or "")
+    return
+  end
+  if arg == "on"  then gCfg.auc = true
+  elseif arg == "off" then gCfg.auc = false
+  elseif arg == "" then
+    echoHi ("auction channel watching is ", gCfg.auc and "ON" or "OFF", "")
+    ColourNote (CLR_DIM, "", "  bid command: " .. CMD_AUC)
+    ColourNote (CLR_DIM, "", "  marketw auc on|off|debug")
+    return
+  else
+    warn ("usage: marketw auc on|off|debug")
+    return
+  end
+  saveData ()
+  echoHi ("auction channel watching is ", gCfg.auc and "ON" or "OFF", "")
+end
+
+-- =====================================================================
+-- Commands
+-- =====================================================================
+function MW_Cmd_Scan ()
+  if not gHaveCapture then
+    warn ("wrapped_captures.lua is not available - cannot read the market silently.")
+    return
+  end
+  if not IsConnected () then warn ("not connected.") return end
+  if #gWatch == 0 then
+    echo ("your watch list is empty.  Add one with:")
+    helpLine ("market add <name> <max>", "e.g. market add a blank chaos portal 1.2b")
+    return
+  end
+  if gScanning and os.time () - gScanStart < 60 then
+    warn ("a scan is already running.")
+    return
+  end
+  gScanning  = true
+  gScanStart = os.time ()
+  echo ("reading the market...")
+  local ok, err = pcall (Capture.untagged_output, "market list",
+                         true, true, true, MW_ListCaptured, false,
+                         MW_ListTimeout, 20)
+  if not ok then
+    gScanning = false
+    warn ("capture failed: " .. tostring (err))
+  end
+end
+
+function MW_Cmd_Add (name, line, wildcards)
+  local arg = trim (wildcards [1])
+  local body, amt = arg:match ("^(.-)%s+([%d%.,]+[kmbKMB]?)$")
+  if not body then
+    warn ("usage: market add <item name> <max bid>")
+    helpLine ("example", "market add a shiny platinum blank chaos portal 1200000000")
+    helpLine ("example", "market add * Fantasy Series Collector Card 6m")
+    return
+  end
+  local max = parseAmount (amt)
+  if not max then
+    warn ("could not read " .. amt .. " as an amount.")
+    return
+  end
+  body = trim (body)
+  local pieces = splitGlob (body)
+  if #pieces == 0 then
+    warn ("that pattern has no actual text to match on.")
+    return
+  end
+  -- a very short pattern would match half the market - refuse it
+  local total = 0
+  for _, p in ipairs (pieces) do total = total + #p end
+  if total < 4 then
+    warn ("pattern is too short (" .. total .. " chars) - it would match almost anything.")
+    return
+  end
+  for _, w in ipairs (gWatch) do
+    if norm (w.raw) == norm (body) then
+      local old = w.max
+      w.max = max
+      saveData ()
+      echoHi ("updated max for " .. string.format ("%q", w.raw) .. ": " ..
+              commafy (old) .. " -> ", commafy (max), "")
+      return
+    end
+  end
+  gWatch [#gWatch + 1] = { raw = body, max = max, added = os.time (), pieces = pieces }
+  saveData ()
+  echoHi ("watching " .. string.format ("%q", body) .. " up to ", commafy (max), " gold.")
+end
+
+function MW_Cmd_Del (name, line, wildcards)
+  local arg = trim (wildcards [1])
+  local idx = tonumber (arg)
+  if idx and gWatch [idx] then
+    local w = table.remove (gWatch, idx)
+    saveData ()
+    echo ("removed " .. string.format ("%q", w.raw) .. ".")
+    return
+  end
+  local target = norm (arg)
+  for i, w in ipairs (gWatch) do
+    if target ~= "" and norm (w.raw):find (target, 1, true) then
+      table.remove (gWatch, i)
+      saveData ()
+      echo ("removed " .. string.format ("%q", w.raw) .. ".")
+      return
+    end
+  end
+  warn ("no watch entry matches " .. string.format ("%q", arg) .. ".  Try: marketw list")
+end
+
+function MW_Cmd_List ()
+  if #gWatch == 0 then echo ("watch list is empty.") return end
+  echoHi ("watching ", tostring (#gWatch), " item(s):")
+  for i, w in ipairs (gWatch) do
+    ColourNote (CLR_HI,  "", string.format ("  %2d. ", i),
+                CLR_MSG, "", string.format ("%-48s ", w.raw:sub (1, 48)),
+                CLR_DIM, "", "max " .. commafy (w.max))
+  end
+  ColourNote (CLR_DIM, "", "  bid command: " .. CMD_BID)
+  ColourNote (CLR_DIM, "", "  buy command: " .. CMD_BUY)
+  if gCfg.deep then
+    ColourNote (CLR_DIM, "", "  deep scan  : ON (probes every truncated row)")
+  end
+end
+
+function MW_Cmd_Clear ()
+  gWatch = {}
+  saveData ()
+  echo ("watch list cleared.")
+end
+
+-- Items we have a standing proxy bid on
+function MW_Cmd_Bids ()
+  local nums, anums = {}, {}
+  for num in pairs (gBid)    do nums  [#nums  + 1] = num end
+  for num in pairs (gAucBid) do anums [#anums + 1] = num end
+  table.sort (nums)
+  table.sort (anums)
+  if #nums == 0 and #anums == 0 then echo ("no standing bids recorded.") return end
+
+  if #nums > 0 then
+    echoHi ("market: standing bid on ", tostring (#nums), " item(s) - not offered again:")
+    for _, num in ipairs (nums) do
+      ColourNote (CLR_HI, "", string.format ("  %-8d", num),
+                  CLR_DIM, "", "bid " .. os.date ("%Y-%m-%d %H:%M", gBid [num]))
+    end
+    ColourNote (CLR_DIM, "", "  These clear themselves once the item leaves the market.")
+  end
+  if #anums > 0 then
+    echoHi ("auction: standing bid on ", tostring (#anums), " auction(s):")
+    for _, num in ipairs (anums) do
+      local a = gAuc [num]
+      ColourNote (CLR_HI, "", string.format ("  %-8d", num),
+                  CLR_MSG, "", string.format ("%-40s ", a and a.name or "?"),
+                  CLR_DIM, "", "bid " .. os.date ("%H:%M", gAucBid [num]))
+    end
+    ColourNote (CLR_DIM, "", "  These expire on their own after an hour.")
+  end
+end
+
+function MW_Cmd_Deep ()
+  gCfg.deep = not gCfg.deep
+  saveData ()
+  echoHi ("deep scan is now ", gCfg.deep and "ON" or "OFF",
+          gCfg.deep and " - every truncated row gets an 'lbid' probe (slower)."
+                     or " - only likely rows get probed.")
+end
+
+-- How hard we are willing to hammer the MUD during one scan.  Each probe is
+-- four commands (two echo tags, the lbid, a blank line), so the defaults are
+-- deliberately conservative.
+function MW_Cmd_Throttle (name, line, wildcards)
+  local arg = trim (wildcards [1])
+  if arg == "" then
+    echoHi ("at most ", tostring (gCfg.probe_max),
+            " item(s) checked per scan, " .. gCfg.probe_delay .. "s apart.")
+    ColourNote (CLR_DIM, "", "  marketw throttle <max> [seconds]")
+    return
+  end
+  local mx, dl = arg:match ("^(%d+)%s*([%d%.]*)$")
+  mx = tonumber (mx)
+  if not mx or mx < 1 then warn ("usage: marketw throttle <max> [seconds]") return end
+  gCfg.probe_max = math.min (mx, 200)
+  local d = tonumber (dl)
+  if d and d >= 0.1 then gCfg.probe_delay = d end
+  saveData ()
+  echoHi ("now checking at most ", tostring (gCfg.probe_max),
+          " item(s) per scan, " .. gCfg.probe_delay .. "s apart.")
+end
+
+function MW_Cmd_Debug (name, line, wildcards)
+  local arg = trim (wildcards [1]):lower ()
+  if arg == "on"  then gCfg.debug = true
+  elseif arg == "off" then gCfg.debug = false
+  else gCfg.debug = not gCfg.debug end
+  saveData ()
+  echoHi ("debug is ", gCfg.debug and "ON" or "OFF", "")
+end
+
+-- Dump the raw item stats box (useful if the format ever changes).
+function MW_Cmd_Probe (name, line, wildcards)
+  if not gHaveCapture then warn ("wrapped_captures.lua not available.") return end
+  local num = tonumber (wildcards [1])
+  echoHi ("probing item ", tostring (num), " with '" .. probeCmd (num) .. "' - raw output follows:")
+  Capture.untagged_output (probeCmd (num), true, true, true,
+    function (lines)
+      local texts = textsOf (lines)
+      for i, t in ipairs (texts) do
+        ColourNote (CLR_DIM, "", string.format ("%3d| ", i) .. t)
+      end
+      local st = parseStats (num, texts)
+      ColourNote (CLR_HI, "", "  parsed -> name=" .. tostring (st.name) ..
+                  "  buyout=" .. tostring (st.buyout) ..
+                  "  bidder=" .. tostring (st.bidder) ..
+                  "  bid=" .. tostring (st.bid) ..
+                  "  minbid=" .. tostring (st.minbid))
+    end,
+    false, function () warn ("probe timed out.") end, 12)
+end
+
+function MW_Cmd_Help ()
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", "watch the market and bid with one click.")
+  Note ("")
+  helpLine ("market add <name> <max>", "watch an item, up to <max> gold")
+  helpLine ("marketw add <name> <max>",     "same thing, if 'market add' clashes")
+  helpLine ("marketw / marketwatch",        "scan the market now")
+  helpLine ("marketw list",                 "show the watch list")
+  helpLine ("marketw del <n|text>",         "remove a watch entry")
+  helpLine ("marketw clear",                "remove them all")
+  Note ("")
+  helpLine ("marketw bids",                 "items you already have a proxy bid on")
+  Note ("")
+  helpLine ("marketw auc on|off|debug",     "watch the live auction channel")
+  helpLine ("marketw mkt on|off",           "watch the market channel for new listings")
+  Note ("")
+  helpLine ("marketw withdraw on|off",      "top up from the bank when a bid falls short")
+  helpLine ("marketw withdrawroom here",    "only ever withdraw in this room")
+  Note ("")
+  helpLine ("marketw deep",                 "probe EVERY truncated row (slow, thorough)")
+  helpLine ("marketw throttle <n>",     "how many items one scan may check")
+  helpLine ("marketw probe <num>",          "dump the raw 'lbid <num>' box")
+  helpLine ("marketw debug",                "toggle diagnostics")
+  Note ("")
+  ColourNote (CLR_MSG, "", "  Patterns")
+  ColourNote (CLR_DIM, "", "    Matching is loose: case, punctuation and decoration are ignored, and")
+  ColourNote (CLR_DIM, "", "    the text can appear anywhere in the name - so 'chaos portal' finds")
+  ColourNote (CLR_DIM, "", "    '(Shiny) a blank chaos portal'.  Use * for a gap:")
+  ColourNote (CLR_HI,  "", "      market add * Fantasy Series Collector Card 6m")
+  Note ("")
+  ColourNote (CLR_MSG, "", "  Channels")
+  ColourNote (CLR_DIM, "", "    The same watch list also covers both live channels.  When someone")
+  ColourNote (CLR_DIM, "", "    auctions or lists something you watch, links appear under the line -")
+  ColourNote (CLR_DIM, "", "    including BUY OUT NOW when a new listing states a buyout price at or")
+  ColourNote (CLR_DIM, "", "    below your max.  Channel names are never truncated, so those matches")
+  ColourNote (CLR_DIM, "", "    are exact and need no lookup.")
+  Note ("")
+  ColourNote (CLR_MSG, "", "  Safety")
+  ColourNote (CLR_DIM, "", "    Nothing is ever bid automatically.  Clicking a link re-reads the item")
+  ColourNote (CLR_DIM, "", "    with a fresh 'lbid <num>' and refuses to send if the name no")
+  ColourNote (CLR_DIM, "", "    longer matches, the currency is not gold, the bid already meets your")
+  ColourNote (CLR_DIM, "", "    max, or the amount is over your safety cap.")
+  ColourNote (CLR_DIM, "", "    Anything already bid past your max is left out of scans and channel")
+  ColourNote (CLR_DIM, "", "    alerts entirely - there is nothing you could do about it.  The scan says")
+  ColourNote (CLR_DIM, "", "    how many it left out.")
+  ColourNote (CLR_DIM, "", "    Once you bid, that item disappears too - the")
+  ColourNote (CLR_DIM, "", "    proxy stands until the auction ends, so there is nothing left to decide.")
+  ColourNote (CLR_DIM, "", "    'marketw bids' lists them; they clear when the item leaves the market.")
+  Note ("")
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", "watching ", CLR_HI, "", tostring (#gWatch),
+              CLR_MSG, "", " item(s).  Type ", CLR_HI, "", "marketw",
+              CLR_MSG, "", " to scan the market now.")
+end
+
+-- =====================================================================
+-- Clicking a bid link
+-- =====================================================================
+local function sendBid (row, amt, why)
+  local cmd = CMD_BID:gsub ("%$num", intstr (row.num)):gsub ("%$amt", intstr (amt))
+  gBid [row.num] = os.time ()
+  gLastBid = { num = row.num, amt = amt, auction = false, when = os.time () }
+  saveData ()
+  echoHi ("sending: ", cmd, why and ("   (" .. why .. ")") or "")
+  Send (cmd)
+  ColourNote (CLR_DIM, "", "        item " .. row.num .. " will not be offered again.")
+end
+
+-- second stage: fresh stats are in, decide whether to send
+local function bidVerified (num, forced)
+  local row = gRows [num]
+  if not row or not row.entry then warn ("item " .. num .. " is no longer in the last scan.") return end
+  local w   = row.entry
+  local st  = row.stats
+  local amt = w.max
+
+  if row.ctype ~= "Gold" then
+    warn ("refused: item " .. num .. " is a " .. tostring (row.ctype) .. " auction, not gold.")
+    return
+  end
+
+  if not st or not st.name then
+    if not forced then
+      local preview = CMD_BID:gsub ("%$num", intstr (num)):gsub ("%$amt", intstr (amt))
+      warn ("could not re-read item " .. num .. " to confirm it.  Nothing sent.")
+      ColourTell (CLR_MSG, "", "        ")
+      Hyperlink ("mwbidforce " .. num,
+                 "[ SEND ANYWAY: " .. preview .. " ]",
+                 "Send the bid without confirmation",
+                 CLR_WARN, "black", 0, 1)
+      ColourNote (CLR_MSG, "", "")
+      return
+    end
+  else
+    if not piecesMatch (norm (st.name), w.pieces) then
+      warn ("refused: item " .. num .. " is " .. string.format ("%q", st.name) ..
+            ", which does not match " .. string.format ("%q", w.raw) .. ".")
+      return
+    end
+    -- the stats box states the currency on the bid line ("25,000,000 gold")
+    if st.currency and st.currency:lower () ~= "gold" then
+      warn ("refused: item " .. num .. " is priced in " .. st.currency .. ", not gold.")
+      return
+    end
+    local cur = st.bid or row.bid or 0
+    if cur >= amt then
+      warn ("refused: current bid " .. commafy (cur) .. " already meets your max " .. commafy (amt) .. ".")
+      return
+    end
+    if st.minbid and st.minbid > amt then
+      warn ("refused: minimum next bid " .. commafy (st.minbid) .. " is over your max " .. commafy (amt) .. ".")
+      return
+    end
+    if st.bidder and gmcp_name and st.bidder:lower () == gmcp_name:lower () then
+      warn ("refused: you are already the high bidder on item " .. num .. ".")
+      return
+    end
+  end
+
+  sendBid (row, amt, st and st.name or nil)
+end
+
+local function clickBid (num, forced)
+  local row = gRows [num]
+  if not row or not row.entry then
+    warn ("item " .. tostring (num) .. " is not in the current scan.  Run 'marketw' again.")
+    return
+  end
+  if os.time () - (row.seen or 0) > SCAN_TTL then
+    warn ("that listing is over " .. math.floor (SCAN_TTL / 60) ..
+          " minutes old.  Run 'marketw' again first.")
+    return
+  end
+  if gBid [num] then
+    warn ("you already have a proxy bid on item " .. num .. " - nothing sent.")
+    return
+  end
+  if forced then bidVerified (num, true) return end
+
+  echo ("re-checking item " .. num .. " before bidding...")
+  local ok = pcall (Capture.untagged_output, probeCmd (num), true, true, true,
+    function (lines)
+      if gRows [num] then gRows [num].stats = parseStats (num, textsOf (lines)) end
+      bidVerified (num, false)
+    end,
+    false,
+    function () warn ("re-check timed out - nothing sent.") end,
+    12)
+  if not ok then warn ("re-check failed to start - nothing sent.") end
+end
+
+function MW_Click_Bid (name, line, wildcards)      clickBid (tonumber (wildcards [1]), false) end
+function MW_Click_BidForce (name, line, wildcards) clickBid (tonumber (wildcards [1]), true)  end
+
+function MW_Click_Buy (name, line, wildcards)
+  local num = tonumber (wildcards [1])
+  local row = gRows [num]
+  if not row or not row.entry or not row.stats or not row.stats.buyout then
+    warn ("no confirmed buyout price for item " .. tostring (num) .. ".  Run 'marketw' again.")
+    return
+  end
+  if row.entry.max < row.stats.buyout then
+    warn ("refused: buyout " .. commafy (row.stats.buyout) ..
+          " is over your max " .. commafy (row.entry.max) .. ".")
+    return
+  end
+  -- send exactly the buyout price, not your max
+  local cmd = CMD_BUY:gsub ("%$num", intstr (num))
+                         :gsub ("%$amt", intstr (row.stats.buyout))
+  gBid [num] = os.time ()
+  gLastBid = { num = num, amt = row.stats.buyout, auction = false, when = os.time () }
+  saveData ()
+  echoHi ("sending: ", cmd, "   (buyout on " .. (row.stats.name or "item " .. num) .. ")")
+  Send (cmd)
+end
+
+-- =====================================================================
+-- GMCP: remember our own character name (used to skip our own high bids)
+-- =====================================================================
+gmcp_name = nil
+function OnPluginTelnetSubnegotiation (theType, data)
+  if theType ~= 201 then return end
+  -- Route on the message name.  Matching '"name"' in every packet would pick
+  -- up room.info's ROOM name and store it as the character name.
+  local msg = data:match ("^([%w%.%-_]+)")
+  if not msg then return end
+  msg = msg:lower ()
+
+  if msg == "char.base" then
+    local n = data:match ('"name"%s*:%s*"([^"]+)"')
+    if n then gmcp_name = n end
+
+  elseif msg == "room.info" then
+    local n = data:match ('"num"%s*:%s*(%-?%d+)')
+    if n then gRoom = tonumber (n) end
+
+  elseif msg == "char.worth" then
+    local g = data:match ('"gold"%s*:%s*(%d+)')
+    local k = data:match ('"bank"%s*:%s*(%d+)')
+    if g then gGold = tonumber (g) end
+    if k then gBank = tonumber (k) end
+  end
+end
+
+-- =====================================================================
+-- Lifecycle
+-- =====================================================================
+function OnPluginInstall ()
+  loadData ()
+  EnableTrigger ("mw_auc_debug", gCfg.aucdebug and true or false)
+  if not gHaveCapture then
+    warn ("wrapped_captures.lua did not load - scanning will not work.")
+  end
+
+  -- Every load shows the full help, so the commands are always in front of
+  -- you.  Note this fires on each world open, not just a manual reload.
+  MW_Cmd_Help ()
+end
+
+function OnPluginSaveState ()
+  saveData ()
+end
+
+function OnPluginClose ()
+  saveData ()
+end
+
+]]>
+</script>
+</muclient>
