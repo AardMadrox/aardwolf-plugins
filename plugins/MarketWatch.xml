@@ -37,7 +37,7 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="3.0"
+   version="3.1"
 >
 </plugin>
 
@@ -1170,27 +1170,24 @@ function MW_NotEnoughGold (name, line, wildcards)
     return
   end
 
-  -- Take out what is missing, not the whole bid - the shortfall is what
-  -- actually needs covering.
+  -- Take out the FULL bid amount, not just the shortfall.  Covering only the
+  -- gap would leave you at zero gold the moment the bid goes through.
   local have = carrying or gGold
   local need = b.amt
-  if have then
-    need = b.amt - have
-    if need <= 0 then
-      warn ("you appear to have enough gold already - nothing withdrawn.")
-      return
-    end
+  if have and have >= need then
+    warn ("you already carry " .. commafy (have) .. " - nothing withdrawn.")
+    return
   end
   if gBank and gBank < need then
-    warn ("not withdrawing: need " .. commafy (need) ..
-          " but the bank holds " .. commafy (gBank) .. ".")
+    warn ("not withdrawing: the bank holds " .. commafy (gBank) ..
+          ", short of the full " .. commafy (need) .. ".")
     return
   end
 
   local cmd = CMD_WITHDRAW:gsub ("%$amt", intstr (need))
   echoHi ("withdrawing ", commafy (need),
-          have and ("  (carrying " .. commafy (have) .. ", bid needs " ..
-                    commafy (b.amt) .. ")") or "")
+          have and ("  (the full bid amount - you were carrying " ..
+                    commafy (have) .. ")") or "  (the full bid amount)")
   Send (cmd)
   -- Hold the retry link back for a second.  The bank prints your account
   -- details right after a withdrawal, and that would scroll the link away.
