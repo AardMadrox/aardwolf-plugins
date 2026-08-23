@@ -11,7 +11,7 @@
    purpose="Repeatedly cast 'incomp' on self or others until healed"
    date_written="2026-06-21"
    requires="4.94"
-   version="3.4"
+   version="3.5"
 >
 
 <description>
@@ -535,6 +535,16 @@ FHX_LEADER_LOSS  = 4000   -- 'auto leader' waits for the leader to be missing
 local SENDTO_SCRIPT  = 12    -- "execute as script" send-to code
 
 -- Diagnostics: flip to true to print [FHX dbg] lines while troubleshooting.
+-- ---- where settings live -----------------------------------------------
+-- MUSHclient's own SetVariable storage is lost when the plugin is
+-- reinstalled by hand rather than reloaded, which is how these settings
+-- kept resetting. Keep them in a file next to the plugin instead.
+-- GetPluginInfo(id, 6) is the plugin FILE path, not its folder, so the
+-- filename has to be stripped off.
+local pluginFile   = GetPluginInfo (GetPluginID (), 6) or ""
+local pluginDir    = pluginFile:match ("^(.*[\\/])") or ""
+local settingsFile = pluginDir .. "FHX.dat"
+
 local FHX_DEBUG = false
 local function dbg (s) if FHX_DEBUG then ColourNote ("yellow", "", "[FHX dbg] " .. s) end end
 
@@ -603,6 +613,77 @@ function qnote (s)
   if not silent_mode then cnote (s) end
 end
 
+-- ---- saving and loading settings ---------------------------------------
+-- Rewritten in full whenever any setting changes.
+function SaveSettings ()
+  local names = {}
+  for name in pairs (ignore_list) do names[#names + 1] = name end
+  table.sort (names)
+
+  local f, err = io.open (settingsFile, "w")
+  if not f then
+    dbg ("could not write " .. settingsFile .. ": " .. tostring (err))
+    return
+  end
+  f:write ("-- FHX settings. Edit in game with the fhx commands.\n")
+  f:write ("spell=" .. heal_spell .. "\n")
+  f:write ("auto=" .. (auto_low and "1" or "0") .. "\n")
+  f:write ("autoleader=" .. (auto_leader and "1" or "0") .. "\n")
+  f:write ("autozone=" .. auto_zone .. "\n")
+  f:write ("silent=" .. (silent_mode and "1" or "0") .. "\n")
+  f:write ("thresh=" .. FHX_LOW_MIN_LOSS .. "\n")
+  f:write ("leaderthresh=" .. FHX_LEADER_LOSS .. "\n")
+  f:write ("ignore=" .. table.concat (names, ",") .. "\n")
+  f:close ()
+  dbg ("settings written to " .. settingsFile)
+end
+
+-- Returns false when there's no settings file yet, so the loader knows to
+-- fall back to the old plugin variables and write one.
+function LoadSettings ()
+  local f = io.open (settingsFile, "r")
+  if not f then return false end
+
+  local got = {}
+  for line in f:lines () do
+    local k, v = line:match ("^(%w+)=(.*)$")
+    if k then got[k] = v end
+  end
+  f:close ()
+
+  if got.spell        then heal_spell  = (got.spell == "regen") and "regen" or "incomp" end
+  if got.auto         then auto_low    = (got.auto == "1") end
+  if got.autoleader   then auto_leader = (got.autoleader == "1") end
+  if got.autozone     then auto_zone   = got.autozone end
+  if got.silent       then silent_mode = (got.silent == "1") end
+  if tonumber (got.thresh)       then FHX_LOW_MIN_LOSS = tonumber (got.thresh) end
+  if tonumber (got.leaderthresh) then FHX_LEADER_LOSS  = tonumber (got.leaderthresh) end
+
+  ignore_list = {}
+  for name in (got.ignore or ""):gmatch ("[^,]+") do
+    ignore_list[string.lower (name)] = true
+  end
+  return true
+end
+
+-- One-off: pick up whatever was in the old SetVariable storage the first
+-- time this version runs, so nothing is lost on the upgrade.
+function MigrateOldSettings ()
+  heal_spell  = (GetVariable ("heal_spell") == "regen") and "regen" or "incomp"
+  auto_low    = (GetVariable ("auto_low") == "1")
+  auto_leader = (GetVariable ("auto_leader") == "1")
+  auto_zone   = GetVariable ("auto_zone") or ""
+  silent_mode = (GetVariable ("silent") == "1")
+  FHX_LOW_MIN_LOSS = tonumber (GetVariable ("low_thresh"))    or FHX_LOW_MIN_LOSS
+  FHX_LEADER_LOSS  = tonumber (GetVariable ("leader_thresh")) or FHX_LEADER_LOSS
+  ignore_list = {}
+  for name in (GetVariable ("ignore_list") or ""):gmatch ("[^,]+") do
+    ignore_list[string.lower (name)] = true
+  end
+  dbg ("migrated settings from plugin variables")
+  SaveSettings ()
+end
+
 -- ---- state -------------------------------------------------------------
 healing_active = false
 heal_spell     = "incomp"  -- "incomp" (c incomp) or "regen" (c regen)
@@ -651,7 +732,7 @@ end
 -- Toggle alias handler for 'fhx regen' / 'fhx incomp'. Persists the choice.
 function SetHealSpell (sp)
   heal_spell = (sp == "regen") and "regen" or "incomp"
-  SetVariable ("heal_spell", heal_spell)
+  SaveSettings ()
   cnote (tag .. "@x045spell set to @W" .. SpellName () ..
          "@x045 ('@W" .. SpellCmd () .. "@x045').")
 end
@@ -768,18 +849,7 @@ end
 -- IGNORE LIST ('fhx low' will never pick these names)
 -- ======================================================================
 function SaveIgnoreList ()
-  local names = {}
-  for name in pairs (ignore_list) do names[#names + 1] = name end
-  table.sort (names)
-  SetVariable ("ignore_list", table.concat (names, ","))
-end
-
-function LoadIgnoreList ()
-  ignore_list = {}
-  local raw = GetVariable ("ignore_list") or ""
-  for name in raw:gmatch ("[^,]+") do
-    ignore_list[string.lower (name)] = true
-  end
+  SaveSettings ()
 end
 
 function IgnoreAdd (who)
@@ -1173,7 +1243,7 @@ function SetLowThresh (n)
     return
   end
   FHX_LOW_MIN_LOSS = n
-  SetVariable ("low_thresh", tostring (n))
+  SaveSettings ()
   if n == 0 then
     cnote (tag .. "@x048player threshold cleared@x045 - '@Wlow@x045' will heal " ..
            "anyone missing any hp at all.@w")
@@ -1191,7 +1261,7 @@ function SetLeaderThresh (n)
     return
   end
   FHX_LEADER_LOSS = n
-  SetVariable ("leader_thresh", tostring (n))
+  SaveSettings ()
   if n == 0 then
     cnote (tag .. "@x048leader threshold cleared@x045 - '@Wauto leader@x045' will heal " ..
            "the leader whenever they're hurt.@w")
@@ -1231,7 +1301,7 @@ function CheckAutoZone ()
 
   if auto_zone == "" then                  -- didn't know the area at toggle time
     auto_zone = zone
-    SetVariable ("auto_zone", zone)
+    SaveSettings ()
     dbg ("auto: anchored to area '" .. zone .. "'")
     return
   end
@@ -1242,7 +1312,7 @@ function CheckAutoZone ()
     if from and from == to then
       dbg ("auto: '" .. auto_zone .. "' -> '" .. zone .. "' is the same group")
       auto_zone = zone
-      SetVariable ("auto_zone", zone)
+      SaveSettings ()
       qnote (tag .. "@x099auto stays on - @W" .. zone ..
              "@x099 counts as the same place.@w")
       return
@@ -1250,11 +1320,10 @@ function CheckAutoZone ()
     dbg ("auto: left '" .. auto_zone .. "' for '" .. zone .. "' - switching off")
     auto_low   = false
     auto_chain = false
-    SetVariable ("auto_low", "0")
     cnote (tag .. "@x045auto-heal @Woff@x045 - you left @W" .. auto_zone ..
            "@x045. '@Wfhx auto@x045' to start it up here.@w")
     auto_zone = ""
-    SetVariable ("auto_zone", "")
+    SaveSettings ()
   end
 end
 
@@ -1267,7 +1336,7 @@ function SetSilent (word)
   else
     silent_mode = not silent_mode
   end
-  SetVariable ("silent", silent_mode and "1" or "0")
+  SaveSettings ()
   if silent_mode then
     cnote (tag .. "@x048silent mode on@x045 - cast-by-cast lines are hidden. " ..
            "Settings and auto starting/stopping still show.@w")
@@ -1285,10 +1354,9 @@ function SetAutoLow (word)
   else
     auto_low = not auto_low          -- bare 'fhx auto' toggles
   end
-  SetVariable ("auto_low", auto_low and "1" or "0")
   if not auto_low then auto_chain = false end
   auto_zone = auto_low and CurrentZone () or ""
-  SetVariable ("auto_zone", auto_zone)
+  SaveSettings ()
   if auto_low then
     local who = auto_leader
                 and ("the @Wgroup leader@x045 (down @W" .. FHX_LEADER_LOSS .. "@x045 hp)")
@@ -1313,7 +1381,7 @@ function SetAutoLeader (word)
   else
     auto_leader = not auto_leader
   end
-  SetVariable ("auto_leader", auto_leader and "1" or "0")
+  SaveSettings ()
   if auto_leader then
     cnote (tag .. "@x048auto targets the group leader@x045 - only once they're " ..
            "down more than @W" .. FHX_LEADER_LOSS .. "@x045 hp.@w")
@@ -1677,16 +1745,9 @@ end
 function FHXLoaded ()
   -- ask Aardwolf to start streaming group data over GMCP (needed for 'fhx low')
   pcall (function () Send_GMCP_Packet ("group on") end)
-  heal_spell = (GetVariable ("heal_spell") == "regen") and "regen" or "incomp"
-  LoadIgnoreList ()
-  auto_low    = (GetVariable ("auto_low") == "1")
-  auto_leader = (GetVariable ("auto_leader") == "1")
-  auto_zone   = GetVariable ("auto_zone") or ""
-  silent_mode = (GetVariable ("silent") == "1")
-  FHX_LOW_MIN_LOSS = tonumber (GetVariable ("low_thresh"))    or FHX_LOW_MIN_LOSS
-  FHX_LEADER_LOSS  = tonumber (GetVariable ("leader_thresh")) or FHX_LEADER_LOSS
+  if not LoadSettings () then MigrateOldSettings () end
   local mode = auto_low and (auto_leader and "on (leader)" or "on") or "off"
-  cnote (tag .. "@x045loaded@w @x099(v3.4)@w - spell: @W" .. SpellName () ..
+  cnote (tag .. "@x045loaded@w @x099(v3.5)@w - spell: @W" .. SpellName () ..
          "@w - auto: @W" .. mode ..
          (silent_mode and "@w - @Wsilent@w" or "@w") ..
          " - type '@Wfhx help@w' for commands.")
