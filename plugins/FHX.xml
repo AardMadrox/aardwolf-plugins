@@ -11,7 +11,7 @@
    purpose="Repeatedly cast 'incomp' on self or others until healed"
    date_written="2026-06-21"
    requires="4.94"
-   version="3.0"
+   version="3.1"
 >
 
 <description>
@@ -72,10 +72,14 @@ watches the group leader instead - it queues a heal for them only when
 they're down more than 4000 HP. Everything else about auto is unchanged,
 and your own typed commands are never affected by this toggle.
 
-AUTO: with 'fhx auto' on, one 'hx low' is queued each time combat ends.
-Auto never pushes the queue past 3 items - if it's already that deep the
-auto heal is skipped rather than piling up. Commands you type by hand are
-not capped. The setting persists between sessions.
+AUTO: with 'fhx auto' on, 'hx low' is queued when combat ends and keeps
+going - one cast at a time - until nobody in the room is missing more than
+the player threshold. In leader mode it keeps healing the leader until
+they're back above the leader threshold. A run stops early if you run out
+of mana, can't concentrate, or a new fight starts, and picks up again when
+that fight ends. Auto never pushes the queue past 3 items and never makes
+more than 20 casts in one run. Commands you type by hand are not capped.
+The setting persists between sessions.
 
 QUEUE: every fhx/hx command becomes a queue item and they run strictly in
 order, one at a time. If you're in combat (or in a note, at a pager prompt,
@@ -149,7 +153,7 @@ the lowest person in the room is before each cast.
       sequence="90"
       send_to="12"
    >
-   <send>StopHealing("almost fully healed")</send>
+   <send>StopHealing("almost fully healed", false, true)</send>
    </trigger>
 
    <!-- self done (regen prints "already"; incomp prints "almost") -->
@@ -161,7 +165,7 @@ the lowest person in the room is before each cast.
       sequence="90"
       send_to="12"
    >
-   <send>StopHealing("already fully healed")</send>
+   <send>StopHealing("already fully healed", false, true)</send>
    </trigger>
 
    <!-- other-target done -->
@@ -196,7 +200,7 @@ the lowest person in the room is before each cast.
       sequence="90"
       send_to="12"
    >
-   <send>StopHealing("already fully healed")</send>
+   <send>StopHealing("already fully healed", false, true)</send>
    </trigger>
 
    <!-- target left the room -->
@@ -496,6 +500,7 @@ local FHX_WATCHDOG   = 10    -- stop if no heal-tick seen within this long
 local FHX_ONESHOT_TO = 8     -- give up waiting for a single 'hx' cast to land
 local FHX_QUEUE_MAX  = 20    -- most items one command may queue at once
 local FHX_AUTO_MAX   = 3     -- auto-heal won't push the queue past this
+local FHX_AUTO_CHAIN = 20    -- most casts one auto run will make
 -- Both of these are settings, changed in game with 'fhx thresh <n>' and
 -- 'fhx leaderthresh <n>' and remembered between sessions.
 FHX_LOW_MIN_LOSS = 4000   -- 'low' ignores anyone missing less than this
@@ -584,6 +589,9 @@ oneshot_pending = false    -- a single 'hx' cast is in flight
 oneshot_gen     = 0        -- invalidates stale one-shot timeouts
 auto_low        = false    -- 'fhx auto': queue an 'hx low' when a fight ends
 auto_leader     = false    -- 'fhx auto leader': aim auto at the leader only
+auto_chain      = false    -- an auto run is in progress (keeps topping up)
+auto_casts      = 0        -- casts made in this auto run, against FHX_AUTO_CHAIN
+auto_skip       = {}       -- names the MUD called fully healed during this run
 last_state      = nil      -- previous char.status.state, to spot 8 -> not-8
 
 -- names 'fhx low' will never pick, lower-cased name -> true. Persisted.
@@ -713,7 +721,9 @@ function OtherHealedStop (who, reason)
   -- Same reasoning as OtherHealTick: one active target, so any "is almost/already
   -- fully healed." line during a heal is our target. Don't name-match.
   if oneshot_pending or (healing_active and heal_mode == "other") then
-    StopHealing (tostring (who) .. " " .. reason)
+    -- the target being topped up is a normal finish, so an auto run carries
+    -- on to whoever is next
+    StopHealing (tostring (who) .. " " .. reason, false, true)
   end
 end
 
@@ -830,7 +840,10 @@ end
 -- anyone else - if you're the lowest one here, this returns your name with
 -- is_me true and the caller heals you instead of casting at someone.
 -- Returns nil when nobody here is hurt enough to bother with.
-function FindLowestGroupMember ()
+-- 'skip' is an optional set of lower-cased names to leave out - an auto run
+-- uses it for people the MUD has already called fully healed, so it doesn't
+-- keep casting at someone incomplete healing can't help any further.
+function FindLowestGroupMember (skip)
   local myname   = MyName ()
   local mykey    = string.lower (myname)
   local my_ratio, my_loss = nil, 0
@@ -849,6 +862,8 @@ function FindLowestGroupMember ()
         local ignored = ignore_list[string.lower (name)]
         if IsGroupPet (info) then
           dbg ("  skipping " .. name .. " (pet/mob, qs=3)")
+        elseif skip and skip[string.lower (name)] then
+          dbg ("  skipping " .. name .. " (already topped up this run)")
         elseif ignored then
           dbg ("  skipping " .. name .. " (on ignore list)")
         elseif hp and mhp and mhp > 0 then
@@ -876,7 +891,7 @@ function FindLowestGroupMember ()
   end
 
   -- group data didn't list you (or there is none): fall back to your vitals
-  if not my_ratio and not ignore_list[mykey] then
+  if not my_ratio and not ignore_list[mykey] and not (skip and skip[mykey]) then
     my_ratio, my_loss = SelfRatio ()
     if my_ratio then
       dbg ("  candidate you (from vitals): down " .. (my_loss or 0))
@@ -1057,6 +1072,8 @@ end
 function PumpQueue ()
   if Busy () then return end
   queue_current = nil
+  -- an auto run refills the queue as fast as it empties, until it's done
+  if #fhx_queue == 0 and auto_chain then AutoTopUp () end
   if #fhx_queue == 0 then return end
   if not FHXReady () then
     dbg ("queue held (" .. WhyNotReady () .. "), " .. #fhx_queue .. " waiting")
@@ -1092,6 +1109,7 @@ function RunItem (item)
   elseif item.mode == "name" then
     target = item.name
   end
+  item.resolved = target or item.name     -- who this cast actually went to
 
   if item.kind == "rep" then
     if is_me then StartSelfHeal () else BeginOtherHeal (target) end
@@ -1157,6 +1175,7 @@ function SetAutoLow (word)
     auto_low = not auto_low          -- bare 'fhx auto' toggles
   end
   SetVariable ("auto_low", auto_low and "1" or "0")
+  if not auto_low then auto_chain = false end
   if auto_low then
     local who = auto_leader
                 and ("the @Wgroup leader@x045 (down @W" .. FHX_LEADER_LOSS .. "@x045 hp)")
@@ -1212,51 +1231,108 @@ end
 
 -- 'auto leader' variant: heal the leader, and only once they're properly
 -- hurt. Silent when there's nothing to do - this runs after every fight.
+-- Each of the two AutoQueue* functions adds at most one cast and returns
+-- true if it did. Returning false is how an auto run knows it's finished.
 function AutoQueueLeader ()
   local name, loss, here, is_me = LeaderStatus ()
   if not name then
     dbg ("auto/leader: no leader in the group data")
-    return
+    return false
   end
   if ignore_list[string.lower (name)] then
     dbg ("auto/leader: " .. name .. " is on the ignore list")
-    return
+    return false
   end
   if not here and not is_me then
     dbg ("auto/leader: " .. name .. " isn't in the room")
-    return
+    return false
   end
   if loss <= FHX_LEADER_LOSS then
-    dbg ("auto/leader: " .. name .. " only down " .. loss .. " hp")
-    return
+    dbg ("auto/leader: " .. name .. " down " .. loss .. " - at or under the bar")
+    return false
+  end
+  if auto_skip[string.lower (name)] then
+    dbg ("auto/leader: " .. name .. " is already as healed as they'll get")
+    return false
   end
   local item = { kind = "one", mode = (is_me and "self" or "name"),
                  name = name, quiet = true }
   fhx_queue[#fhx_queue + 1] = item
   cnote (tag .. "@x048auto@x045: queued @W" .. ItemLabel (item) ..
-         "@x045 - leader is down @W" .. loss .. "@x045 hp. @W" ..
-         #fhx_queue .. "@x045 waiting.@w")
+         "@x045 - leader is down @W" .. loss .. "@x045 hp.@w")
+  return true
+end
+
+function AutoQueueLowest ()
+  local target = FindLowestGroupMember (auto_skip)
+  if not target then
+    dbg ("auto: nobody past the " .. FHX_LOW_MIN_LOSS .. " hp bar")
+    return false
+  end
+  fhx_queue[#fhx_queue + 1] = { kind = "one", mode = "low", name = "", quiet = true }
+  cnote (tag .. "@x048auto@x045: queued @Whx low@x045 - @W" .. target ..
+         "@x045 is next.@w")
+  return true
 end
 
 -- Called when combat ends. Adds a single 'hx low', but never pushes the
 -- queue past FHX_AUTO_MAX - what you type by hand is not capped. Stays
 -- quiet when nobody needs healing, so a clean fight prints nothing.
+-- Starts an auto run when a fight ends. The run keeps queueing casts, one
+-- at a time, until nobody is past the threshold any more.
 function AutoQueueLow ()
+  auto_chain = true
+  auto_casts = 0
+  auto_skip  = {}
+  AutoTopUp ()
+end
+
+-- Adds the next cast of the current auto run, or ends the run when there's
+-- nothing left worth healing. Called again after every cast completes.
+function AutoTopUp ()
+  if not auto_low or not auto_chain then return end
   if #fhx_queue >= FHX_AUTO_MAX then
     dbg ("auto: " .. #fhx_queue .. " already waiting - not adding")
     return
   end
+  if auto_casts >= FHX_AUTO_CHAIN then
+    cnote (tag .. "@x045auto stopped after @W" .. auto_casts ..
+           "@x045 casts - run '@Wfhx auto@x045' again if that wasn't enough.@w")
+    auto_chain = false
+    return
+  end
+
+  local queued
   if auto_leader then
-    AutoQueueLeader ()
-    return
+    queued = AutoQueueLeader ()
+  else
+    queued = AutoQueueLowest ()
   end
-  if not FindLowestGroupMember () then
-    dbg ("auto: nobody hurt - nothing to queue")
-    return
+
+  if queued then
+    auto_casts = auto_casts + 1
+  else
+    if auto_casts > 0 then
+      local what = auto_leader and "the leader is topped up"
+                   or "everyone here is topped up"
+      cnote (tag .. "@x048auto done@x045 - " .. what .. " after @W" ..
+             auto_casts .. "@x045 cast(s).@w")
+    end
+    auto_chain = false
   end
-  fhx_queue[#fhx_queue + 1] = { kind = "one", mode = "low", name = "", quiet = true }
-  cnote (tag .. "@x048auto@x045: queued @Whx low@x045 - @W" .. #fhx_queue ..
-         "@x045 waiting.@w")
+end
+
+-- Anything other than a heal finishing normally ends the run: no point
+-- casting again when we're out of mana or the fight restarted.
+function EndAutoChain (why)
+  if auto_chain then
+    dbg ("auto: run ended (" .. why .. ")")
+    auto_chain = false
+    if auto_casts > 0 then
+      cnote (tag .. "@x045auto stopped - @W" .. why ..
+             "@x045. It picks back up after the next fight.@w")
+    end
+  end
 end
 
 function QueueShow ()
@@ -1291,6 +1367,7 @@ function StopAll ()
   local n = #fhx_queue
   fhx_queue     = {}
   queue_current = nil
+  auto_chain    = false
   if Busy () then
     StopHealing ("manual stop")
   elseif n == 0 then
@@ -1309,7 +1386,7 @@ end
 -- ======================================================================
 -- pause=true means "combat interrupted us": the item goes back to the front
 -- of the queue instead of being dropped, and the queue does not advance.
-function StopHealing (reason, pause)
+function StopHealing (reason, pause, ok)
   local had_repeat  = healing_active
   local had_oneshot = oneshot_pending
   if not had_repeat and not had_oneshot then return end
@@ -1325,6 +1402,17 @@ function StopHealing (reason, pause)
     oneshot_pending = false
     oneshot_gen = oneshot_gen + 1
   end
+  -- The MUD saying almost/already fully healed (or wasting the magic) means
+  -- this target is as topped up as incomplete healing can get them. Take
+  -- them out of the auto run so it moves on instead of casting at them again.
+  if ok and auto_chain and queue_current and queue_current.resolved then
+    local done = string.lower (tostring (queue_current.resolved))
+    if done ~= "" then
+      auto_skip[done] = true
+      dbg ("auto: " .. queue_current.resolved .. " is done for this run")
+    end
+  end
+
   dbg ("StopHealing: reason='" .. reason .. "' after " .. heal_cast_count .. " cast(s)")
   if had_oneshot and not had_repeat and not pause then
     -- a single cast that simply landed: just report what happened
@@ -1335,6 +1423,7 @@ function StopHealing (reason, pause)
   end
 
   if pause then
+    EndAutoChain ("combat")
     if queue_current then table.insert (fhx_queue, 1, queue_current) end
     queue_current = nil
     if #fhx_queue > 0 then
@@ -1342,6 +1431,7 @@ function StopHealing (reason, pause)
              "@x099 item(s) until you're out of combat.@w")
     end
   else
+    if not ok then EndAutoChain (reason) end
     queue_current = nil
     DoAfterSpecial (FHX_CAST_DELAY, "PumpQueue()", SENDTO_SCRIPT)
   end
@@ -1416,10 +1506,12 @@ function ShowHelp ()
   cnote ("  @Wfhx leaderthresh <n>@x045 @x099 the same bar for '@Wauto leader@x099'")
   cnote ("  @x045-@x099 '@Wfhx stop@x099' is the off switch: it stops the current heal")
   cnote ("       @Wand@x099 empties the queue (auto-heal stays on)")
-  cnote ("  @x045-@x099 with @Wauto@x099 on, one '@Whx low@x099' is queued each time a fight")
-  cnote ("       ends, never pushing the queue past @W3@x099; typing more is fine")
+  cnote ("  @x045-@x099 with @Wauto@x099 on, healing starts when a fight ends and keeps")
+  cnote ("       going until nobody is down @W" .. FHX_LOW_MIN_LOSS .. "@x099 hp any more")
+  cnote ("  @x045-@x099 a run stops early on no mana / new fight, and never queues")
+  cnote ("       more than @W3@x099 at once; typing more yourself is fine")
   cnote ("  @x045-@x099 with @Wauto leader@x099 on, auto watches the group leader instead")
-  cnote ("       and only heals them once they're down @W" .. FHX_LEADER_LOSS .. "@x099 hp")
+  cnote ("       and heals them until they're back above @W" .. FHX_LEADER_LOSS .. "@x099 hp")
   cnote ("  @x045-@x099 commands typed in combat @Wwait@x099 and fire when the fight ends")
   cnote ("  @x045-@x099 they run in the order you typed them, one at a time")
   cnote ("  @x045-@x099 '@Wfhx@x099' then '@Wfhx low@x099' = self-heal first, lowest afterwards")
@@ -1459,7 +1551,7 @@ function FHXLoaded ()
   FHX_LOW_MIN_LOSS = tonumber (GetVariable ("low_thresh"))    or FHX_LOW_MIN_LOSS
   FHX_LEADER_LOSS  = tonumber (GetVariable ("leader_thresh")) or FHX_LEADER_LOSS
   local mode = auto_low and (auto_leader and "on (leader)" or "on") or "off"
-  cnote (tag .. "@x045loaded@w @x099(v3.0)@w - spell: @W" .. SpellName () ..
+  cnote (tag .. "@x045loaded@w @x099(v3.1)@w - spell: @W" .. SpellName () ..
          "@w - auto: @W" .. mode ..
          "@w - type '@Wfhx help@w' for commands.")
 end
