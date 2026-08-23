@@ -7,7 +7,7 @@
    id="C2E8F4A71D9B305E8C3A7F16"
    language="Lua"
    purpose="Tracks Fractal run rewards and reports to channel"
-   version="1.5"
+   version="1.6"
 >
 </plugin>
 
@@ -72,6 +72,17 @@
   >
   </trigger>
 
+  <!-- Fractal turn-in - Fractal-unique, so it opens the reward window BEFORE
+       the trains/gold lines that arrive ahead of the TP token line -->
+  <trigger
+    match="^You give .+ to the Luminous Fractal\.$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="FractalTurnIn"
+  >
+  </trigger>
+
   <!-- Gold reward -->
   <trigger
     match="^The gods award you with ([0-9,]+) gold coins\.$"
@@ -84,7 +95,7 @@
 
   <!-- Quest points -->
   <trigger
-    match="^You receive ([0-9]+) quest points\.$"
+    match="^You receive ([0-9,]+) quest points\.$"
     enabled="y"
     sequence="100"
     regexp="y"
@@ -94,7 +105,7 @@
 
   <!-- Training sessions -->
   <trigger
-    match="^The gods award you with ([0-9]+) training sessions\.$"
+    match="^The gods award you with ([0-9,]+) training sessions\.$"
     enabled="y"
     sequence="100"
     regexp="y"
@@ -234,6 +245,29 @@ local OUTLIER_MIN_RUNS = 3    -- need this many timed runs before judging
 local OUTLIER_UNDER    = 60   -- reject if more than 1 min shorter than average
 local OUTLIER_OVER     = 120  -- reject if more than 2 min longer than average
 
+-- Rewards can arrive BEFORE the Fractal-unique line that opens the window (the
+-- turn-in awards trains first; the TP token line is last), so generic reward
+-- lines are stashed for a few seconds and claimed when the window opens.
+local PRE_WINDOW = 5
+local preBuf = {}
+
+local function Stash(key, value)
+  preBuf[key] = { v = value, t = os.time() }
+end
+
+local function ClaimStash()
+  local now = os.time()
+  for key, e in pairs(preBuf) do
+    if now - e.t <= PRE_WINDOW then
+      if     key == "gold"   then frac_gold   = e.v
+      elseif key == "qp"     then frac_qp     = e.v
+      elseif key == "trains" then frac_trains = e.v
+      end
+    end
+  end
+  preBuf = {}
+end
+
 local function FmtTime(secs)
   local m = math.floor(secs / 60)
   local s = secs % 60
@@ -345,6 +379,13 @@ end
 local function FinalizeRun()
   collecting = false
 
+  -- Nothing was actually awarded (e.g. handing the Fractal an unrelated item).
+  -- Don't record an empty run, and leave the run timer alone.
+  if frac_gold + frac_qp + frac_trains + frac_tp == 0 then
+    preBuf = {}
+    return
+  end
+
   -- Snapshot elapsed time (0 if we never saw a start line this run)
   elapsed = runStarted and (os.time() - startTime) or 0
   runStarted = false
@@ -413,6 +454,7 @@ local function ArmFinalize()
     frac_qp     = 0
     frac_trains = 0
     frac_tp     = 0
+    ClaimStash()
   end
   pendingGen = finalizeGen
   DoAfterSpecial(1.5, "FractalFinalizeCallback()", 12)
@@ -428,24 +470,35 @@ end
 ---------------------------------------------------------------------------
 -- Trigger callbacks
 ---------------------------------------------------------------------------
+function FractalTurnIn()
+  -- Fractal-unique; opens the reward window early so rewards printed before the
+  -- TP token line still get counted.
+  ArmFinalize()
+end
+
 function LootGold(name, line, wildcards)
   -- "The gods award you with ... gold coins" is NOT Fractal-unique (world bosses,
-  -- quests, etc. also award gold this way). Only extend an already-armed window.
+  -- quests, etc. also award gold this way). Only extend an already-armed window;
+  -- otherwise stash it in case a Fractal window opens moments later.
   ArmFinalizePassive()
-  if collecting then frac_gold = ParseNum(wildcards[1]) end
+  if collecting then frac_gold = ParseNum(wildcards[1])
+  else Stash("gold", ParseNum(wildcards[1])) end
 end
 
 function LootQuestPoints(name, line, wildcards)
-  -- Generic line; only capture if already inside a Fractal run
+  -- Generic line; capture if inside a Fractal run, else stash briefly
   ArmFinalizePassive()
-  if collecting then frac_qp = tonumber(wildcards[1]) or 0 end
+  if collecting then frac_qp = ParseNum(wildcards[1])
+  else Stash("qp", ParseNum(wildcards[1])) end
 end
 
 function LootTrains(name, line, wildcards)
   -- "The gods award you with ... training sessions" is not Fractal-unique either.
-  -- Only extend an already-armed window.
+  -- On a Fractal turn-in this line arrives BEFORE the TP token line, so stash it
+  -- when the window isn't open yet.
   ArmFinalizePassive()
-  if collecting then frac_trains = tonumber(wildcards[1]) or 0 end
+  if collecting then frac_trains = ParseNum(wildcards[1])
+  else Stash("trains", ParseNum(wildcards[1])) end
 end
 
 function LootTP(name, line, wildcards)
