@@ -11,7 +11,7 @@
    purpose="Repeatedly cast 'incomp' on self or others until healed"
    date_written="2026-06-21"
    requires="4.94"
-   version="3.1"
+   version="3.2"
 >
 
 <description>
@@ -33,7 +33,8 @@ you run low on mana, or you enter combat.
   Any of the above take a count: 'hx low x3', 'fhx low 2'.
 
   fhx queue        show what's waiting ('fhx stop' empties it)
-  fhx auto         toggle auto-heal: one 'hx low' after every fight
+  fhx auto         toggle auto-heal: heals after every fight, until done
+                   (switches itself off when you leave the area)
   fhx auto on / fhx auto off   set it explicitly
   fhx auto leader  toggle auto onto the group leader only (on/off too)
 
@@ -71,6 +72,11 @@ AUTO LEADER: with 'fhx auto leader' on, auto stops picking the lowest and
 watches the group leader instead - it queues a heal for them only when
 they're down more than 4000 HP. Everything else about auto is unchanged,
 and your own typed commands are never affected by this toggle.
+
+AUTO SWITCHES OFF WHEN YOU LEAVE: turning auto on remembers the area you
+were in (GMCP room.info 'zone'). Walk, recall or portal into a different
+area and auto turns itself off, so it never follows you somewhere you
+didn't want it running.
 
 AUTO: with 'fhx auto' on, 'hx low' is queued when combat ends and keeps
 going - one cast at a time - until nobody in the room is missing more than
@@ -592,6 +598,8 @@ auto_leader     = false    -- 'fhx auto leader': aim auto at the leader only
 auto_chain      = false    -- an auto run is in progress (keeps topping up)
 auto_casts      = 0        -- casts made in this auto run, against FHX_AUTO_CHAIN
 auto_skip       = {}       -- names the MUD called fully healed during this run
+auto_zone       = ""       -- area 'fhx auto' was switched on in; leaving it
+                           -- switches auto back off
 last_state      = nil      -- previous char.status.state, to spot 8 -> not-8
 
 -- names 'fhx low' will never pick, lower-cased name -> true. Persisted.
@@ -1165,6 +1173,41 @@ end
 -- ======================================================================
 -- AUTO MODE ('fhx auto'): one 'hx low' each time a fight ends
 -- ======================================================================
+-- The area keyword from GMCP room.info ("zoo", "emerald", ...). Empty when
+-- there's no room data yet.
+function CurrentZone ()
+  local r = gmcp ("room.info")
+  if type (r) ~= "table" then return "" end
+  return tostring (r.zone or "")
+end
+
+-- Called on every room.info. Auto is tied to the area it was switched on
+-- in, so stepping outside that area turns it off rather than letting it
+-- follow you around.
+function CheckAutoZone ()
+  if not auto_low then return end
+  local zone = CurrentZone ()
+  if zone == "" then return end            -- no room data - don't act on it
+
+  if auto_zone == "" then                  -- didn't know the area at toggle time
+    auto_zone = zone
+    SetVariable ("auto_zone", zone)
+    dbg ("auto: anchored to area '" .. zone .. "'")
+    return
+  end
+
+  if zone ~= auto_zone then
+    dbg ("auto: left '" .. auto_zone .. "' for '" .. zone .. "' - switching off")
+    auto_low   = false
+    auto_chain = false
+    SetVariable ("auto_low", "0")
+    cnote (tag .. "@x045auto-heal @Woff@x045 - you left @W" .. auto_zone ..
+           "@x045. '@Wfhx auto@x045' to start it up here.@w")
+    auto_zone = ""
+    SetVariable ("auto_zone", "")
+  end
+end
+
 function SetAutoLow (word)
   word = string.lower (tostring (word or ""))
   if word == "on" then
@@ -1176,12 +1219,18 @@ function SetAutoLow (word)
   end
   SetVariable ("auto_low", auto_low and "1" or "0")
   if not auto_low then auto_chain = false end
+  auto_zone = auto_low and CurrentZone () or ""
+  SetVariable ("auto_zone", auto_zone)
   if auto_low then
     local who = auto_leader
                 and ("the @Wgroup leader@x045 (down @W" .. FHX_LEADER_LOSS .. "@x045 hp)")
                 or "one '@Whx low@x045'"
     cnote (tag .. "@x048auto-heal on@x045 - " .. who .. " after every fight, " ..
            "up to @W" .. FHX_AUTO_MAX .. "@x045 waiting.@w")
+    if auto_zone ~= "" then
+      cnote (tag .. "@x099tied to @W" .. auto_zone ..
+             "@x099 - leaving the area switches it off.@w")
+    end
   else
     cnote (tag .. "@x045auto-heal @Woff@x045.@w")
   end
@@ -1351,6 +1400,9 @@ function QueueShow ()
   if not FHXReady () then
     cnote (tag .. "@x099held for now - you're @W" .. WhyNotReady () .. "@x099.@w")
   end
+  if auto_low and auto_zone ~= "" then
+    cnote (tag .. "@x099auto is tied to @W" .. auto_zone .. "@x099.@w")
+  end
   if auto_low then
     if auto_leader then
       cnote (tag .. "@x048auto-heal is on@x099 - the @Wgroup leader@x099 after each " ..
@@ -1441,7 +1493,14 @@ end
 -- COMBAT DETECTION (stop healing when we enter a fight)
 -- ======================================================================
 function OnPluginBroadcast (msg, id, name, text)
-  if id ~= GMCP_ID or text ~= "char.status" then return end
+  if id ~= GMCP_ID then return end
+
+  if text == "room.info" then
+    CheckAutoZone ()
+    return
+  end
+
+  if text ~= "char.status" then return end
   local state = CharState ()
   local prev  = last_state
   last_state  = state
@@ -1508,6 +1567,8 @@ function ShowHelp ()
   cnote ("       @Wand@x099 empties the queue (auto-heal stays on)")
   cnote ("  @x045-@x099 with @Wauto@x099 on, healing starts when a fight ends and keeps")
   cnote ("       going until nobody is down @W" .. FHX_LOW_MIN_LOSS .. "@x099 hp any more")
+  cnote ("  @x045-@x099 auto switches itself off when you leave the area you")
+  cnote ("       turned it on in")
   cnote ("  @x045-@x099 a run stops early on no mana / new fight, and never queues")
   cnote ("       more than @W3@x099 at once; typing more yourself is fine")
   cnote ("  @x045-@x099 with @Wauto leader@x099 on, auto watches the group leader instead")
@@ -1548,10 +1609,11 @@ function FHXLoaded ()
   LoadIgnoreList ()
   auto_low    = (GetVariable ("auto_low") == "1")
   auto_leader = (GetVariable ("auto_leader") == "1")
+  auto_zone   = GetVariable ("auto_zone") or ""
   FHX_LOW_MIN_LOSS = tonumber (GetVariable ("low_thresh"))    or FHX_LOW_MIN_LOSS
   FHX_LEADER_LOSS  = tonumber (GetVariable ("leader_thresh")) or FHX_LEADER_LOSS
   local mode = auto_low and (auto_leader and "on (leader)" or "on") or "off"
-  cnote (tag .. "@x045loaded@w @x099(v3.1)@w - spell: @W" .. SpellName () ..
+  cnote (tag .. "@x045loaded@w @x099(v3.2)@w - spell: @W" .. SpellName () ..
          "@w - auto: @W" .. mode ..
          "@w - type '@Wfhx help@w' for commands.")
 end
