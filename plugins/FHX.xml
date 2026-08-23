@@ -11,7 +11,7 @@
    purpose="Repeatedly cast 'incomp' on self or others until healed"
    date_written="2026-06-21"
    requires="4.94"
-   version="3.3"
+   version="3.4"
 >
 
 <description>
@@ -33,6 +33,7 @@ you run low on mana, or you enter combat.
   Any of the above take a count: 'hx low x3', 'fhx low 2'.
 
   fhx queue        show what's waiting ('fhx stop' empties it)
+  fhx silent       hide the cast-by-cast lines (on/off too)
   fhx auto         toggle auto-heal: heals after every fight, until done
                    (switches itself off when you leave the area)
   fhx auto on / fhx auto off   set it explicitly
@@ -88,6 +89,11 @@ of mana, can't concentrate, or a new fight starts, and picks up again when
 that fight ends. Auto never pushes the queue past 3 items and never makes
 more than 20 casts in one run. Commands you type by hand are not capped.
 The setting persists between sessions.
+
+SILENT: 'fhx silent' hides the running commentary - the cast-by-cast
+lines, queue progress and auto's chatter. Anything you typed a command to
+see still prints, as do spell/threshold/mode changes and auto switching
+itself on or off (including running out of mana or leaving the area).
 
 QUEUE: every fhx/hx command becomes a queue item and they run strictly in
 order, one at a time. If you're in combat (or in a note, at a pager prompt,
@@ -372,6 +378,18 @@ the lowest person in the room is before each cast.
    </alias>
 
    <alias
+      name="fhx_silent"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx silent(?:\s+(on|off))?$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>SetSilent("%1")</send>
+   </alias>
+
+   <alias
       name="fhx_leaderthresh"
       enabled="y"
       regexp="y"
@@ -577,6 +595,14 @@ end
 
 local tag = "@x099[@WFHX@x099]:@w "
 
+-- Routine commentary: casts going out, queue progress, auto's running
+-- chatter. Silent mode drops these. Everything printed with cnote instead
+-- stays: replies to what you typed, mode changes, and auto switching
+-- itself on or off.
+function qnote (s)
+  if not silent_mode then cnote (s) end
+end
+
 -- ---- state -------------------------------------------------------------
 healing_active = false
 heal_spell     = "incomp"  -- "incomp" (c incomp) or "regen" (c regen)
@@ -602,6 +628,7 @@ auto_casts      = 0        -- casts made in this auto run, against FHX_AUTO_CHAI
 auto_skip       = {}       -- names the MUD called fully healed during this run
 auto_zone       = ""       -- area 'fhx auto' was switched on in; leaving it
                            -- switches auto back off
+silent_mode     = false    -- 'fhx silent': hide the cast-by-cast lines
 last_state      = nil      -- previous char.status.state, to spot 8 -> not-8
 
 -- names 'fhx low' will never pick, lower-cased name -> true. Persisted.
@@ -654,7 +681,7 @@ function StartSelfHeal ()
   heal_mode       = "self"
   heal_target     = ""
   heal_cast_count = 1
-  cnote (tag .. "@x045self-heal started@w - sending '@W" .. SpellCmd () .. "@w'.")
+  qnote (tag .. "@x045self-heal started@w - sending '@W" .. SpellCmd () .. "@w'.")
   dbg ("self cast #1 -> '" .. SpellCmd () .. "'")
   ArmWatchdog ()
   Send (SpellCmd ())
@@ -696,7 +723,7 @@ function BeginOtherHeal (name)
   heal_target     = name
   heal_cast_count = 1
   dbg ("BeginOtherHeal: target='" .. name .. "'  gen=" .. heal_gen)
-  cnote (tag .. "@x045healing @W" .. name .. "@x045 - casting '@W" .. SpellCmd (name) .. "@x045' until healed.")
+  qnote (tag .. "@x045healing @W" .. name .. "@x045 - casting '@W" .. SpellCmd (name) .. "@x045' until healed.")
   dbg ("cast #1 -> '" .. SpellCmd (name) .. "'")
   ArmWatchdog ()
   Send (SpellCmd (name))
@@ -923,7 +950,7 @@ function StartHealLow ()
     return
   end
   if is_me then
-    cnote (tag .. "@x045you're the lowest here@x099 - healing yourself.@w")
+    qnote (tag .. "@x045you're the lowest here@x099 - healing yourself.@w")
     StartSelfHeal ()
   else
     BeginOtherHeal (target)
@@ -937,7 +964,7 @@ end
 -- ======================================================================
 function HealOnceSelf ()
   dbg ("hx: one cast on self -> '" .. SpellCmd () .. "'")
-  cnote (tag .. "@x045one cast on yourself@w - '@W" .. SpellCmd () .. "@w'.")
+  qnote (tag .. "@x045one cast on yourself@w - '@W" .. SpellCmd () .. "@w'.")
   ArmOneshot ()
   Send (SpellCmd ())
 end
@@ -946,7 +973,7 @@ function HealOncePlayer (who)
   who = tostring (who or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
   if who == "" then return end
   dbg ("hx: one cast on " .. who .. " -> '" .. SpellCmd (who) .. "'")
-  cnote (tag .. "@x045one cast on @W" .. who .. "@x045 - '@W" .. SpellCmd (who) .. "@x045'.")
+  qnote (tag .. "@x045one cast on @W" .. who .. "@x045 - '@W" .. SpellCmd (who) .. "@x045'.")
   ArmOneshot ()
   Send (SpellCmd (who))
 end
@@ -960,7 +987,7 @@ function HealOnceLow ()
     return
   end
   if is_me then
-    cnote (tag .. "@x045you're the lowest here@x099 - healing yourself.@w")
+    qnote (tag .. "@x045you're the lowest here@x099 - healing yourself.@w")
     HealOnceSelf ()
   else
     HealOncePlayer (target)
@@ -1105,6 +1132,8 @@ function RunItem (item)
     dbg ("running " .. ItemLabel (item) .. " -> " .. (target or "nobody") ..
          (is_me and " (you)" or ""))
     if not target then
+      -- item.quiet already keeps auto's own items silent, so anything
+      -- reaching here was typed and deserves an answer even in silent mode
       if not item.quiet then
         cnote (tag .. "@x045nobody here is down @W" .. FHX_LOW_MIN_LOSS ..
                "@x045 hp - skipping @W" .. ItemLabel (item) .. "@x045.@w")
@@ -1114,7 +1143,7 @@ function RunItem (item)
       return
     end
     if is_me then
-      cnote (tag .. "@x045you're the lowest here@x099 - healing yourself.@w")
+      qnote (tag .. "@x045you're the lowest here@x099 - healing yourself.@w")
     end
   elseif item.mode == "name" then
     target = item.name
@@ -1214,7 +1243,7 @@ function CheckAutoZone ()
       dbg ("auto: '" .. auto_zone .. "' -> '" .. zone .. "' is the same group")
       auto_zone = zone
       SetVariable ("auto_zone", zone)
-      cnote (tag .. "@x099auto stays on - @W" .. zone ..
+      qnote (tag .. "@x099auto stays on - @W" .. zone ..
              "@x099 counts as the same place.@w")
       return
     end
@@ -1226,6 +1255,24 @@ function CheckAutoZone ()
            "@x045. '@Wfhx auto@x045' to start it up here.@w")
     auto_zone = ""
     SetVariable ("auto_zone", "")
+  end
+end
+
+function SetSilent (word)
+  word = string.lower (tostring (word or ""))
+  if word == "on" then
+    silent_mode = true
+  elseif word == "off" then
+    silent_mode = false
+  else
+    silent_mode = not silent_mode
+  end
+  SetVariable ("silent", silent_mode and "1" or "0")
+  if silent_mode then
+    cnote (tag .. "@x048silent mode on@x045 - cast-by-cast lines are hidden. " ..
+           "Settings and auto starting/stopping still show.@w")
+  else
+    cnote (tag .. "@x045silent mode @Woff@x045 - everything shows again.@w")
   end
 end
 
@@ -1328,7 +1375,7 @@ function AutoQueueLeader ()
   local item = { kind = "one", mode = (is_me and "self" or "name"),
                  name = name, quiet = true }
   fhx_queue[#fhx_queue + 1] = item
-  cnote (tag .. "@x048auto@x045: queued @W" .. ItemLabel (item) ..
+  qnote (tag .. "@x048auto@x045: queued @W" .. ItemLabel (item) ..
          "@x045 - leader is down @W" .. loss .. "@x045 hp.@w")
   return true
 end
@@ -1340,7 +1387,7 @@ function AutoQueueLowest ()
     return false
   end
   fhx_queue[#fhx_queue + 1] = { kind = "one", mode = "low", name = "", quiet = true }
-  cnote (tag .. "@x048auto@x045: queued @Whx low@x045 - @W" .. target ..
+  qnote (tag .. "@x048auto@x045: queued @Whx low@x045 - @W" .. target ..
          "@x045 is next.@w")
   return true
 end
@@ -1385,7 +1432,7 @@ function AutoTopUp ()
     if auto_casts > 0 then
       local what = auto_leader and "the leader is topped up"
                    or "everyone here is topped up"
-      cnote (tag .. "@x048auto done@x045 - " .. what .. " after @W" ..
+      qnote (tag .. "@x048auto done@x045 - " .. what .. " after @W" ..
              auto_casts .. "@x045 cast(s).@w")
     end
     auto_chain = false
@@ -1420,6 +1467,9 @@ function QueueShow ()
   end
   if not FHXReady () then
     cnote (tag .. "@x099held for now - you're @W" .. WhyNotReady () .. "@x099.@w")
+  end
+  if silent_mode then
+    cnote (tag .. "@x099silent mode is on.@w")
   end
   if auto_low and auto_zone ~= "" then
     cnote (tag .. "@x099auto is tied to @W" .. auto_zone .. "@x099.@w")
@@ -1489,9 +1539,9 @@ function StopHealing (reason, pause, ok)
   dbg ("StopHealing: reason='" .. reason .. "' after " .. heal_cast_count .. " cast(s)")
   if had_oneshot and not had_repeat and not pause then
     -- a single cast that simply landed: just report what happened
-    cnote (tag .. "@x045" .. reason .. ".@w")
+    qnote (tag .. "@x045" .. reason .. ".@w")
   else
-    cnote (tag .. "@x045" .. (pause and "paused" or "stopped") .. "@w @x099(" .. what ..
+    qnote (tag .. "@x045" .. (pause and "paused" or "stopped") .. "@w @x099(" .. what ..
            ")@w - @W" .. reason .. ".")
   end
 
@@ -1500,7 +1550,7 @@ function StopHealing (reason, pause, ok)
     if queue_current then table.insert (fhx_queue, 1, queue_current) end
     queue_current = nil
     if #fhx_queue > 0 then
-      cnote (tag .. "@x099holding @W" .. #fhx_queue ..
+      qnote (tag .. "@x099holding @W" .. #fhx_queue ..
              "@x099 item(s) until you're out of combat.@w")
     end
   else
@@ -1582,6 +1632,7 @@ function ShowHelp ()
   cnote ("  @Wfhx queue@x045       @x099 show what's running and what's waiting")
   cnote ("  @Wfhx auto@x045        @x099 toggle auto-heal (also '@Wfhx auto on/off@x099')")
   cnote ("  @Wfhx auto leader@x045 @x099 aim auto at the group leader only")
+  cnote ("  @Wfhx silent@x045      @x099 hide the cast-by-cast lines (on/off too)")
   cnote ("  @Wfhx thresh <n>@x045  @x099 hp missing before '@Wlow@x099' will heal someone")
   cnote ("  @Wfhx leaderthresh <n>@x045 @x099 the same bar for '@Wauto leader@x099'")
   cnote ("  @x045-@x099 '@Wfhx stop@x099' is the off switch: it stops the current heal")
@@ -1631,12 +1682,14 @@ function FHXLoaded ()
   auto_low    = (GetVariable ("auto_low") == "1")
   auto_leader = (GetVariable ("auto_leader") == "1")
   auto_zone   = GetVariable ("auto_zone") or ""
+  silent_mode = (GetVariable ("silent") == "1")
   FHX_LOW_MIN_LOSS = tonumber (GetVariable ("low_thresh"))    or FHX_LOW_MIN_LOSS
   FHX_LEADER_LOSS  = tonumber (GetVariable ("leader_thresh")) or FHX_LEADER_LOSS
   local mode = auto_low and (auto_leader and "on (leader)" or "on") or "off"
-  cnote (tag .. "@x045loaded@w @x099(v3.3)@w - spell: @W" .. SpellName () ..
+  cnote (tag .. "@x045loaded@w @x099(v3.4)@w - spell: @W" .. SpellName () ..
          "@w - auto: @W" .. mode ..
-         "@w - type '@Wfhx help@w' for commands.")
+         (silent_mode and "@w - @Wsilent@w" or "@w") ..
+         " - type '@Wfhx help@w' for commands.")
 end
 
 DoAfterSpecial (2, "FHXLoaded()", SENDTO_SCRIPT)
