@@ -10,7 +10,7 @@
    purpose="Times Spectre of the Deep (SKD) fights and reports trains/gold/TP/Repop Token/Sigil rewards"
    date_written="2026-06-21"
    requires="4.71"
-   version="1.2"
+   version="1.3"
    save_state="y"
    >
 </plugin>
@@ -232,6 +232,77 @@
 
 <script>
 <![CDATA[
+-- ── durable variable storage ────────────────────────────────────────────
+-- MUSHclient keeps SetVariable data in the world's plugin-state file. That
+-- file is per world, and it is lost when a plugin is reinstalled by hand
+-- instead of reloaded - which is why settings here kept resetting. These
+-- wrappers keep the same SetVariable/GetVariable API but also write to
+-- SKDReport.dat next to the plugin, so the data survives both.
+-- GetPluginInfo(id, 6) is the plugin FILE path, not its folder, so the
+-- filename has to be stripped off.
+do
+  local realGet, realSet = GetVariable, SetVariable
+  local dir  = (GetPluginInfo (GetPluginID (), 6) or ""):match ("^(.*[\\/])") or ""
+  local path = dir .. "SKDReport.dat"
+  local store = {}
+
+  local function flush ()
+    local out = io.open (path, "w")
+    if not out then return end
+    local keys = {}
+    for k in pairs (store) do keys[#keys + 1] = k end
+    table.sort (keys)
+    out:write ("-- SKDReport saved variables. Written by the plugin.\n")
+    out:write ("return {\n")
+    for _, k in ipairs (keys) do
+      out:write (string.format ("  [%q] = %q,\n", k, store[k]))
+    end
+    out:write ("}\n")
+    out:close ()
+  end
+
+  local fh = io.open (path, "r")
+  if fh then
+    local body = fh:read ("*a")
+    fh:close ()
+    local chunk = loadstring (body or "")
+    if chunk then
+      local ok, t = pcall (chunk)
+      if ok and type (t) == "table" then store = t end
+    end
+  else
+    -- first run: take a copy of whatever the old plugin-variable storage
+    -- still holds, and write it out at once so it can't be lost later
+    local ok, list = pcall (GetVariableList)
+    if ok and type (list) == "table" then
+      for k, v in pairs (list) do store[tostring (k)] = tostring (v) end
+    end
+    flush ()
+  end
+
+  function SetVariable (name, value)
+    name, value = tostring (name), tostring (value)
+    if store[name] ~= value then
+      store[name] = value
+      flush ()
+    end
+    return realSet (name, value)   -- keep the old storage in step as well
+  end
+
+  function GetVariable (name)
+    local v = store[tostring (name)]
+    if v ~= nil then return v end
+    return realGet (name)          -- falls back while migrating
+  end
+
+  function DeleteVariable (name)
+    store[tostring (name)] = nil
+    flush ()
+    return realSet (name, "")
+  end
+end
+-- ────────────────────────────────────────────────────────────────────────
+
 
 -- ===========================================================
 --  SKDReport - times Spectre of the Deep encounters and

@@ -41,7 +41,7 @@
    purpose="Find the closest saved portal + speedwalk to your room, and catalog your portals by type."
    date_written="2026-06-27"
    requires="4.73"
-   version="3.2"
+   version="3.4"
 >
 </plugin>
 
@@ -71,6 +71,7 @@
   <alias match="^portaldex remove (.+)$" enabled="y" regexp="y" ignore_case="y" script="pd_remove" sequence="90"></alias>
   <alias match="^portaldex help$"    enabled="y" regexp="y" ignore_case="y" script="pv_help_all" sequence="90"></alias>
   <alias match="^portaldex missing$" enabled="y" regexp="y" ignore_case="y" script="pd_missing"  sequence="90"></alias>
+  <alias match="^portaldex rooms$"   enabled="y" regexp="y" ignore_case="y" script="pd_rooms"    sequence="90"></alias>
   <alias match="^portaldex speed ?(.*)$" enabled="y" regexp="y" ignore_case="y" script="pd_speed_cmd" sequence="85"></alias>
   <alias match="^portaldex bag ?(.*)$"   enabled="y" regexp="y" ignore_case="y" script="pd_bag_cmd"   sequence="85"></alias>
   <alias match="^portaldex auto ?(.*)$"  enabled="y" regexp="y" ignore_case="y" script="pd_auto_cmd"  sequence="85"></alias>
@@ -80,6 +81,77 @@
 <!-- ============ SCRIPT ============ -->
 <script>
 <![CDATA[
+-- ── durable variable storage ────────────────────────────────────────────
+-- MUSHclient keeps SetVariable data in the world's plugin-state file. That
+-- file is per world, and it is lost when a plugin is reinstalled by hand
+-- instead of reloaded - which is why settings here kept resetting. These
+-- wrappers keep the same SetVariable/GetVariable API but also write to
+-- PortalValue.dat next to the plugin, so the data survives both.
+-- GetPluginInfo(id, 6) is the plugin FILE path, not its folder, so the
+-- filename has to be stripped off.
+do
+  local realGet, realSet = GetVariable, SetVariable
+  local dir  = (GetPluginInfo (GetPluginID (), 6) or ""):match ("^(.*[\\/])") or ""
+  local path = dir .. "PortalValue.dat"
+  local store = {}
+
+  local function flush ()
+    local out = io.open (path, "w")
+    if not out then return end
+    local keys = {}
+    for k in pairs (store) do keys[#keys + 1] = k end
+    table.sort (keys)
+    out:write ("-- PortalValue saved variables. Written by the plugin.\n")
+    out:write ("return {\n")
+    for _, k in ipairs (keys) do
+      out:write (string.format ("  [%q] = %q,\n", k, store[k]))
+    end
+    out:write ("}\n")
+    out:close ()
+  end
+
+  local fh = io.open (path, "r")
+  if fh then
+    local body = fh:read ("*a")
+    fh:close ()
+    local chunk = loadstring (body or "")
+    if chunk then
+      local ok, t = pcall (chunk)
+      if ok and type (t) == "table" then store = t end
+    end
+  else
+    -- first run: take a copy of whatever the old plugin-variable storage
+    -- still holds, and write it out at once so it can't be lost later
+    local ok, list = pcall (GetVariableList)
+    if ok and type (list) == "table" then
+      for k, v in pairs (list) do store[tostring (k)] = tostring (v) end
+    end
+    flush ()
+  end
+
+  function SetVariable (name, value)
+    name, value = tostring (name), tostring (value)
+    if store[name] ~= value then
+      store[name] = value
+      flush ()
+    end
+    return realSet (name, value)   -- keep the old storage in step as well
+  end
+
+  function GetVariable (name)
+    local v = store[tostring (name)]
+    if v ~= nil then return v end
+    return realGet (name)          -- falls back while migrating
+  end
+
+  function DeleteVariable (name)
+    store[tostring (name)] = nil
+    flush ()
+    return realSet (name, "")
+  end
+end
+-- ────────────────────────────────────────────────────────────────────────
+
 
 require "serialize"
 
@@ -98,6 +170,15 @@ end
 local echo = pv_echo          -- PortalDex code calls echo()
 
 local function esc(s) return (tostring(s or ""):gsub("@", "@@")) end
+
+-- Landing-room tag for a catalogued portal: " (33994)" when the mapper has
+-- exactly one saved destination for that item, " (7 dests)" when it has many
+-- (plain chaos portals), and "" until the mapper has been cross-referenced.
+local function pd_room_tag(e)
+   if e.room then return " "..C.ok.."("..tostring(e.room)..")" end
+   if e.rooms_n and e.rooms_n > 1 then return " "..C.ok.."("..e.rooms_n.." dests)" end
+   return ""
+end
 local function q(s)   return "'" .. tostring(s):gsub("'", "''") .. "'" end
 
 -- locate the mapper's sqlite db (adapts to whatever world/char/install we're in)
@@ -275,6 +356,9 @@ function pd_parse(lines)
       leads = f["Leads to"] or "?", found = f["Found at"] or "?",
       level = level, t = os.date("%Y-%m-%d %H:%M"),
       refs = (existing and existing.refs) or {},
+      room     = existing and existing.room,
+      roomname = existing and existing.roomname,
+      rooms_n  = existing and existing.rooms_n,
    }
    if scan_active and pd_scan_current_ref ~= "" then rec.refs[pd_scan_current_ref] = true end
 
@@ -284,9 +368,11 @@ function pd_parse(lines)
 
    if isnew then
       echo(C.hdr.."[PortalDex] +"..C.ok..esc(rec.ptype)..C.hdr..(rec.restrung and " "..C.val.."(restrung)" or "")
-          .." "..C.val..esc(rec.name).." "..C.num.."("..id..")"..C.hdr.." -> "..C.val..esc(rec.leads))
+          .." "..C.val..esc(rec.name).." "..C.num.."("..id..")"..C.hdr.." -> "..C.val..esc(rec.leads)..pd_room_tag(rec))
    end
 end
+
+local pd_stamp_rooms          -- forward decl; defined once cross_reference() exists
 
 local function count_types()
    local counts, total, restrung = {}, 0, 0
@@ -316,6 +402,12 @@ end
 
 function pd_list(name, line, wc)
    local filter = wc and wc[1] and wc[1]:lower() or nil
+   -- fill in landing rooms for anything catalogued since the last cross-reference
+   local need = false
+   for _, r in pairs(catalog) do
+      if r.rooms_n == nil then need = true; break end
+   end
+   if need then pd_stamp_rooms(true) end
    local arr = {}
    for _, r in pairs(catalog) do arr[#arr+1] = r end
    table.sort(arr, function(a,b)
@@ -325,10 +417,10 @@ function pd_list(name, line, wc)
    local shown = 0
    echo(C.hdr.."============= "..C.num.."PortalDex list"..C.hdr.." =============")
    for _, r in ipairs(arr) do
-      local hay = (r.ptype.." "..r.name.." "..r.leads):lower()
+      local hay = (r.ptype.." "..r.name.." "..r.leads.." "..tostring(r.room or "")):lower()
       if (not filter) or hay:find(filter, 1, true) then
          echo(C.ok..string.format("%-13s", r.ptype)..(r.restrung and C.bad.."R " or "  ")
-             ..C.val..esc(r.name).." "..C.num.."("..r.id..")"..C.hdr.." -> "..C.val..esc(r.leads)
+             ..C.val..esc(r.name).." "..C.num.."("..r.id..")"..C.hdr.." -> "..C.val..esc(r.leads)..pd_room_tag(r)
              ..C.hdr.." lvl "..C.num..esc(r.level))
          shown = shown + 1
       end
@@ -489,6 +581,46 @@ local function cross_reference()
    return { byItem = byItem, missing = missing, total = total, noitem = noitem }
 end
 
+-- Stamp each catalogued portal with the room it lands in, read from the mapper's
+-- saved portal exits (exits.touid on a '*'/'**' portal exit IS the room vnum).
+-- One saved destination -> that room number.  A plain chaos portal saved to many
+-- rooms keeps a count instead, rather than a misleading single room.
+function pd_stamp_rooms(quiet)
+   local x = cross_reference()
+   if not x then return nil end
+   local single, multi = 0, 0
+   for id, lst in pairs(x.byItem) do
+      local e = catalog[id]
+      if e then
+         local seen, n, first = {}, 0, nil
+         for _, ent in ipairs(lst) do
+            local uid = ent.t
+            if uid and uid ~= "" and uid ~= "nil" and not seen[uid] then
+               seen[uid] = true
+               n = n + 1
+               if not first then first = ent end
+            end
+         end
+         if n == 1 then
+            e.room, e.roomname = first.t, first.nm
+            single = single + 1
+         else
+            e.room, e.roomname = nil, nil
+            if n > 1 then multi = multi + 1 end
+         end
+         e.rooms_n = n
+      end
+   end
+   pd_save()
+   if not quiet then
+      echo(C.hdr.."[PortalDex] Landing rooms updated from the mapper: "..C.num..single
+          ..C.hdr.." portal(s) with one destination, "..C.num..multi..C.hdr.." with several.")
+   end
+   return single
+end
+
+function pd_rooms() pd_stamp_rooms(false) end
+
 local function load_portal_refs(only_missing)
    local path, why = get_db_path()
    if not path then echo(C.hdr.."[PortalDex] "..esc(why or "no mapper db")..".") return {} end
@@ -527,6 +659,7 @@ function pd_scan_finish_pass()
    else
       echo(C.hdr.."[PortalDex] Scan complete.")
    end
+   pd_stamp_rooms(true)
    pd_summary()
 end
 
@@ -955,7 +1088,7 @@ end
 
 -- combined help (both "portalvalue help" and "portaldex help" land here)
 function pv_help_all()
-   pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue " .. C.val .. "3.2" .. C.hdr .. " ===================")
+   pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue " .. C.val .. "3.3" .. C.hdr .. " ===================")
    pv_echo(C.val .. "Find the nearest portal to walk from, and catalog your portals by type.")
    pv_echo(C.hdr .. "-- pathing --")
    pv_echo(C.hdr .. "  pv                 " .. C.val .. "- nearest portal + speedwalk to your room")
@@ -968,6 +1101,7 @@ function pv_help_all()
    pv_echo(C.hdr .. "  portaldex list [t] " .. C.val .. "- list catalogued portals (optional filter)")
    pv_echo(C.hdr .. "  portaldex scan     " .. C.val .. "- id saved portals (also: scan stop/restart/missing)")
    pv_echo(C.hdr .. "  portaldex missing  " .. C.val .. "- mapper portals not yet catalogued")
+   pv_echo(C.hdr .. "  portaldex rooms    " .. C.val .. "- refresh landing room numbers from the mapper")
    pv_echo(C.hdr .. "  portaldex bag <kw> " .. C.val .. "- set portal container keyword (used by scan)")
    pv_echo(C.hdr .. "  portaldex auto on|off " .. C.val .. "- catalog-as-you-go toggle")
    pv_echo(C.hdr .. "  portaldex speed <s>   " .. C.val .. "- scan pacing (seconds per portal)")
