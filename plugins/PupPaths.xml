@@ -9,7 +9,7 @@
    purpose="Step-by-step pup pathing with named routes"
    date_written="2026-06-14"
    requires="4.40"
-   version="2.0"
+   version="2.1"
 >
 <description trim="y">
 PupPaths: Walk named paths one room at a time. Type the path keyword to advance.
@@ -83,8 +83,26 @@ Optional prefixes force the behaviour if you ever need to (eg on a laggy MUD):
 
 pp = {}
 
-local dataFile   = GetPluginInfo(GetPluginID(), 6) .. "PupPaths.dat"
-local configFile = GetPluginInfo(GetPluginID(), 6) .. "PupPathsConfig.dat"
+-- GetPluginInfo(id, 6) is the plugin FILE path, not its folder. Gluing the
+-- data filename straight onto it produced "PupPaths.xmlPupPaths.dat" in the
+-- plugin folder. Strip the filename off instead; the old mangled names are
+-- still read once, if the proper file is missing, so nothing is lost.
+local pluginFile = GetPluginInfo(GetPluginID(), 6) or ""
+local pluginDir  = pluginFile:match("^(.*[\\/])") or ""
+
+local dataFile   = pluginDir .. "PupPaths.dat"
+local configFile = pluginDir .. "PupPathsConfig.dat"
+
+local LEGACY_DATA   = pluginFile .. "PupPaths.dat"
+local LEGACY_CONFIG = pluginFile .. "PupPathsConfig.dat"
+
+-- Open the proper file, falling back to the old mangled one.
+local function OpenForRead(path, legacy)
+    local f = io.open(path, "r")
+    if f then return f end
+    if legacy ~= path then return io.open(legacy, "r") end
+    return nil
+end
 
 local paths     = {}
 local ppEnabled = true
@@ -210,7 +228,7 @@ local function SaveConfig()
 end
 
 local function LoadConfig()
-    local f = io.open(configFile, "r")
+    local f = OpenForRead(configFile, LEGACY_CONFIG)
     if not f then return end
     for line in f:lines() do
         local e = line:match("^enabled=([01])$")
@@ -245,7 +263,7 @@ end
 
 local function LoadData()
     paths = {}
-    local f = io.open(dataFile, "r")
+    local f = OpenForRead(dataFile, LEGACY_DATA)
     if not f then return end
     for line in f:lines() do
         -- New 5-field format
