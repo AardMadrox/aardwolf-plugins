@@ -7,7 +7,8 @@
    id="C2E8F4A71D9B305E8C3A7F16"
    language="Lua"
    purpose="Tracks Fractal run rewards and reports to channel"
-   version="1.6"
+   version="1.7"
+   save_state="y"
 >
 </plugin>
 
@@ -18,6 +19,14 @@
     sequence="100"
     regexp="y"
     script="SetReportChannel"
+  >
+  </alias>
+  <alias
+    match="^fractalreportchan$"
+    enabled="y"
+    sequence="100"
+    regexp="y"
+    script="ShowChannel"
   >
   </alias>
   <alias
@@ -277,6 +286,40 @@ end
 
 local CHAN_KEY  = "fractal_report_channel"
 local DATA_FILE = GetInfo(66) .. "fractal_runs.txt"
+local CHAN_FILE = GetInfo(66) .. "fractal_channel.txt"
+local DEFAULT_CHANNEL = "gt"
+
+---------------------------------------------------------------------------
+-- Report channel persistence
+-- Plugin variables only reach disk when MUSHclient shuts down cleanly, so a
+-- crash (or a manual reinstall) used to silently drop the channel back to the
+-- default. Write it to our own file instead - that lands immediately.
+---------------------------------------------------------------------------
+local function LoadChannel()
+  local f = io.open(CHAN_FILE, "r")
+  if f then
+    local raw = f:read("*line")
+    f:close()
+    local chan = raw and raw:match("^%s*(%S+)%s*$")
+    if chan then return chan end
+  end
+  -- fall back to the old plugin variable (pre-1.7), then the built-in default
+  local v = GetVariable(CHAN_KEY)
+  if v and v ~= "" then return v end
+  return DEFAULT_CHANNEL
+end
+
+local function SaveChannel(chan)
+  SetVariable(CHAN_KEY, chan)
+  local f = io.open(CHAN_FILE, "w")
+  if not f then
+    ColourNote("white", "", "[FractalReport] ERROR: Could not write to " .. CHAN_FILE)
+    return false
+  end
+  f:write(chan)
+  f:close()
+  return true
+end
 
 ---------------------------------------------------------------------------
 -- Persistence - every run stored as an entry; totals derived on demand
@@ -336,7 +379,7 @@ local function CalcTotals(runs)
 end
 
 local function GetChannel()
-  return GetVariable(CHAN_KEY) or "gt"
+  return LoadChannel()
 end
 
 local function ParseNum(s)
@@ -512,8 +555,16 @@ end
 ---------------------------------------------------------------------------
 function SetReportChannel(name, line, wildcards)
   local chan = wildcards[1]:lower()
-  SetVariable(CHAN_KEY, chan)
-  ANote(COL_HDR .. "[Fractal] " .. COL_LBL .. "Report channel set to: " .. COL_VAL .. chan)
+  if SaveChannel(chan) then
+    ANote(COL_HDR .. "[Fractal] " .. COL_LBL .. "Report channel set to: " ..
+          COL_VAL .. chan .. COL_LBL .. " - saved, this survives restarts now.")
+  end
+end
+
+function ShowChannel()
+  ANote(COL_HDR .. "[Fractal] " .. COL_LBL .. "Reports currently go to: " ..
+        COL_VAL .. GetChannel())
+  ANote(COL_LBL .. "           Change it with " .. COL_ACC .. "fractalreportchan <channel>")
 end
 
 function SendReport(name, line, wildcards)
@@ -592,6 +643,8 @@ function ShowHelp()
   ANote(SEP)
   ANote(COL_LBL .. "  " .. COL_ACC .. "fractalreportchan <channel>" ..
         COL_LBL .. "  - Set default report channel (e.g. gt, clan, say)")
+  ANote(COL_LBL .. "  " .. COL_ACC .. "fractalreportchan" ..
+        COL_LBL .. "            - Show which channel reports go to")
   ANote(COL_LBL .. "  " .. COL_ACC .. "fractalreport <channel>" ..
         COL_LBL .. "     - Send last run report to <channel>")
   ANote(COL_LBL .. "  " .. COL_ACC .. "fractalreportlife <channel>" ..
@@ -606,7 +659,8 @@ function ShowHelp()
 end
 
 function OnPluginInstall()
-  ANote(COL_HDR .. "[FractalReport] " .. COL_LBL .. "Loaded. Type " ..
+  ANote(COL_HDR .. "[FractalReport] " .. COL_LBL .. "Loaded. Reporting to " ..
+        COL_VAL .. GetChannel() .. COL_LBL .. ". Type " ..
         COL_ACC .. "fractalreporthelp" .. COL_LBL .. " for commands.")
 end
 
