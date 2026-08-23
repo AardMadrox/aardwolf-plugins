@@ -11,7 +11,7 @@
    purpose="Repeatedly cast 'incomp' on self or others until healed"
    date_written="2026-06-21"
    requires="4.94"
-   version="2.9"
+   version="3.0"
 >
 
 <description>
@@ -22,15 +22,20 @@ you run low on mana, or you enter combat.
   fhx              self-heal (cast 'c incomp' on yourself)
   fhx <player>     heal another player ('c incomp <player>')
   fhx low          heal whoever in the room is lowest on HP - you included
+                   (only counts people missing more than 4000 hp)
   fhx stop         stop healing immediately
 
   hx               cast once on yourself (no repeating)
   hx <player>      cast once on another player
   hx low           cast once on whoever is lowest on HP - you included
+                   (only counts people missing more than 4000 hp)
 
   Any of the above take a count: 'hx low x3', 'fhx low 2'.
 
   fhx queue        show what's waiting ('fhx stop' empties it)
+  fhx auto         toggle auto-heal: one 'hx low' after every fight
+  fhx auto on / fhx auto off   set it explicitly
+  fhx auto leader  toggle auto onto the group leader only (on/off too)
 
   fhx regen        switch the spell to regeneration (c regen)
   fhx incomp       switch the spell back to incomplete healing (c incomp)
@@ -61,6 +66,16 @@ lowest - run it again to retarget.
 
 The 'hx' commands mirror the 'fhx' ones but send exactly one cast and
 then stop - no pacing, no watchdog, nothing to stop.
+
+AUTO LEADER: with 'fhx auto leader' on, auto stops picking the lowest and
+watches the group leader instead - it queues a heal for them only when
+they're down more than 4000 HP. Everything else about auto is unchanged,
+and your own typed commands are never affected by this toggle.
+
+AUTO: with 'fhx auto' on, one 'hx low' is queued each time combat ends.
+Auto never pushes the queue past 3 items - if it's already that deep the
+auto heal is skipped rather than piling up. Commands you type by hand are
+not capped. The setting persists between sessions.
 
 QUEUE: every fhx/hx command becomes a queue item and they run strictly in
 order, one at a time. If you're in combat (or in a note, at a pager prompt,
@@ -345,6 +360,54 @@ the lowest person in the room is before each cast.
    </alias>
 
    <alias
+      name="fhx_leaderthresh"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx leaderthresh(?:\s+(\d+))?$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>SetLeaderThresh("%1")</send>
+   </alias>
+
+   <alias
+      name="fhx_thresh"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx thresh(?:\s+(\d+))?$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>SetLowThresh("%1")</send>
+   </alias>
+
+   <alias
+      name="fhx_auto_leader"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx auto leader(?:\s+(on|off))?$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>SetAutoLeader("%1")</send>
+   </alias>
+
+   <alias
+      name="fhx_auto"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx auto(?:\s+(on|off))?$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>SetAutoLow("%1")</send>
+   </alias>
+
+   <alias
       name="fhx_queue_show"
       enabled="y"
       regexp="y"
@@ -432,6 +495,12 @@ local FHX_CAST_DELAY = 1     -- pause after each heal-tick before resending
 local FHX_WATCHDOG   = 10    -- stop if no heal-tick seen within this long
 local FHX_ONESHOT_TO = 8     -- give up waiting for a single 'hx' cast to land
 local FHX_QUEUE_MAX  = 20    -- most items one command may queue at once
+local FHX_AUTO_MAX   = 3     -- auto-heal won't push the queue past this
+-- Both of these are settings, changed in game with 'fhx thresh <n>' and
+-- 'fhx leaderthresh <n>' and remembered between sessions.
+FHX_LOW_MIN_LOSS = 4000   -- 'low' ignores anyone missing less than this
+FHX_LEADER_LOSS  = 4000   -- 'auto leader' waits for the leader to be missing
+                          -- more than this many HP
 local SENDTO_SCRIPT  = 12    -- "execute as script" send-to code
 
 -- Diagnostics: flip to true to print [FHX dbg] lines while troubleshooting.
@@ -513,6 +582,9 @@ fhx_queue       = {}
 queue_current   = nil      -- item running right now (re-queued if combat interrupts)
 oneshot_pending = false    -- a single 'hx' cast is in flight
 oneshot_gen     = 0        -- invalidates stale one-shot timeouts
+auto_low        = false    -- 'fhx auto': queue an 'hx low' when a fight ends
+auto_leader     = false    -- 'fhx auto leader': aim auto at the leader only
+last_state      = nil      -- previous char.status.state, to spot 8 -> not-8
 
 -- names 'fhx low' will never pick, lower-cased name -> true. Persisted.
 ignore_list = {}
@@ -717,12 +789,13 @@ end
 
 -- Your own HP as a 0-1 ratio, for when the group data doesn't list you
 -- (or you aren't grouped at all). nil if the GMCP data isn't there.
+-- Returns (ratio, hp_missing) for yourself, or nil.
 function SelfRatio ()
   local v = gmcp ("char.vitals")
   local m = gmcp ("char.maxstats")
   local hp  = (type (v) == "table") and tonumber (v.hp) or nil
   local mhp = (type (m) == "table") and tonumber (m.maxhp) or nil
-  if hp and mhp and mhp > 0 then return hp / mhp end
+  if hp and mhp and mhp > 0 then return hp / mhp, mhp - hp end
   return nil
 end
 
@@ -751,14 +824,16 @@ function GroupPetNamed (typed)
   return nil
 end
 
--- Returns (name, is_me): the hurt person in the room with the lowest HP
--- ratio. You are a candidate like anyone else - if you're the lowest one
--- here, this returns your name with is_me true and the caller heals you
--- instead of casting at someone. Returns nil if nobody here is hurt.
+-- Returns (name, is_me): the person in the room with the lowest HP ratio,
+-- counting only people missing more than FHX_LOW_MIN_LOSS hp - a heal on
+-- someone barely scratched is mostly wasted. You are a candidate like
+-- anyone else - if you're the lowest one here, this returns your name with
+-- is_me true and the caller heals you instead of casting at someone.
+-- Returns nil when nobody here is hurt enough to bother with.
 function FindLowestGroupMember ()
   local myname   = MyName ()
   local mykey    = string.lower (myname)
-  local my_ratio = nil
+  local my_ratio, my_loss = nil, 0
   local best, best_ratio = nil, 2
 
   local g = gmcp ("group")
@@ -778,16 +853,19 @@ function FindLowestGroupMember ()
           dbg ("  skipping " .. name .. " (on ignore list)")
         elseif hp and mhp and mhp > 0 then
           local ratio = hp / mhp
+          local loss  = mhp - hp
           if isme then
-            my_ratio = ratio
+            my_ratio, my_loss = ratio, loss
             dbg ("  candidate " .. name .. " (you): hp=" .. hp .. "/" .. mhp ..
-                 " (" .. string.format ("%.0f%%", ratio * 100) .. ")")
+                 " (down " .. loss .. ")")
           elseif here then
             dbg ("  candidate " .. name .. ": hp=" .. hp .. "/" .. mhp ..
-                 " (" .. string.format ("%.0f%%", ratio * 100) .. ")")
-            if ratio < 1 and ratio < best_ratio then
+                 " (down " .. loss .. ")")
+            if loss > FHX_LOW_MIN_LOSS and ratio < best_ratio then
               best_ratio = ratio
               best = name
+            elseif loss <= FHX_LOW_MIN_LOSS then
+              dbg ("    ignoring " .. name .. " - only down " .. loss)
             end
           end
         end
@@ -799,14 +877,13 @@ function FindLowestGroupMember ()
 
   -- group data didn't list you (or there is none): fall back to your vitals
   if not my_ratio and not ignore_list[mykey] then
-    my_ratio = SelfRatio ()
+    my_ratio, my_loss = SelfRatio ()
     if my_ratio then
-      dbg ("  candidate you (from vitals): " ..
-           string.format ("%.0f%%", my_ratio * 100))
+      dbg ("  candidate you (from vitals): down " .. (my_loss or 0))
     end
   end
 
-  if my_ratio and my_ratio < 1 and my_ratio < best_ratio then
+  if my_ratio and (my_loss or 0) > FHX_LOW_MIN_LOSS and my_ratio < best_ratio then
     return (myname ~= "" and myname or "you"), true
   end
   return best, false
@@ -816,7 +893,8 @@ function StartHealLow ()
   local target, is_me = FindLowestGroupMember ()
   dbg ("fhx low picked: " .. (target or "nobody") .. (is_me and " (you)" or ""))
   if not target then
-    cnote (tag .. "@x045nobody here needs healing@w - including you.")
+    cnote (tag .. "@x045nobody here is down @W" .. FHX_LOW_MIN_LOSS ..
+           "@x045 hp@w - including you.")
     return
   end
   if is_me then
@@ -852,7 +930,8 @@ function HealOnceLow ()
   local target, is_me = FindLowestGroupMember ()
   dbg ("hx low picked: " .. (target or "nobody") .. (is_me and " (you)" or ""))
   if not target then
-    cnote (tag .. "@x045nobody here needs healing@w - including you.")
+    cnote (tag .. "@x045nobody here is down @W" .. FHX_LOW_MIN_LOSS ..
+           "@x045 hp@w - including you.")
     return
   end
   if is_me then
@@ -999,8 +1078,10 @@ function RunItem (item)
     dbg ("running " .. ItemLabel (item) .. " -> " .. (target or "nobody") ..
          (is_me and " (you)" or ""))
     if not target then
-      cnote (tag .. "@x045nobody here needs healing - skipping @W" ..
-             ItemLabel (item) .. "@x045.@w")
+      if not item.quiet then
+        cnote (tag .. "@x045nobody here is down @W" .. FHX_LOW_MIN_LOSS ..
+               "@x045 hp - skipping @W" .. ItemLabel (item) .. "@x045.@w")
+      end
       queue_current = nil
       DoAfterSpecial (FHX_CAST_DELAY, "PumpQueue()", SENDTO_SCRIPT)
       return
@@ -1019,6 +1100,165 @@ function RunItem (item)
   end
 end
 
+-- ======================================================================
+-- THRESHOLD SETTINGS
+--   fhx thresh <n>        how much HP someone must be missing before
+--                         'low' (and auto) will consider them
+--   fhx leaderthresh <n>  the same bar for 'auto leader'
+-- Either with no number just reports the current value. 0 means "any
+-- damage at all". Both are remembered between sessions.
+-- ======================================================================
+function SetLowThresh (n)
+  n = tonumber (tostring (n or ""):match ("^%s*(%d+)%s*$") or "")
+  if not n then
+    cnote (tag .. "@x045player threshold: @W" .. FHX_LOW_MIN_LOSS ..
+           "@x045 hp missing. '@Wfhx thresh <number>@x045' to change it.@w")
+    return
+  end
+  FHX_LOW_MIN_LOSS = n
+  SetVariable ("low_thresh", tostring (n))
+  if n == 0 then
+    cnote (tag .. "@x048player threshold cleared@x045 - '@Wlow@x045' will heal " ..
+           "anyone missing any hp at all.@w")
+  else
+    cnote (tag .. "@x048player threshold set to @W" .. n .. "@x048 hp@x045 - '@Wlow@x045'" ..
+           " ignores anyone hurt less than that.@w")
+  end
+end
+
+function SetLeaderThresh (n)
+  n = tonumber (tostring (n or ""):match ("^%s*(%d+)%s*$") or "")
+  if not n then
+    cnote (tag .. "@x045leader threshold: @W" .. FHX_LEADER_LOSS ..
+           "@x045 hp missing. '@Wfhx leaderthresh <number>@x045' to change it.@w")
+    return
+  end
+  FHX_LEADER_LOSS = n
+  SetVariable ("leader_thresh", tostring (n))
+  if n == 0 then
+    cnote (tag .. "@x048leader threshold cleared@x045 - '@Wauto leader@x045' will heal " ..
+           "the leader whenever they're hurt.@w")
+  else
+    cnote (tag .. "@x048leader threshold set to @W" .. n .. "@x048 hp@x045 - '@Wauto leader@x045'" ..
+           " waits until the leader is down that much.@w")
+  end
+end
+
+-- ======================================================================
+-- AUTO MODE ('fhx auto'): one 'hx low' each time a fight ends
+-- ======================================================================
+function SetAutoLow (word)
+  word = string.lower (tostring (word or ""))
+  if word == "on" then
+    auto_low = true
+  elseif word == "off" then
+    auto_low = false
+  else
+    auto_low = not auto_low          -- bare 'fhx auto' toggles
+  end
+  SetVariable ("auto_low", auto_low and "1" or "0")
+  if auto_low then
+    local who = auto_leader
+                and ("the @Wgroup leader@x045 (down @W" .. FHX_LEADER_LOSS .. "@x045 hp)")
+                or "one '@Whx low@x045'"
+    cnote (tag .. "@x048auto-heal on@x045 - " .. who .. " after every fight, " ..
+           "up to @W" .. FHX_AUTO_MAX .. "@x045 waiting.@w")
+  else
+    cnote (tag .. "@x045auto-heal @Woff@x045.@w")
+  end
+end
+
+function SetAutoLeader (word)
+  word = string.lower (tostring (word or ""))
+  if word == "on" then
+    auto_leader = true
+  elseif word == "off" then
+    auto_leader = false
+  else
+    auto_leader = not auto_leader
+  end
+  SetVariable ("auto_leader", auto_leader and "1" or "0")
+  if auto_leader then
+    cnote (tag .. "@x048auto targets the group leader@x045 - only once they're " ..
+           "down more than @W" .. FHX_LEADER_LOSS .. "@x045 hp.@w")
+  else
+    cnote (tag .. "@x045auto is back to healing whoever is @Wlowest@x045.@w")
+  end
+  if not auto_low then
+    cnote (tag .. "@x099auto-heal itself is off - '@Wfhx auto on@x099' to start it.@w")
+  end
+end
+
+-- Returns (name, hp_missing, here, is_me) for the group leader, or nil if
+-- there's no group data, no leader field, or the leader isn't a player.
+function LeaderStatus ()
+  local g = gmcp ("group")
+  if type (g) ~= "table" or type (g.members) ~= "table" then return nil end
+  local lname = tostring (g.leader or "")
+  if lname == "" then return nil end
+  local key = string.lower (lname)
+  for _, m in ipairs (g.members) do
+    if string.lower (tostring (m.name or "")) == key then
+      local info = m.info
+      if type (info) ~= "table" or IsGroupPet (info) then return nil end
+      local hp, mhp = tonumber (info.hp), tonumber (info.mhp)
+      if not hp or not mhp then return nil end
+      return lname, mhp - hp, tostring (info.here) == "1",
+             key == string.lower (MyName ())
+    end
+  end
+  return nil
+end
+
+-- 'auto leader' variant: heal the leader, and only once they're properly
+-- hurt. Silent when there's nothing to do - this runs after every fight.
+function AutoQueueLeader ()
+  local name, loss, here, is_me = LeaderStatus ()
+  if not name then
+    dbg ("auto/leader: no leader in the group data")
+    return
+  end
+  if ignore_list[string.lower (name)] then
+    dbg ("auto/leader: " .. name .. " is on the ignore list")
+    return
+  end
+  if not here and not is_me then
+    dbg ("auto/leader: " .. name .. " isn't in the room")
+    return
+  end
+  if loss <= FHX_LEADER_LOSS then
+    dbg ("auto/leader: " .. name .. " only down " .. loss .. " hp")
+    return
+  end
+  local item = { kind = "one", mode = (is_me and "self" or "name"),
+                 name = name, quiet = true }
+  fhx_queue[#fhx_queue + 1] = item
+  cnote (tag .. "@x048auto@x045: queued @W" .. ItemLabel (item) ..
+         "@x045 - leader is down @W" .. loss .. "@x045 hp. @W" ..
+         #fhx_queue .. "@x045 waiting.@w")
+end
+
+-- Called when combat ends. Adds a single 'hx low', but never pushes the
+-- queue past FHX_AUTO_MAX - what you type by hand is not capped. Stays
+-- quiet when nobody needs healing, so a clean fight prints nothing.
+function AutoQueueLow ()
+  if #fhx_queue >= FHX_AUTO_MAX then
+    dbg ("auto: " .. #fhx_queue .. " already waiting - not adding")
+    return
+  end
+  if auto_leader then
+    AutoQueueLeader ()
+    return
+  end
+  if not FindLowestGroupMember () then
+    dbg ("auto: nobody hurt - nothing to queue")
+    return
+  end
+  fhx_queue[#fhx_queue + 1] = { kind = "one", mode = "low", name = "", quiet = true }
+  cnote (tag .. "@x048auto@x045: queued @Whx low@x045 - @W" .. #fhx_queue ..
+         "@x045 waiting.@w")
+end
+
 function QueueShow ()
   if queue_current and Busy () then
     cnote (tag .. "@x045running now: @W" .. ItemLabel (queue_current))
@@ -1035,6 +1275,14 @@ function QueueShow ()
   if not FHXReady () then
     cnote (tag .. "@x099held for now - you're @W" .. WhyNotReady () .. "@x099.@w")
   end
+  if auto_low then
+    if auto_leader then
+      cnote (tag .. "@x048auto-heal is on@x099 - the @Wgroup leader@x099 after each " ..
+             "fight, once they're down @W" .. FHX_LEADER_LOSS .. "@x099 hp.@w")
+    else
+      cnote (tag .. "@x048auto-heal is on@x099 - one '@Whx low@x099' after each fight.@w")
+    end
+  end
 end
 
 -- 'fhx stop' is the one off switch: it stops whatever is casting and
@@ -1050,6 +1298,9 @@ function StopAll ()
   end
   if n > 0 then
     cnote (tag .. "@x045queue emptied@x099 (" .. n .. " item(s) dropped)@w.")
+  end
+  if auto_low then
+    cnote (tag .. "@x099auto-heal is still on - '@Wfhx auto off@x099' to stop that too.@w")
   end
 end
 
@@ -1102,6 +1353,8 @@ end
 function OnPluginBroadcast (msg, id, name, text)
   if id ~= GMCP_ID or text ~= "char.status" then return end
   local state = CharState ()
+  local prev  = last_state
+  last_state  = state
 
   -- entering combat pauses whatever is casting and holds the queue
   if state == 8 then
@@ -1110,6 +1363,12 @@ function OnPluginBroadcast (msg, id, name, text)
       StopHealing ("entered combat", true)
     end
     return
+  end
+
+  -- a fight just ended (8 -> anything else): top the group back up
+  if auto_low and prev == 8 then
+    dbg ("combat ended -> auto-heal check")
+    AutoQueueLow ()
   end
 
   -- free again (fight over, left the pager/note editor, woke up): carry on
@@ -1132,6 +1391,8 @@ function ShowHelp ()
   cnote ("  @Wfhx@x045             @x099 self-heal (cast '@Wc incomp@x099' on yourself)")
   cnote ("  @Wfhx <player>@x045    @x099 heal another player ('@Wc incomp <player>@x099')")
   cnote ("  @Wfhx low@x045         @x099 heal whoever here is lowest on HP (you included)")
+  cnote ("  @x045-@x099 '@Wlow@x099' only counts people missing more than @W" ..
+         FHX_LOW_MIN_LOSS .. "@x099 hp")
   cnote ("  @Wfhx stop@x045        @x099 stop healing right now")
   cnote ("  @Wfhx regen@x045       @x099 use regeneration ('@Wc regen@x099')")
   cnote ("  @Wfhx incomp@x045      @x099 use incomplete healing ('@Wc incomp@x099')")
@@ -1149,8 +1410,16 @@ function ShowHelp ()
   Note ("")
   cnote ("@x099Queue@x045 (commands wait their turn instead of being lost)@x099:@w")
   cnote ("  @Wfhx queue@x045       @x099 show what's running and what's waiting")
+  cnote ("  @Wfhx auto@x045        @x099 toggle auto-heal (also '@Wfhx auto on/off@x099')")
+  cnote ("  @Wfhx auto leader@x045 @x099 aim auto at the group leader only")
+  cnote ("  @Wfhx thresh <n>@x045  @x099 hp missing before '@Wlow@x099' will heal someone")
+  cnote ("  @Wfhx leaderthresh <n>@x045 @x099 the same bar for '@Wauto leader@x099'")
   cnote ("  @x045-@x099 '@Wfhx stop@x099' is the off switch: it stops the current heal")
-  cnote ("       @Wand@x099 empties the queue")
+  cnote ("       @Wand@x099 empties the queue (auto-heal stays on)")
+  cnote ("  @x045-@x099 with @Wauto@x099 on, one '@Whx low@x099' is queued each time a fight")
+  cnote ("       ends, never pushing the queue past @W3@x099; typing more is fine")
+  cnote ("  @x045-@x099 with @Wauto leader@x099 on, auto watches the group leader instead")
+  cnote ("       and only heals them once they're down @W" .. FHX_LEADER_LOSS .. "@x099 hp")
   cnote ("  @x045-@x099 commands typed in combat @Wwait@x099 and fire when the fight ends")
   cnote ("  @x045-@x099 they run in the order you typed them, one at a time")
   cnote ("  @x045-@x099 '@Wfhx@x099' then '@Wfhx low@x099' = self-heal first, lowest afterwards")
@@ -1185,7 +1454,13 @@ function FHXLoaded ()
   pcall (function () Send_GMCP_Packet ("group on") end)
   heal_spell = (GetVariable ("heal_spell") == "regen") and "regen" or "incomp"
   LoadIgnoreList ()
-  cnote (tag .. "@x045loaded@w @x099(v2.9)@w - spell: @W" .. SpellName () ..
+  auto_low    = (GetVariable ("auto_low") == "1")
+  auto_leader = (GetVariable ("auto_leader") == "1")
+  FHX_LOW_MIN_LOSS = tonumber (GetVariable ("low_thresh"))    or FHX_LOW_MIN_LOSS
+  FHX_LEADER_LOSS  = tonumber (GetVariable ("leader_thresh")) or FHX_LEADER_LOSS
+  local mode = auto_low and (auto_leader and "on (leader)" or "on") or "off"
+  cnote (tag .. "@x045loaded@w @x099(v3.0)@w - spell: @W" .. SpellName () ..
+         "@w - auto: @W" .. mode ..
          "@w - type '@Wfhx help@w' for commands.")
 end
 
