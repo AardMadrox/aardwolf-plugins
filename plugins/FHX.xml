@@ -11,7 +11,7 @@
    purpose="Repeatedly cast 'incomp' on self or others until healed"
    date_written="2026-06-21"
    requires="4.94"
-   version="3.2"
+   version="3.3"
 >
 
 <description>
@@ -76,7 +76,9 @@ and your own typed commands are never affected by this toggle.
 AUTO SWITCHES OFF WHEN YOU LEAVE: turning auto on remembers the area you
 were in (GMCP room.info 'zone'). Walk, recall or portal into a different
 area and auto turns itself off, so it never follows you somewhere you
-didn't want it running.
+didn't want it running. Exception: The Titans' Keep ('titan') and
+Transcendence ('transcend') count as one place, so crossing between them
+leaves auto running.
 
 AUTO: with 'fhx auto' on, 'hx low' is queued when combat ends and keeps
 going - one cast at a time - until nobody in the room is missing more than
@@ -1173,6 +1175,15 @@ end
 -- ======================================================================
 -- AUTO MODE ('fhx auto'): one 'hx low' each time a fight ends
 -- ======================================================================
+-- Areas that count as one place for the auto anchor, so crossing between
+-- them doesn't switch auto off. These are GMCP room.info 'zone' keywords,
+-- taken from the mapper's area list: 'titan' is The Titans' Keep and
+-- 'transcend' is Transcendence.
+local ZONE_GROUPS = {
+  titan     = "titan+transcend",
+  transcend = "titan+transcend",
+}
+
 -- The area keyword from GMCP room.info ("zoo", "emerald", ...). Empty when
 -- there's no room data yet.
 function CurrentZone ()
@@ -1197,6 +1208,16 @@ function CheckAutoZone ()
   end
 
   if zone ~= auto_zone then
+    -- linked areas: move the anchor along instead of switching off
+    local from, to = ZONE_GROUPS[auto_zone], ZONE_GROUPS[zone]
+    if from and from == to then
+      dbg ("auto: '" .. auto_zone .. "' -> '" .. zone .. "' is the same group")
+      auto_zone = zone
+      SetVariable ("auto_zone", zone)
+      cnote (tag .. "@x099auto stays on - @W" .. zone ..
+             "@x099 counts as the same place.@w")
+      return
+    end
     dbg ("auto: left '" .. auto_zone .. "' for '" .. zone .. "' - switching off")
     auto_low   = false
     auto_chain = false
@@ -1568,7 +1589,7 @@ function ShowHelp ()
   cnote ("  @x045-@x099 with @Wauto@x099 on, healing starts when a fight ends and keeps")
   cnote ("       going until nobody is down @W" .. FHX_LOW_MIN_LOSS .. "@x099 hp any more")
   cnote ("  @x045-@x099 auto switches itself off when you leave the area you")
-  cnote ("       turned it on in")
+  cnote ("       turned it on in (@Wtitan@x099 and @Wtranscend@x099 count as one area)")
   cnote ("  @x045-@x099 a run stops early on no mana / new fight, and never queues")
   cnote ("       more than @W3@x099 at once; typing more yourself is fine")
   cnote ("  @x045-@x099 with @Wauto leader@x099 on, auto watches the group leader instead")
@@ -1613,7 +1634,7 @@ function FHXLoaded ()
   FHX_LOW_MIN_LOSS = tonumber (GetVariable ("low_thresh"))    or FHX_LOW_MIN_LOSS
   FHX_LEADER_LOSS  = tonumber (GetVariable ("leader_thresh")) or FHX_LEADER_LOSS
   local mode = auto_low and (auto_leader and "on (leader)" or "on") or "off"
-  cnote (tag .. "@x045loaded@w @x099(v3.2)@w - spell: @W" .. SpellName () ..
+  cnote (tag .. "@x045loaded@w @x099(v3.3)@w - spell: @W" .. SpellName () ..
          "@w - auto: @W" .. mode ..
          "@w - type '@Wfhx help@w' for commands.")
 end
