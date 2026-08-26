@@ -14,82 +14,15 @@
    purpose="Aardwolf Character Development Tracking (Rewrite of SharpTracker)"
    save_state="y"   
    requires="4.70"
-   version="2.1"
+   version="2.5"
    >
 <description trim="n">
 		<![CDATA[
-==================== Dull Tracker Help ====================
-	Settings
-	------------------
-	To change a setting:
-	dull <setting> <value>
-	
-	Here are the various settings and their default values:
-	channel     - channel to report to - default: gtell - possible: any channel
-	report      - report to channel - default: y - possible: y|n
-	showinfo    - show session data in info bar - default: y - possible: y|n
-	highlight   - turn highlighting on or off - default: y - possible: y|n
-	valueColor  - color to use for values - default: @W - possible: ansi or xterm colors
-	labelColor  - color to use for labels - default: @D - possible: ansi or xterm colors
-	blabelColor - color to use for bright labels - default: @r - possible: ansi or xterm colors	
-	
-	Reports
-	------------------
-	Session reports: 	
-	dull total <channel>(optional)
-	dull session <channel>(optional)
-	dull double <channel>(optional)
-	dull epic <channel>(optional)      - Share this session's epic rewards (gold, trains, qp, tp)
-	dull epiclife <channel>(optional)  - Share lifetime epic rewards (all epics combined)
-	dull epic<name> <channel>(opt)     - Share one epic's LIFETIME record. <name> is one of:
-	                                     oc icefall1 icefall2 winds titan terra inferno
-	                                     genie trans matron skd fractal fury
-	                                     e.g. dull epicinferno   or   dull epicterra gtell
-	
-	Timed session:
-	dull timer <minutes>(optional)  - Starts a timed session. Gains during session are reported upon completion.
-	dull timer clear                - Cancels the running timed session.
-		
-	Historical Reports:
-	dull <dbl|timed|cp|gq|lvl|pup|quest> -h <#>(optional)
-	
-	Stat reports. Send your stats your report channel (or channel specified):
-	dull <instinct|mastery|stats> <channel>(optional)
-	
-	Area Reports:	
-	dull xpr <area or number>(optional) - Exp rate for areas that have more than 5% of your total exp for the session
-										  Inputting text as an optional parameter filters the list by area 
-										  Inputting a number as an optional parameter shows the top # results
-    
-	dull xpr clear <area>(optional)		- Clears the exp rate data for all the areas
-										  Optional parameter to only clear matching areas
-										  
-	dull gr <area or number>(optional)  - Gold rate for areas that have more than 5% of your total gold for the session 
-										  Inputting text as an optional parameter filters the list by area 
-										  Inputting a number as an optional parameter shows the top # results
-										  
-	dull gr clear <area>(optional)		- Clears the gold rate data for all the areas 
-										  Optional parameter to only clear matching areas
-	
-	Setting Reports:
-	dull settings
-	dull gags 
-	
-	Gags
-	------------------	
-	Mode: 
-	dull mode <normal|focused>
-	
-	Settings:	
-	dull <normal|focused> <xp|gold|tax|loot|sac|> <y|n>	
+Aardwolf character development tracking - campaigns, quests, gqs, levels, powerups,
+double exp, epics, exp and gold rates by area, and a session/total summary.
 
-	Data
-	------------------
-	dull clear total     - resets the overall totals to zero
-	dull clear session   - resets the current session to zero
-	dull xpr reset       - resets the xp rate counter	
-	dull refresh         - refreshes the info bar values
-  ]]>
+Type 'dull help' in game for the full command list.
+]]>
 </description>
 </plugin>
 
@@ -423,7 +356,7 @@
 		sequence="999" send_to="12"
 		script="Help"
 	>
-		<send>ColourNote("red", "black", "DullTracker: Invalid Command")</send>
+		<send>DTEcho("Not a command I know - here is the help:")</send>
 	</alias>
 
 	<!-- Reporting -->
@@ -690,9 +623,10 @@
 		showinfo = "y",		
 		highlight = "y",
 		mode = "normal",
-		valueColor = "@W",		
-		labelColor = "@D",
-		blabelColor = "@r",
+		-- standard theme: purple labels and brackets, cyan report name, green values
+		valueColor = "@x048",
+		labelColor = "@x099",
+		blabelColor = "@x045",
 		xprTimeout = "15",
 		xprSmooth = "10",
 	}
@@ -873,7 +807,7 @@
 					dispVal(qp)..dispLbl("qp")..
 					dailyString..trString..prString..tpString..
 					" "..dispVal(gold)..dispLbl("g")..
-					dispLbl("] ")..timeTaken
+					dispLbl("] ")..timeTaken..CPTimeStats(timers["cp"].last)
 					
 				table.insert(timers["cp"].history, reportString)
 				return reportString				
@@ -978,7 +912,7 @@
 								
 				local reportString = dispLbl("[")..dispBLbl(timer)..dispLbl(" #")..dispVal(count)..dispLbl("|")..
 					dispVal(regular)..dispLbl("qp")..luckyString..dbString..totalString..prString..trString..tpString..
-					dispLbl("] ")..dispVal(timeTaken)	
+					dispLbl("] ")..dispVal(timeTaken)..QuestTimeStats(timers["quest"].last)	
 				
 				table.insert(timers["quest"].history, reportString)
 				return reportString					
@@ -1012,7 +946,7 @@
 					dispVal(qp)..dispLbl("qp")..
 					trString..prString..tpString..
 					" "..dispVal(gold)..dispLbl("g")..
-					dispLbl("] ")..timeTaken
+					dispLbl("] ")..timeTaken..GQTimeStats(timers["gq"].last)
 					
 				table.insert(timers["gq"].history, reportString)
 				return reportString
@@ -1452,11 +1386,153 @@
 		
 	}				
 	
+	-------------------------
+	-- Help
+	-------------------------
+	-- Standard colour theme: purple brackets, cyan names, white text, green for anything
+	-- you actually type. The help lives here rather than in the plugin's <description> so
+	-- there is only one copy of it to keep up to date.
+	local CLR_TAG  = "#875FFF"
+	local CLR_NAME = "#00D7FF"
+	local CLR_MSG  = "#FFFFFF"
+	local CLR_HI   = "#00FF87"
+
+	local HELP_COL = 36   -- width of the command column, before the description
+
+	-- "[DullTracker] text value tail" in the theme colours. Whatever you pass as `value`
+	-- comes out in the highlight colour, so the number or setting being reported stands out.
+	function DTEcho(text, value, tail)
+		ColourTell(CLR_TAG, "", "[")
+		ColourTell(CLR_NAME, "", "DullTracker")
+		ColourTell(CLR_TAG, "", "] ")
+		ColourTell(CLR_MSG, "", text or "")
+		if (value ~= nil and value ~= "") then
+			ColourTell(CLR_HI, "", tostring(value))
+		end
+		ColourNote(CLR_MSG, "", tail or "")
+	end
+
+	function HelpVersion()
+		local v = string.format("%.2f", GetPluginInfo(GetPluginID(), 19) or 0)
+		v = string.gsub(v, "0$", "")
+		return v
+	end
+
+	function HelpTitle(text)
+		ColourTell(CLR_TAG, "", "==================== ")
+		ColourTell(CLR_NAME, "", text)
+		ColourNote(CLR_TAG, "", " ====================")
+	end
+
+	function HelpSection(text)
+		ColourNote("", "", "")
+		ColourTell(CLR_TAG, "", "[")
+		ColourTell(CLR_NAME, "", text)
+		ColourNote(CLR_TAG, "", "]")
+	end
+
+	-- "  command                  description"
+	function HelpCmd(cmd, desc)
+		ColourTell(CLR_HI, "", "  " .. cmd)
+
+		if (desc == nil or desc == "") then
+			ColourNote("", "", "")
+			return
+		end
+
+		local pad = HELP_COL - string.len(cmd) - 2
+		if (pad < 1) then pad = 1 end
+		ColourNote(CLR_MSG, "", string.rep(" ", pad) .. desc)
+	end
+
+	-- a plain wrapped line, indented under whatever came before it
+	function HelpText(text)
+		ColourNote(CLR_MSG, "", string.rep(" ", HELP_COL) .. (text or ""))
+	end
+
+	function HelpNote(text)
+		ColourNote(CLR_MSG, "", "  " .. (text or ""))
+	end
+
 	function Help()
-		ColourNote("orange", "black", GetPluginInfo (GetPluginID (), 3))
+		HelpTitle("Dull Tracker v" .. HelpVersion())
+
+		HelpSection("Reports")
+		HelpCmd("dull session <channel>",      "this session's gains")
+		HelpCmd("dull total <channel>",        "running totals, all sessions")
+		HelpCmd("dull double <channel>",       "your double exp runs")
+		HelpCmd("dull epic <channel>",         "this session's epic rewards")
+		HelpCmd("dull epiclife <channel>",     "lifetime epic rewards, all epics")
+		HelpCmd("dull epic<name> <channel>",   "one epic's lifetime record")
+		HelpText("e.g. dull epicterra - names are:")
+		HelpText("oc icefall1 icefall2 winds titan terra")
+		HelpText("inferno genie trans matron skd fractal fury")
+		HelpNote("The channel is optional everywhere - leave it off to see it yourself.")
+
+		HelpSection("History")
+		HelpCmd("dull <type> -h <#>",          "cp gq quest lvl pup dbl timed")
+		HelpNote("CP, quest and gq reports also show your fastest and average time,")
+		HelpNote("as [best 2m 29s | avg 5m 32s]. CP and quest times come from Search")
+		HelpNote("and Destroy's history; gq times are recorded here from now on. A run")
+		HelpNote("you wandered off from counts as the cap (cp 6m at 200+, 5m below,")
+		HelpNote("quest 2m) so one abandoned run can't drag the average.")
+
+		HelpSection("Timed session")
+		HelpCmd("dull timer <minutes>",        "start a timed session, reports when it ends")
+		HelpCmd("dull timer clear",            "cancel the running one")
+
+		HelpSection("Stats")
+		HelpCmd("dull stats <channel>",        "your stats")
+		HelpCmd("dull instinct <channel>",     "your instincts")
+		HelpCmd("dull mastery <channel>",      "your masteries")
+		HelpCmd("dull resists <channel>",      "your resistances")
+
+		HelpSection("Areas")
+		HelpCmd("dull xpr <area|#>",           "exp rate by area (over 5% of session exp)")
+		HelpCmd("dull gr <area|#>",            "gold rate by area (over 5% of session gold)")
+		HelpCmd("dull dps <area|#>",           "damage rate by area")
+		HelpCmd("dull <xpr|gr|dps> clear <area>", "clear that data, all or matching")
+		HelpNote("Text filters by area name, a number shows that many results.")
+
+		HelpSection("Gags")
+		HelpCmd("dull mode <normal|focused>",  "switch gag mode")
+		HelpCmd("dull <mode> <what> <y|n>",    "what: xp gold tax loot sac")
+		HelpCmd("dull gags",                   "show what is being gagged")
+
+		HelpSection("Settings")
+		HelpCmd("dull <setting> <value>",      "change a setting")
+		HelpCmd("dull settings",               "show them all")
+		HelpCmd("channel",                     "where reports go: a channel, or default")
+		HelpCmd("report",                      "report to that channel, y|n (y)")
+		HelpCmd("showinfo",                    "session data in the info bar, y|n (y)")
+		HelpCmd("highlight",                   "highlighting on or off, y|n (y)")
+		HelpCmd("valueColor",                  "colour for values (@W)")
+		HelpCmd("labelColor",                  "colour for labels (@D)")
+		HelpCmd("blabelColor",                 "colour for bright labels (@r)")
+		HelpCmd("xprSmooth",                   "how many recent kills the xpr averages (10)")
+		HelpCmd("xprTimeout",                  "quiet seconds that end an xpr streak (15)")
+
+		HelpSection("Data")
+		HelpCmd("dull clear session",          "reset this session to zero")
+		HelpCmd("dull clear total",            "reset the overall totals to zero")
+		HelpCmd("dull <xpr|gr|dps> reset",     "reset that rate counter")
+		HelpCmd("dull save session",           "snapshot this session")
+		HelpCmd("dull restore session",        "put back the snapshot (after a crash)")
+		HelpCmd("dull refresh",                "refresh the info bar")
+		ColourNote("", "", "")
 	end
 	
 	function NewVersionCleanup()
+		-- v2.4: move the report colours onto the standard theme. Done once - change any of
+		-- them afterwards (dull valueColor @W, etc) and the change sticks.
+		if (GetVariable("dt_theme") == nil) then
+			settings["labelColor"]  = "@x099"
+			settings["blabelColor"] = "@x045"
+			settings["valueColor"]  = "@x048"
+			SetVariable("dt_settings", serialize.save_simple(settings))
+			SetVariable("dt_theme", "1")
+		end
+
 		-- If instinct trains is just a number and not a table, it's old...
 		if totalData["tr"] ~= nil and tonumber(totalData["tr"]["instinct"]) ~= nil then
 			local oldInstinct = totalData["tr"]["instinct"]
@@ -1471,7 +1547,12 @@
 	end
 
 	function OnPluginInstall()
-		ColourNote("orange", "black", GetPluginInfo (GetPluginID (), 3))
+		ColourTell(CLR_TAG, "", "[")
+		ColourTell(CLR_NAME, "", "DullTracker")
+		ColourTell(CLR_TAG, "", "] ")
+		ColourTell(CLR_MSG, "", "v" .. HelpVersion() .. " loaded. Type ")
+		ColourTell(CLR_HI, "", "dull help")
+		ColourNote(CLR_MSG, "", " for commands.")
 
 		NewVersionCleanup()
 
@@ -1587,7 +1668,7 @@
 	function SaveSession()
 		SetVariable("dt_sessionData", serialize.save_simple(sessionData))
 		SaveState()   -- force the variables to disk NOW, not just on a clean shutdown
-		ColourNote("orange", "black", "Session saved")
+		DTEcho("Session saved.")
 	end
 
 	function SavePrevSession()
@@ -1611,7 +1692,7 @@
 	
 	function RestorePrevSession(name, line, wildcards)
 		if (prevSessionSaved == nil) then
-			ColourNote("orange", "black", "No previous session snapshot found.")
+			DTEcho("No previous session snapshot found.")
 			return
 		end
 		sessionData = {}
@@ -1619,21 +1700,21 @@
 			sessionData[k] = v
 		end
 		SetVariable("dt_sessionData", serialize.save_simple(sessionData))
-		ColourNote("orange", "black", "Session restored from snapshot saved at " .. prevSessionSaved)
+		DTEcho("Session restored from the snapshot saved at ", prevSessionSaved, ".")
 		ReportSessionInfo()
 	end
 
 	function ClearSession()
 		sessionData = {}
-		ColourNote("orange", "black", "Session cleared")
+		DTEcho("Session cleared.")
 	end
 	
 	function ShowVariables()
-		ColourNote("orange", "black", "data: " .. serialize.save_simple(sessionData))
+		ColourNote(CLR_MSG, "", "data: " .. serialize.save_simple(sessionData))
 	end	
 
 	function ShowTotalVariables()
-		ColourNote("orange", "black", "data: " .. serialize.save_simple(totalData))
+		ColourNote(CLR_MSG, "", "data: " .. serialize.save_simple(totalData))
 	end
 	
 	function SaveTotal()
@@ -1645,7 +1726,7 @@
 		totalStart = os.time()
 		SetVariable("dt_totalDataStart", tostring(os.time()))
 		SetVariable("dt_totalData", serialize.save_simple(totalData))
-		ColourNote("orange", "black", "Totals cleared")
+		DTEcho("Totals cleared.")
 	end
 	
 	--------------------------
@@ -1682,8 +1763,14 @@
 	function SumChain(str)
 		-- Sums a possibly +-delimited chain of numbers (e.g. "100+50+25" -> 175).
 		-- Plain single numbers pass through unchanged.
+		-- A plain number (including a NEGATIVE one from DecrementField/SharedGold) must
+		-- pass straight through - the old [0-9]+ scan dropped the minus sign, so every
+		-- decrement was silently added instead of subtracted (inflated gold totals).
+		local n = tonumber(str)
+		if (n ~= nil) then return n end
+
 		local total = 0
-		for num in string.gmatch(str, "[0-9]+") do
+		for num in string.gmatch(tostring(str), "-?[0-9]+") do
 			total = total + tonumber(num)
 		end
 		return total
@@ -1763,9 +1850,9 @@
 			rates.xprTimed.rate = 0
 			
 			AddTimer("timed_session_timer", 0, duration, 0, "", timer_flag.Enabled + timer_flag.OneShot, "TimedSessionEnd")
-			ColourNote("Orange", "", "Timed session started. Duration: " .. duration .. " minutes")
+			DTEcho("Timed session started - ", duration, " minutes.")
 		else
-			ColourNote("Orange", "", "A timed session is already running. Remaining: " .. timers["timed"].finish - os.time() .. " seconds")
+			DTEcho("A timed session is already running - ", timers["timed"].finish - os.time(), " seconds left.")
 		end
 	end
 	
@@ -1773,7 +1860,7 @@
 		timedSessionRunning = false
 		timedData = {}
 		DeleteTimer("timed_session_timer")
-		ColourNote("Orange", "", "Timed session cleared")
+		DTEcho("Timed session cleared.")
 	end
 	
 	function TimedSessionEnd(name, line, wildcards)		
@@ -1873,7 +1960,7 @@
 
 		-- DIAGNOSTIC (removable): announce each epic the moment it registers, so we can
 		-- see which start lines fire. Remove this block once the missing epic is found.
-		ColourNote("orange", "black", ">> [Epic counted] " .. (groupName:gsub("^epic_", "")) ..
+		DTEcho("Epic counted: ", (groupName:gsub("^epic_", "")),
 			"   (session epics now: " .. tostring((sessionData["count"] and sessionData["count"]["epic"]) or "?") .. ")")
 
 		EnableTriggerGroup(groupName, true)
@@ -1929,7 +2016,7 @@
 		EpicCreditDirect("count_epic", 1)
 		EpicLifeAdd("fury", "count", 1)
 		-- DIAGNOSTIC (removable): see EpicCaptureStart note
-		ColourNote("orange", "black", ">> [Epic counted] fury" ..
+		DTEcho("Epic counted: ", "fury",
 			"   (session epics now: " .. tostring((sessionData["count"] and sessionData["count"]["epic"]) or "?") .. ")")
 		SavePrevSession()
 	end
@@ -2030,6 +2117,157 @@
 		end
 	end
 
+	-------------------------
+	-- Best / average completion times
+	-------------------------
+	-- dull never stored raw durations - its history is a list of finished report strings -
+	-- so the CP and QUEST figures are read out of Search and Destroy's database
+	-- (SnDdb.db), which has kept a start_time and end_time for every quest and campaign
+	-- for years. GQ is the exception: SnD defines a global-quest history type but never
+	-- writes one, so GQ times are recorded here and build up from the next gq onward.
+	--
+	-- TIME CAPS: a campaign or quest taken and then left sitting while you do something
+	-- else records as a multi-hour run and drags the average with it. Anything over the
+	-- cap counts AS the cap - it still counts, it just can't run away with the average.
+	-- Nothing stored is altered (SnD's rows and dull's history keep their real times), so
+	-- setting a cap to 0 turns it off and the raw numbers come straight back.
+	TIME_CAP_CP_HIGH_LEVEL = 200      -- campaigns taken at this level or above...
+	TIME_CAP_CP_HIGH       = 6 * 60   -- ...are capped here
+	TIME_CAP_CP            = 5 * 60   -- campaigns taken at every level below it
+	TIME_CAP_QUEST         = 2 * 60   -- all quests, every level
+	TIME_CAP_GQ            = 0        -- global quests are not capped (0 = off)
+
+	local SND_TYPE_QUEST  = 1
+	local SND_TYPE_CP     = 3
+	local SND_STATUS_DONE = 2
+
+	local GQ_TIMES_KEEP = 200   -- how many gq durations to remember
+	local gqTimes = {}
+
+	function CapTime(seconds, cap)
+		if (cap ~= nil and cap > 0 and seconds > cap) then return cap end
+		return seconds
+	end
+
+	-- count / fastest / total (seconds) over SnD's completed rows of one type, cap applied.
+	-- Only rows that ended BEFORE the run being reported are counted, and the current run is
+	-- folded in by the caller - so it doesn't matter whether SnD has written its row yet
+	-- (campaigns are written half a second after the completion line, dull reports at 0.1s).
+	function SnDTimes(historyType, before, where, cap)
+		if (sqlite3 == nil) then return nil end
+
+		-- No SnD installed, no figures - and don't let sqlite create an empty db file
+		local probe = io.open(GetInfo(66) .. "/SnDdb.db", "r")
+		if (probe == nil) then return nil end
+		probe:close()
+
+		local durExpr = "(end_time - start_time)"
+		if (cap ~= nil and cap > 0) then
+			durExpr = string.format(
+				"(CASE WHEN (end_time - start_time) > %d THEN %d ELSE (end_time - start_time) END)",
+				cap, cap)
+		end
+
+		local sql = string.format(
+			"SELECT count(*) AS n, min(dur) AS best, sum(dur) AS total FROM (" ..
+			" SELECT %s AS dur FROM history" ..
+			" WHERE type = %d AND status = %d AND end_time IS NOT NULL AND end_time < %d%s)",
+			durExpr, historyType, SND_STATUS_DONE, before, (where or ""))
+
+		local stats = nil
+		local ok, err = pcall(function()
+			local db = sqlite3.open(GetInfo(66) .. "/SnDdb.db")
+			if (db == nil) then return end
+			for r in db:nrows(sql) do
+				if ((tonumber(r.n) or 0) > 0) then
+					stats = { count = tonumber(r.n), best = tonumber(r.best), total = tonumber(r.total) }
+				end
+			end
+			db:close_vm()
+		end)
+
+		if (not ok) then return nil end
+		return stats
+	end
+
+	-- Folds the run just finished into the stored figures and formats " [best X | avg Y]".
+	-- Returns "" when there is nothing to compare against yet.
+	function TimeStatsString(stats, current, cap)
+		if (current == nil or current <= 0) then return "" end
+
+		local count, best, total = 0, nil, 0
+		if (stats ~= nil) then count, best, total = stats.count, stats.best, stats.total end
+
+		local cur = CapTime(current, cap)
+		count = count + 1
+		total = total + cur
+		if (best == nil or cur < best) then best = cur end
+
+		if (count < 2) then return "" end
+
+		local avg = math.floor((total / count) + 0.5)
+		return dispLbl(" [best ") .. SecondsToMinutes(best) ..
+		       dispLbl(" | avg ") .. SecondsToMinutes(avg) .. dispLbl("]")
+	end
+
+	-- Campaigns are compared against your other campaigns AT THE SAME LEVEL, which is also
+	-- what picks the cap: level 200+ gets the longer allowance, everything below the shorter.
+	function CPTimeStats(seconds)
+		local level = tonumber(GetGmcp("char.status.level"))
+		local cap = TIME_CAP_CP
+		local where = ""
+
+		if (level ~= nil) then
+			if (level >= TIME_CAP_CP_HIGH_LEVEL) then cap = TIME_CAP_CP_HIGH end
+			where = " AND CAST(level_taken AS INTEGER) = " .. level
+		end
+
+		return TimeStatsString(SnDTimes(SND_TYPE_CP, timers["cp"].start, where, cap), seconds, cap)
+	end
+
+	-- Quests are compared against every quest you've finished, any level - a quest is a quest.
+	function QuestTimeStats(seconds)
+		return TimeStatsString(
+			SnDTimes(SND_TYPE_QUEST, timers["quest"].start, "", TIME_CAP_QUEST), seconds, TIME_CAP_QUEST)
+	end
+
+	-- GQs come from dull's own record, since SnD doesn't keep one. This one is added to the
+	-- record as it is reported, so the first gq after installing shows no figures yet.
+	function GQTimeStats(seconds)
+		local stats = nil
+		local count = table.getn(gqTimes)
+
+		if (count > 0) then
+			local best, total = nil, 0
+			for _, t in ipairs(gqTimes) do
+				local capped = CapTime(t, TIME_CAP_GQ)
+				total = total + capped
+				if (best == nil or capped < best) then best = capped end
+			end
+			stats = { count = count, best = best, total = total }
+		end
+
+		if (seconds ~= nil and seconds > 0) then
+			table.insert(gqTimes, seconds)
+			while (table.getn(gqTimes) > GQ_TIMES_KEEP) do table.remove(gqTimes, 1) end
+			SaveGqTimes()
+		end
+
+		return TimeStatsString(stats, seconds, TIME_CAP_GQ)
+	end
+
+	function SaveGqTimes()
+		SetVariable("dt_gqTimes", serialize.save_simple(gqTimes))
+	end
+
+	function LoadGqTimes()
+		if (GetVariable("dt_gqTimes") ~= nil) then
+			luastmt = "obj = " .. GetVariable("dt_gqTimes")
+			assert (loadstring (luastmt or "")) ()
+			if (type(obj) == "table") then gqTimes = obj end
+		end
+	end
+
 	-- timers whose history we persist across reloads
 	local historyTimers = { "cp", "lvl", "pup", "quest", "gq", "dbl", "timed" }
 	local HISTORY_KEEP = 50   -- cap each timer's stored history so it can't grow without bound
@@ -2056,6 +2294,8 @@
 				end
 			end
 		end
+
+		LoadGqTimes()
 	end
 	
 	-------------------------
@@ -2284,13 +2524,13 @@
 				if (string.find(area, areaFilter) ~= nil) then
 					areaXPR[area] = nil
 					
-					ColourNote("orange", "", "Area EXP Rate data cleared for: " .. area)
+					DTEcho("Exp rate data cleared for ", area, ".")
 				end
 			end
 		else			
 			areaXPR = {}
 			
-			ColourNote("orange", "", "All area EXP Rate data cleared")
+			DTEcho("All area exp rate data cleared.")
 		end
 	end
 	
@@ -2392,13 +2632,13 @@
 				if (string.find(area, areaFilter) ~= nil) then
 					areaGR[area] = nil
 					
-					ColourNote("orange", "", "Area Gold Rate data cleared for: " .. area)
+					DTEcho("Gold rate data cleared for ", area, ".")
 				end
 			end
 		else			
 			areaGR = {}
 			
-			ColourNote("orange", "", "All area Gold Rate data cleared")
+			DTEcho("All area gold rate data cleared.")
 		end
 	end
 	
@@ -2500,13 +2740,13 @@
 				if (string.find(area, areaFilter) ~= nil) then
 					areaDPS[area] = nil
 					
-					ColourNote("orange", "", "DPS data cleared for: " .. area)
+					DTEcho("DPS data cleared for ", area, ".")
 				end
 			end
 		else			
 			areaDPS = {}
 			
-			ColourNote("orange", "", "All area Gold Rate data cleared")
+			DTEcho("All area DPS data cleared.")
 		end
 	end
 	
@@ -2514,7 +2754,7 @@
 	-- Settings/Mode/Gags
 	-------------------------		
 	function SetSetting(name, line, wildcards)
-		ColourNote("orange", "black", wildcards[1] .. " set to: " .. wildcards[2])
+		DTEcho(wildcards[1] .. " set to ", wildcards[2], ".")
 		settings[wildcards[1]] = wildcards[2]
 		
 		-- special case from mode
@@ -2528,7 +2768,7 @@
 	function SetModeSetting(name, line, wildcards)	
 		gags[wildcards[1]][wildcards[2]] = wildcards[3]
 		
-		ColourNote("orange", "black", "gag for: " .. wildcards[1] .. " - " .. wildcards[2] .. " set to: " .. wildcards[3])
+		DTEcho(wildcards[1] .. " gag for " .. wildcards[2] .. " set to ", wildcards[3], ".")
 		
 		SetVariable("dt_gags", serialize.save_simple(gags))
 		SetGags(settings.mode)
@@ -2550,19 +2790,48 @@
 		end
 	end		
 	
+	-- pairs() has no order, so list the settings in an order that reads sensibly and
+	-- pick up anything not named here at the end - a new setting still shows up.
+	local settingOrder = { "channel", "report", "showinfo", "highlight", "mode",
+		"valueColor", "labelColor", "blabelColor", "xprSmooth", "xprTimeout" }
+
 	function ReportSettings()
+		DTEcho("Settings")
+
+		local shown = {}
+		local function line(setting, val)
+			local pad = 14 - string.len(setting)
+			if (pad < 1) then pad = 1 end
+			ColourTell(CLR_MSG, "", "  " .. setting .. string.rep(" ", pad))
+			ColourNote(CLR_HI, "", tostring(val))
+		end
+
+		for _, setting in ipairs(settingOrder) do
+			if (settings[setting] ~= nil) then
+				line(setting, settings[setting])
+				shown[setting] = true
+			end
+		end
+
 		for setting, val in pairs(settings) do
-			ColourNote("orange", "black", setting .. ": " .. val)
+			if (not shown[setting]) then line(setting, val) end
 		end
 	end
 	
 	function ReportGags()
+		DTEcho("Gags")
+
 		for mode, gagSettings in pairs(gags) do
-			ColourTell("orange", "black", mode .. " - ")
+			local pad = 10 - string.len(mode)
+			if (pad < 1) then pad = 1 end
+			ColourTell(CLR_MSG, "", "  " .. mode .. string.rep(" ", pad))
+
 			for gagType, val in pairs(gagSettings) do
-				ColourTell("orange", "black", gagType .. ":" .. val .. "  ")			
+				ColourTell(CLR_MSG, "", gagType .. ":")
+				ColourTell(CLR_HI, "", val .. "  ")
 			end
-			ColourNote("orange", "black", "")
+
+			ColourNote("", "", "")
 		end
 	end
 	
