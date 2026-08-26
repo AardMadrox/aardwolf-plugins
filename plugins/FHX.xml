@@ -11,7 +11,7 @@
    purpose="Repeatedly cast 'incomp' on self or others until healed"
    date_written="2026-06-21"
    requires="4.94"
-   version="3.5"
+   version="3.6"
 >
 
 <description>
@@ -34,6 +34,9 @@ you run low on mana, or you enter combat.
 
   fhx queue        show what's waiting ('fhx stop' empties it)
   fhx silent       hide the cast-by-cast lines (on/off too)
+  fhx time         which plugins are using the most client time
+  fhx cooldown <n> seconds auto waits between runs
+  fhx burst <n>    most casts auto may send after one fight (default 3)
   fhx auto         toggle auto-heal: heals after every fight, until done
                    (switches itself off when you leave the area)
   fhx auto on / fhx auto off   set it explicitly
@@ -74,6 +77,10 @@ watches the group leader instead - it queues a heal for them only when
 they're down more than 4000 HP. Everything else about auto is unchanged,
 and your own typed commands are never affected by this toggle.
 
+STAYING OUT OF YOUR WAY: auto sends one cast at a time and never adds to
+the queue while anything is still waiting there, so it cannot put your
+commands behind a pile of its own. A cooldown limits how often it engages.
+
 AUTO SWITCHES OFF WHEN YOU LEAVE: turning auto on remembers the area you
 were in (GMCP room.info 'zone'). Walk, recall or portal into a different
 area and auto turns itself off, so it never follows you somewhere you
@@ -81,14 +88,15 @@ didn't want it running. Exception: The Titans' Keep ('titan') and
 Transcendence ('transcend') count as one place, so crossing between them
 leaves auto running.
 
-AUTO: with 'fhx auto' on, 'hx low' is queued when combat ends and keeps
-going - one cast at a time - until nobody in the room is missing more than
-the player threshold. In leader mode it keeps healing the leader until
-they're back above the leader threshold. A run stops early if you run out
-of mana, can't concentrate, or a new fight starts, and picks up again when
-that fight ends. Auto never pushes the queue past 3 items and never makes
-more than 20 casts in one run. Commands you type by hand are not capped.
-The setting persists between sessions.
+AUTO: with 'fhx auto' on, 'hx low' is queued when combat ends. It sends at
+most 'fhx burst' casts (3 by default) for that fight, one at a time, and
+stops early once nobody is missing more than the player threshold - or, in
+leader mode, once the leader is back above the leader threshold. It never
+adds to the queue while anything is still waiting there, so auto can never
+be more than one command deep and you are never more than a burst behind.
+A run also stops early if you run out of mana, can't concentrate, or a new
+fight starts, and picks up when that fight ends. Commands you type by hand
+are not capped. The setting persists between sessions.
 
 SILENT: 'fhx silent' hides the running commentary - the cast-by-cast
 lines, queue progress and auto's chatter. Anything you typed a command to
@@ -378,6 +386,42 @@ the lowest person in the room is before each cast.
    </alias>
 
    <alias
+      name="fhx_burst"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx burst(?:\s+(\d+))?$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>SetBurst("%1")</send>
+   </alias>
+
+   <alias
+      name="fhx_cooldown"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx cooldown(?:\s+(\d+))?$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>SetCooldown("%1")</send>
+   </alias>
+
+   <alias
+      name="fhx_time"
+      enabled="y"
+      regexp="y"
+      ignore_case="y"
+      match="^fhx time$"
+      sequence="10"
+      send_to="12"
+   >
+   <send>ShowPluginTime()</send>
+   </alias>
+
+   <alias
       name="fhx_silent"
       enabled="y"
       regexp="y"
@@ -526,7 +570,11 @@ local FHX_WATCHDOG   = 10    -- stop if no heal-tick seen within this long
 local FHX_ONESHOT_TO = 8     -- give up waiting for a single 'hx' cast to land
 local FHX_QUEUE_MAX  = 20    -- most items one command may queue at once
 local FHX_AUTO_MAX   = 3     -- auto-heal won't push the queue past this
-local FHX_AUTO_CHAIN = 20    -- most casts one auto run will make
+FHX_AUTO_CHAIN = 3           -- most casts auto sends after one fight
+                             -- ('fhx burst <n>')
+-- A setting: 'fhx cooldown <n>'. Raise it to make auto engage less often
+-- over a long session.
+FHX_AUTO_COOLDOWN = 12  -- seconds before auto may start another run
 -- Both of these are settings, changed in game with 'fhx thresh <n>' and
 -- 'fhx leaderthresh <n>' and remembered between sessions.
 FHX_LOW_MIN_LOSS = 4000   -- 'low' ignores anyone missing less than this
@@ -633,6 +681,8 @@ function SaveSettings ()
   f:write ("silent=" .. (silent_mode and "1" or "0") .. "\n")
   f:write ("thresh=" .. FHX_LOW_MIN_LOSS .. "\n")
   f:write ("leaderthresh=" .. FHX_LEADER_LOSS .. "\n")
+  f:write ("cooldown=" .. FHX_AUTO_COOLDOWN .. "\n")
+  f:write ("burst=" .. FHX_AUTO_CHAIN .. "\n")
   f:write ("ignore=" .. table.concat (names, ",") .. "\n")
   f:close ()
   dbg ("settings written to " .. settingsFile)
@@ -658,6 +708,8 @@ function LoadSettings ()
   if got.silent       then silent_mode = (got.silent == "1") end
   if tonumber (got.thresh)       then FHX_LOW_MIN_LOSS = tonumber (got.thresh) end
   if tonumber (got.leaderthresh) then FHX_LEADER_LOSS  = tonumber (got.leaderthresh) end
+  if tonumber (got.cooldown)     then FHX_AUTO_COOLDOWN = tonumber (got.cooldown) end
+  if tonumber (got.burst)        then FHX_AUTO_CHAIN   = tonumber (got.burst) end
 
   ignore_list = {}
   for name in (got.ignore or ""):gmatch ("[^,]+") do
@@ -706,6 +758,7 @@ auto_low        = false    -- 'fhx auto': queue an 'hx low' when a fight ends
 auto_leader     = false    -- 'fhx auto leader': aim auto at the leader only
 auto_chain      = false    -- an auto run is in progress (keeps topping up)
 auto_casts      = 0        -- casts made in this auto run, against FHX_AUTO_CHAIN
+auto_last_run   = 0        -- when the last auto run started (cooldown)
 auto_skip       = {}       -- names the MUD called fully healed during this run
 auto_zone       = ""       -- area 'fhx auto' was switched on in; leaving it
                            -- switches auto back off
@@ -1129,6 +1182,18 @@ function Busy ()
   return healing_active or oneshot_pending
 end
 
+-- Words that belong to fhx's own commands. The 'fhx <player>' alias accepts
+-- any word, so without this an unknown or mistyped subcommand - or one from
+-- a newer version than the loaded plugin - is read as a player name, and the
+-- number after it as a repeat count. 'fhx yield 10' once queued ten casts at
+-- a player called "yield". Never again.
+local RESERVED = {}
+for w in ([[help stop regen incomp low queue q auto leader silent time thresh
+            leaderthresh yield cooldown burst ignore on off add remove del delete
+            list clear]]):gmatch ("%a+") do
+  RESERVED[w] = true
+end
+
 function ItemLabel (item)
   local cmd = (item.kind == "one") and "hx" or "fhx"
   if item.mode == "self" then return cmd .. " (self)" end
@@ -1142,6 +1207,15 @@ function Request (kind, mode, name, count)
   name = tostring (name or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
   if mode == "name" and name == "" then return end
 
+  -- a command word, not a person: say so instead of casting at it
+  if mode == "name" and RESERVED[string.lower (name)] then
+    cnote (tag .. "@x045'@W" .. name .. "@x045' is one of my own command words, " ..
+           "not a player - @Wnothing queued@x045.@w")
+    cnote (tag .. "@x099If you expected that to do something, this plugin may be " ..
+           "older than the command. '@Wfhx help@x099' lists what it knows.@w")
+    return
+  end
+
   -- don't waste casts on a pet golem / charmed mob, even if named directly
   if mode == "name" then
     local pet = GroupPetNamed (name)
@@ -1153,7 +1227,11 @@ function Request (kind, mode, name, count)
 
   count = tonumber (count) or 1
   if count < 1 then count = 1 end
-  if count > FHX_QUEUE_MAX then count = FHX_QUEUE_MAX end
+  if count > FHX_QUEUE_MAX then
+    cnote (tag .. "@x045that asked for @W" .. count .. "@x045 casts - capping at @W" ..
+           FHX_QUEUE_MAX .. "@x045. '@Wfhx stop@x045' clears the queue.@w")
+    count = FHX_QUEUE_MAX
+  end
 
   local item    = { kind = kind, mode = mode, name = name }
   local waiting = Busy () or not FHXReady ()
@@ -1235,6 +1313,33 @@ end
 -- Either with no number just reports the current value. 0 means "any
 -- damage at all". Both are remembered between sessions.
 -- ======================================================================
+function SetBurst (n)
+  n = tonumber (tostring (n or ""):match ("^%s*(%d+)%s*$") or "")
+  if not n then
+    cnote (tag .. "@x045auto sends at most @W" .. FHX_AUTO_CHAIN ..
+           "@x045 cast(s) per fight. '@Wfhx burst <number>@x045' to change it.@w")
+    return
+  end
+  if n < 1 then n = 1 end
+  FHX_AUTO_CHAIN = n
+  SaveSettings ()
+  cnote (tag .. "@x048auto now sends at most @W" .. n ..
+         "@x048 cast(s) after each fight@x045, one at a time.@w")
+end
+
+function SetCooldown (n)
+  n = tonumber (tostring (n or ""):match ("^%s*(%d+)%s*$") or "")
+  if not n then
+    cnote (tag .. "@x045auto waits @W" .. FHX_AUTO_COOLDOWN ..
+           "@x045s between runs. '@Wfhx cooldown <seconds>@x045' to change it.@w")
+    return
+  end
+  FHX_AUTO_COOLDOWN = n
+  SaveSettings ()
+  cnote (tag .. "@x048auto now waits @W" .. n .. "@x048s between runs@x045 - " ..
+         "raise this to have it heal less often over a long session.@w")
+end
+
 function SetLowThresh (n)
   n = tonumber (tostring (n or ""):match ("^%s*(%d+)%s*$") or "")
   if not n then
@@ -1360,9 +1465,9 @@ function SetAutoLow (word)
   if auto_low then
     local who = auto_leader
                 and ("the @Wgroup leader@x045 (down @W" .. FHX_LEADER_LOSS .. "@x045 hp)")
-                or "one '@Whx low@x045'"
-    cnote (tag .. "@x048auto-heal on@x045 - " .. who .. " after every fight, " ..
-           "up to @W" .. FHX_AUTO_MAX .. "@x045 waiting.@w")
+                or "whoever is lowest"
+    cnote (tag .. "@x048auto-heal on@x045 - " .. who .. " after every fight, at most @W" ..
+           FHX_AUTO_CHAIN .. "@x045 cast(s) each time.@w")
     if auto_zone ~= "" then
       cnote (tag .. "@x099tied to @W" .. auto_zone ..
              "@x099 - leaving the area switches it off.@w")
@@ -1466,6 +1571,12 @@ end
 -- Starts an auto run when a fight ends. The run keeps queueing casts, one
 -- at a time, until nobody is past the threshold any more.
 function AutoQueueLow ()
+  local held, why = AutoHeldBack ()
+  if held then
+    dbg ("auto: not starting a run - " .. why)
+    return
+  end
+  auto_last_run = os.time ()
   auto_chain = true
   auto_casts = 0
   auto_skip  = {}
@@ -1476,13 +1587,14 @@ end
 -- nothing left worth healing. Called again after every cast completes.
 function AutoTopUp ()
   if not auto_low or not auto_chain then return end
-  if #fhx_queue >= FHX_AUTO_MAX then
-    dbg ("auto: " .. #fhx_queue .. " already waiting - not adding")
+  -- never add while something is still waiting: auto stays at most one
+  -- command deep, so it can't put you behind a pile of its own casts
+  if #fhx_queue > 0 then
+    dbg ("auto: " .. #fhx_queue .. " still waiting - not adding")
     return
   end
   if auto_casts >= FHX_AUTO_CHAIN then
-    cnote (tag .. "@x045auto stopped after @W" .. auto_casts ..
-           "@x045 casts - run '@Wfhx auto@x045' again if that wasn't enough.@w")
+    dbg ("auto: burst of " .. auto_casts .. " done for this fight")
     auto_chain = false
     return
   end
@@ -1538,6 +1650,11 @@ function QueueShow ()
   end
   if silent_mode then
     cnote (tag .. "@x099silent mode is on.@w")
+  end
+  if auto_low then
+    cnote (tag .. "@x099heals at @W" .. FHX_LOW_MIN_LOSS .. "@x099 hp down, at most @W" ..
+           FHX_AUTO_CHAIN .. "@x099 cast(s) per fight, @W" ..
+           FHX_AUTO_COOLDOWN .. "@x099s between runs.@w")
   end
   if auto_low and auto_zone ~= "" then
     cnote (tag .. "@x099auto is tied to @W" .. auto_zone .. "@x099.@w")
@@ -1628,6 +1745,14 @@ function StopHealing (reason, pause, ok)
   end
 end
 
+-- True while auto should sit this one out: the last run was too recent.
+function AutoHeldBack ()
+  if os.time () - auto_last_run < FHX_AUTO_COOLDOWN then
+    return true, "cooling down"
+  end
+  return false
+end
+
 -- ======================================================================
 -- COMBAT DETECTION (stop healing when we enter a fight)
 -- ======================================================================
@@ -1667,6 +1792,52 @@ function OnPluginBroadcast (msg, id, name, text)
 end
 
 -- ======================================================================
+-- WHERE IS THE CLIENT'S TIME GOING? ('fhx time')
+-- MUSHclient tracks scripting time per plugin - GetPluginInfo(id, 24) - so
+-- this answers "is FHX the thing making me lag?" with a number rather than
+-- a guess. The figures are totals since the client started.
+-- ======================================================================
+function ShowPluginTime ()
+  local list = GetPluginList ()
+  if type (list) ~= "table" then
+    cnote (tag .. "@x045couldn't read the plugin list.@w")
+    return
+  end
+
+  local myid, rows, total = GetPluginID (), {}, 0
+  for _, id in ipairs (list) do
+    local secs = tonumber (GetPluginInfo (id, 24)) or 0
+    rows[#rows + 1] = { name = tostring (GetPluginInfo (id, 1) or id),
+                        secs = secs, me = (id == myid) }
+    total = total + secs
+  end
+  table.sort (rows, function (a, b) return a.secs > b.secs end)
+
+  Note ("")
+  cnote (tag .. "@x045scripting time since the client started@x099 - " ..
+         #rows .. " plugins, @W" .. string.format ("%.1f", total) .. "s@x099 total@w")
+  local shown = math.min (12, #rows)
+  for i = 1, shown do
+    local r = rows[i]
+    local pct = (total > 0) and (r.secs / total * 100) or 0
+    cnote (string.format ("  %s%2d. %-26s %8.2fs %5.1f%%%s",
+           r.me and "@x048" or "@w", i, r.name:sub (1, 26), r.secs, pct,
+           r.me and "  @x099<- this plugin@w" or ""))
+  end
+  for i, r in ipairs (rows) do
+    if r.me and i > shown then
+      cnote (string.format ("  @x048    %-26s %8.2fs  @x099(ranked #%d)@w",
+             r.name:sub (1, 26), r.secs, i))
+    end
+  end
+  Note ("")
+  cnote ("@x099Big numbers here mean the client is busy running that plugin's script.")
+  cnote ("@x099If your own commands feel slow but every number is small, the delay is")
+  cnote ("@x099coming from the MUD or the connection, not from a plugin.@w")
+  Note ("")
+end
+
+-- ======================================================================
 -- HELP
 -- ======================================================================
 function ShowHelp ()
@@ -1701,6 +1872,9 @@ function ShowHelp ()
   cnote ("  @Wfhx auto@x045        @x099 toggle auto-heal (also '@Wfhx auto on/off@x099')")
   cnote ("  @Wfhx auto leader@x045 @x099 aim auto at the group leader only")
   cnote ("  @Wfhx silent@x045      @x099 hide the cast-by-cast lines (on/off too)")
+  cnote ("  @Wfhx time@x045        @x099 which plugins are eating client time")
+  cnote ("  @Wfhx cooldown <n>@x045 @x099 seconds auto waits between runs")
+  cnote ("  @Wfhx burst <n>@x045   @x099 most casts auto sends after one fight")
   cnote ("  @Wfhx thresh <n>@x045  @x099 hp missing before '@Wlow@x099' will heal someone")
   cnote ("  @Wfhx leaderthresh <n>@x045 @x099 the same bar for '@Wauto leader@x099'")
   cnote ("  @x045-@x099 '@Wfhx stop@x099' is the off switch: it stops the current heal")
@@ -1709,8 +1883,10 @@ function ShowHelp ()
   cnote ("       going until nobody is down @W" .. FHX_LOW_MIN_LOSS .. "@x099 hp any more")
   cnote ("  @x045-@x099 auto switches itself off when you leave the area you")
   cnote ("       turned it on in (@Wtitan@x099 and @Wtranscend@x099 count as one area)")
-  cnote ("  @x045-@x099 a run stops early on no mana / new fight, and never queues")
-  cnote ("       more than @W3@x099 at once; typing more yourself is fine")
+  cnote ("  @x045-@x099 auto sends at most @W" .. FHX_AUTO_CHAIN .. "@x099 cast(s) per fight and never")
+  cnote ("       adds while one is still waiting, so it stays out of your way")
+  cnote ("  @x045-@x099 a run stops early on no mana or a new fight; typing more")
+  cnote ("       yourself is never capped")
   cnote ("  @x045-@x099 with @Wauto leader@x099 on, auto watches the group leader instead")
   cnote ("       and heals them until they're back above @W" .. FHX_LEADER_LOSS .. "@x099 hp")
   cnote ("  @x045-@x099 commands typed in combat @Wwait@x099 and fire when the fight ends")
@@ -1747,7 +1923,7 @@ function FHXLoaded ()
   pcall (function () Send_GMCP_Packet ("group on") end)
   if not LoadSettings () then MigrateOldSettings () end
   local mode = auto_low and (auto_leader and "on (leader)" or "on") or "off"
-  cnote (tag .. "@x045loaded@w @x099(v3.5)@w - spell: @W" .. SpellName () ..
+  cnote (tag .. "@x045loaded@w @x099(v3.6)@w - spell: @W" .. SpellName () ..
          "@w - auto: @W" .. mode ..
          (silent_mode and "@w - @Wsilent@w" or "@w") ..
          " - type '@Wfhx help@w' for commands.")
