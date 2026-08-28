@@ -20,6 +20,7 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 | **SKDMoonlight** | Finds the good moonlight room during the SKD taunt phase (`ml` / `mlf`). ⚠️ New — still needs live testing. |
 | **MarketWatch** | Watches the marketplace and the live auction/market channels for items on your list and gives you a one-click bid or buyout up to a maximum price you set per item (`marketw`). |
 | **Nokfah's Dull with Epic Bonus Reward tracking** | Character development tracker (`dull`) — session/lifetime XP, gold, QP, trains, TP, epics, and per-epic lifetime reward records (`dull epic<name>`). Modified from Nokfah's DullTracker. |
+| **RetreatFnSucks** | Retreat in one direction and keep retrying it on every `You FAIL to retreat!` (`re` `rw` `rn` `rs` `ru` `rd`), with on/off (`ret`) and a quiet mode (`retsilent`). ⚠️ New — still needs live testing. |
 
 ## Easiest way to install & stay updated: the Plugin Manager
 

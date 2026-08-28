@@ -1,0 +1,314 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="RetreatFnSucks"
+   author="Eric"
+   id="2dc788b7e62e4a249466673c"
+   language="Lua"
+   purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
+   date_written="2026-08-28"
+   version="1.3"
+   >
+</plugin>
+
+<!-- ================================================================= -->
+<!--  Aliases                                                          -->
+<!-- ================================================================= -->
+
+<aliases>
+  <alias
+   match="^r([ewnsdu])$"
+   enabled="y"
+   regexp="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatDir ("%1")</send>
+  </alias>
+
+  <alias
+   match="^reton$"
+   enabled="y"
+   regexp="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatSetOn (true)</send>
+  </alias>
+
+  <alias
+   match="^retoff$"
+   enabled="y"
+   regexp="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatSetOn (false)</send>
+  </alias>
+
+  <alias
+   match="^ret$"
+   enabled="y"
+   regexp="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatToggle ()</send>
+  </alias>
+
+  <alias
+   match="^retsilent$"
+   enabled="y"
+   regexp="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatToggleSilent ()</send>
+  </alias>
+
+  <alias
+   match="^ret\s*(?:help|\?)$"
+   enabled="y"
+   regexp="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatHelp ()</send>
+  </alias>
+</aliases>
+
+<!-- ================================================================= -->
+<!--  Trigger: the retreat failed - go again, same direction           -->
+<!-- ================================================================= -->
+
+<triggers>
+  <trigger
+   match="^You FAIL to retreat\!$"
+   enabled="y"
+   regexp="y"
+   keep_evaluating="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatFailed ()</send>
+  </trigger>
+</triggers>
+
+<script>
+<![CDATA[
+
+-- =====================================================================
+-- Colours (user's standard theme)
+--   x099 brackets / x045 name / W message / x048 highlight
+-- =====================================================================
+local CLR_TAG  = "#875FFF"   -- x099
+local CLR_NAME = "#00D7FF"   -- x045
+local CLR_MSG  = "#FFFFFF"   -- W
+local CLR_HI   = "#00FF87"   -- x048
+
+local TAG = "RetreatFnSucks"
+
+local function echo (msg)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", msg)
+end
+
+-- [RetreatFnSucks] <msg><HI hi><tail>
+local function echoHi (msg, hi, tail)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", msg, CLR_HI, "", hi, CLR_MSG, "", tail or "")
+end
+
+local function helpLine (left, right)
+  ColourNote (CLR_HI, "", string.format ("  %-10s", left), CLR_MSG, "", right)
+end
+
+-- =====================================================================
+-- Configuration
+-- =====================================================================
+local COMBAT_STATE = 8    -- char.status "state": fighting
+
+-- An attempt only stays live while the MUD is still answering us.  Each fail
+-- line refreshes it; if nothing happens for this long we assume the fight is
+-- long over and stop retrying on a stale direction.
+local STALE_SECS = 60
+
+local DIRS = {
+  e = "east",
+  w = "west",
+  n = "north",
+  s = "south",
+  u = "up",
+  d = "down",
+}
+
+-- =====================================================================
+-- State
+-- =====================================================================
+local gEnabled = true    -- reton / retoff / ret
+local gSilent  = false   -- retsilent: hide the per-retry "Retreat failed" line
+local gDir     = nil     -- direction word we are committed to, or nil
+local gLast    = 0       -- os.time () of the last retreat we sent
+local gTries   = 0       -- retreats sent this attempt
+local gVnum    = nil     -- last room.info vnum seen
+local gState   = nil     -- last char.status "state" seen (nil = not seen yet)
+
+-- The attempt is over: moved, out of combat, cancelled, or plugin off.
+local function clearAttempt ()
+  gDir   = nil
+  gTries = 0
+  gLast  = 0
+end
+
+local function attemptLive ()
+  return gDir ~= nil and (os.time () - gLast) <= STALE_SECS
+end
+
+-- Out of combat the aliases are plain shortcuts: the retreat still goes to
+-- the MUD, but no attempt is armed - there is nothing to retry, and nothing
+-- to conflict with the next direction you pick in a real fight.  gState is
+-- nil only before the first char.status of the session.
+local function inCombat ()
+  return gState == nil or gState == COMBAT_STATE
+end
+
+local function sendRetreat ()
+  gTries = gTries + 1
+  gLast  = os.time ()
+  Send ("retreat " .. gDir)
+end
+
+-- =====================================================================
+-- Alias callbacks
+-- =====================================================================
+
+-- re / rw / rn / rs / ru / rd
+function RetreatDir (letter)
+  local dir = DIRS[string.lower (letter or "")]
+  if not dir then return end
+
+  -- Plugin off, or not fighting: send it, but don't arm a retry.
+  if not gEnabled or not inCombat () then
+    clearAttempt ()
+    Send ("retreat " .. dir)
+    return
+  end
+
+  -- Already committed to a different direction on a live attempt: cancel,
+  -- and retry nothing until a direction is picked again.
+  if attemptLive () and gDir ~= dir then
+    clearAttempt ()
+    echo ("Conflicting Messages: Make Up Your Mind.")
+    return
+  end
+
+  if not attemptLive () then gTries = 0 end
+  gDir = dir
+  sendRetreat ()
+end
+
+function RetreatSetOn (on)
+  gEnabled = on and true or false
+  if not gEnabled then clearAttempt () end
+  SetVariable ("enabled", gEnabled and "1" or "0")
+  if gEnabled then
+    echoHi ("Auto-retry is ", "ON", " - a failed retreat repeats the same direction.")
+  else
+    echoHi ("Auto-retry is ", "OFF", " - re/rw/rn/rs/ru/rd still send one retreat.")
+  end
+end
+
+function RetreatToggle ()
+  RetreatSetOn (not gEnabled)
+end
+
+-- retsilent: hide/show the per-retry line.  Status, conflict and help
+-- messages still print either way.
+function RetreatToggleSilent ()
+  gSilent = not gSilent
+  SetVariable ("silent", gSilent and "1" or "0")
+  if gSilent then
+    echoHi ("Retry messages are ", "OFF", " - retrying quietly.")
+  else
+    echoHi ("Retry messages are ", "ON", " - each retry prints a line.")
+  end
+end
+
+function RetreatHelp ()
+  echo ("Retreat, and keep retreating, in one direction.")
+  helpLine ("re rw rn", "retreat east / west / north")
+  helpLine ("rs ru rd", "retreat south / up / down")
+  helpLine ("reton",    "turn auto-retry on")
+  helpLine ("retoff",   "turn auto-retry off")
+  helpLine ("ret",       "toggle auto-retry")
+  helpLine ("retsilent", "toggle the per-retry message")
+  helpLine ("ret help",  "this screen")
+  ColourNote (CLR_MSG, "", "  Every ",
+              CLR_HI,  "", "You FAIL to retreat!",
+              CLR_MSG, "", " sends the same direction again, as many")
+  ColourNote (CLR_MSG, "", "  times as it takes.  Picking a different direction mid-attempt cancels it.")
+  echoHi ("Currently ", gEnabled and "ON" or "OFF",
+          (gDir and (", retreating " .. gDir) or "") ..
+          (gSilent and ", retry messages off." or "."))
+end
+
+-- =====================================================================
+-- Trigger callback: "You FAIL to retreat!"
+-- =====================================================================
+function RetreatFailed ()
+  if not gEnabled then return end
+  if not attemptLive () then return end
+  sendRetreat ()
+  if not gSilent then
+    echoHi ("Retreat failed - going ", gDir, " again (try " .. gTries .. ").")
+  end
+end
+
+-- =====================================================================
+-- GMCP (telnet option 201) - end the attempt once it is resolved
+-- =====================================================================
+function OnPluginTelnetSubnegotiation (theType, data)
+  if theType ~= 201 then return end
+
+  local message = string.match (data, "^([%w%.%-_]+)")
+  if not message then return end
+  message = string.lower (message)
+
+  -- Moved rooms: the retreat worked (or something else moved us).
+  if message == "room.info" then
+    local vnum = string.match (data, '"num"%s*:%s*"?(%-?%d+)"?')
+    if vnum and vnum ~= gVnum then
+      gVnum = vnum
+      if gDir then clearAttempt () end
+    end
+    return
+  end
+
+  -- Out of combat: nothing left to retreat from.
+  if message == "char.status" then
+    local st = tonumber (string.match (data, '"state"%s*:%s*(%d+)') or "")
+    if st then
+      gState = st
+      if st ~= COMBAT_STATE and gDir then clearAttempt () end
+    end
+  end
+end
+
+-- =====================================================================
+-- Housekeeping
+-- =====================================================================
+function OnPluginInstall ()
+  gEnabled = GetVariable ("enabled") ~= "0"
+  gSilent  = GetVariable ("silent")  == "1"
+  clearAttempt ()
+end
+
+function OnPluginSaveState ()
+  SetVariable ("enabled", gEnabled and "1" or "0")
+  SetVariable ("silent",  gSilent  and "1" or "0")
+end
+
+]]>
+</script>
+</muclient>
