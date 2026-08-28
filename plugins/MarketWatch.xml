@@ -37,7 +37,7 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="3.1"
+   version="3.5"
 >
 </plugin>
 
@@ -73,6 +73,18 @@
    match="only carrying [\d,]+ gold piece"
    script="MW_NotEnoughGold">
   </trigger>
+  <!-- "Auction: A Trivia Point Token SOLD to Madrox for 12,000,665 gold." -->
+  <trigger
+   enabled="y" regexp="y" keep_evaluating="y" sequence="100"
+   match="SOLD to \S+ for [\d,]+ gold"
+   script="MW_AuctionSold">
+  </trigger>
+  <!-- "Market: <item> (Level 198, Num 64808) sold to Pigmao for 5,250,000 Gold." -->
+  <trigger
+   enabled="y" regexp="y" keep_evaluating="y" sequence="100"
+   match="\(Level \d+, Num \d+\) sold to "
+   script="MW_MarketSold">
+  </trigger>
   <!-- diagnostic only: "marketw auc debug" turns this on to capture line variants -->
   <trigger
    enabled="n" regexp="y" keep_evaluating="y" sequence="99"
@@ -100,6 +112,7 @@
   <alias match="^(?:marketw|marketwatch) bids$"         enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Bids"   sequence="88"></alias>
   <alias match="^(?:marketw|marketwatch) auc ?(.*)$"    enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Auc"    sequence="85"></alias>
   <alias match="^(?:marketw|marketwatch) mkt ?(.*)$"    enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Mkt"    sequence="85"></alias>
+  <alias match="^(?:marketw|marketwatch) popup ?(.*)$"  enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Popup"  sequence="85"></alias>
   <alias match="^(?:marketw|marketwatch) withdrawroom(?: (.*))?$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_WithdrawRoom" sequence="86"></alias>
   <alias match="^(?:marketw|marketwatch) withdraw(?: (.*))?$"     enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Withdraw"     sequence="85"></alias>
 
@@ -308,6 +321,7 @@ gCfg = {
   auc         = true,                        -- watch the auction channel at all
   mkt         = true,                        -- watch the market channel too
   aucdebug    = false,
+  popup        = true,    -- pop a window up for act-now opportunities
   withdraw     = false,   -- pull gold from the bank when a bid falls short
   withdrawroom = 0,       -- only ever do that in this room (0 = unset)
   deep        = false,    -- probe EVERY truncated row, not just likely ones
@@ -870,6 +884,359 @@ function MW_ListTimeout ()
 end
 
 -- =====================================================================
+-- The pop-up prompt window
+--
+-- Appears when a watched item shows up somewhere you can act on right now:
+-- a new market listing whose buyout is at or under your max, or a live
+-- auction.  Each entry gets a link that does the thing; one "No" closes it.
+--
+-- Built on the client's themed_miniwindows.  A TextRect hyperlink whose text
+-- is not a URL is run through loadstring(), so the link text below is plain
+-- Lua that calls back into this plugin.
+-- =====================================================================
+local gHaveWin = pcall (require, "themed_miniwindows")
+
+local WIN_ID    = "MarketWatch_prompt"
+local POPUP_TTL = 60    -- seconds a prompt stays up if you never answer it
+local gWin      = nil
+local gPrompts  = {}    -- see popupAdd for the entry shape
+
+local popupClose, popupBuild
+
+local gColCache = {}
+local function col (hex)
+  if not gColCache [hex] then gColCache [hex] = ColourNameToRGB (hex) end
+  return gColCache [hex]
+end
+
+-- Build one line of MUSHclient style runs plus its hyperlink list.
+-- Positions are counted over the VISIBLE text only, which is what TextRect
+-- indexes against - hence building styles directly instead of colour codes.
+local function promptLine (segs)
+  local styles, links, pos = {}, {}, 1
+  for _, s in ipairs (segs) do
+    if s.text ~= "" then
+      styles [#styles + 1] = { text = s.text, textcolour = col (s.colour or CLR_MSG) }
+      if s.code then
+        links [#links + 1] = { start = pos, stop = pos + #s.text - 1,
+                               text = s.code, label = s.tip }
+      end
+      pos = pos + #s.text
+    end
+  end
+  return styles, links
+end
+
+-- Tearing the window down from inside one of its OWN hotspot callbacks (which
+-- is where a link click runs) leaves MUSHclient with live hotspots pointing at
+-- an object that no longer exists: the window stays on screen, the close button
+-- does nothing, and the next right-click dies in RightClickMenuCallback with a
+-- nil window.  So every teardown is pushed onto a timer and happens after the
+-- callback has returned.  The library's own close button defers for the same
+-- reason (it calls delete(true)).
+function MW_PopupDestroy ()
+  local w = gWin
+  gWin     = nil
+  gPrompts = {}
+  if w then pcall (function () w:delete (true) end) end
+  pcall (WindowDelete, WIN_ID)   -- also clears a window left behind by a
+  pcall (Repaint)                -- half-finished teardown
+end
+
+function MW_PopupRefresh ()
+  popupBuild ()
+end
+
+popupClose = function ()
+  gPrompts = {}
+  -- Hide it right now: hiding is safe from inside a hotspot callback, and it
+  -- makes the window go away the instant you click, rather than a tick later.
+  pcall (WindowShow, WIN_ID, false)
+  pcall (Repaint)
+  -- ...then destroy it properly once the callback has returned.  0.2 rather
+  -- than a smaller value because MUSHclient timers will not go below ~0.1s.
+  DoAfterSpecial (0.2, "MW_PopupDestroy ()", sendto.script)
+end
+
+popupBuild = function ()
+  if not gHaveWin then return end
+  if #gPrompts == 0 then popupClose () return end
+
+  -- Never reuse an object the library no longer knows about.  If a teardown
+  -- went wrong the old one is a zombie: its hotspots are live but its entry in
+  -- window_map is gone, and touching it is what produced the nil-window error.
+  if gWin and not (ThemedWindowClass and ThemedWindowClass.window_map
+                   and ThemedWindowClass.window_map [WIN_ID]) then
+    gWin = nil
+    pcall (WindowDelete, WIN_ID)
+  end
+
+  if not gWin then
+    local ok, w = pcall (ThemedTextWindow,
+      WIN_ID,          -- id
+      200, 150,        -- default left, top
+      460, 160,        -- default width, height
+      "MarketWatch",   -- title
+      "center",        -- title alignment
+      true,            -- is_temporary: gives the title-bar close button
+      false,           -- resizeable
+      false,           -- text_scrollable
+      false,           -- text_selectable
+      false,           -- text_copyable
+      false,           -- url_hyperlinks: no auto URL detection (ours are explicit)
+      true,            -- autowrap
+      nil, nil,        -- title font
+      nil, nil,        -- text font
+      60,              -- max lines
+      nil,             -- padding
+      true,            -- defer showing until we have drawn
+      false, nil,
+      "Dismiss")
+    if not ok or not w then
+      gHaveWin = false
+      dbg ("pop-up window unavailable: " .. tostring (w))
+      return
+    end
+    gWin = w
+    -- the [x] button and our No link should behave the same
+    local prior = gWin.do_on_delete
+    gWin.do_on_delete = function (self)
+      if prior then prior (self) end
+      gWin     = nil
+      gPrompts = {}
+    end
+  end
+
+  gWin:clear (false)
+
+  for _, p in ipairs (gPrompts) do
+    local s, l = promptLine { { text = p.name, colour = CLR_HI } }
+    gWin:add_text (s, false, l)
+
+    s, l = promptLine { { text = "  " .. p.note, colour = CLR_MSG } }
+    gWin:add_text (s, false, l)
+
+    if p.problem then
+      s, l = promptLine { { text = "  " .. p.problem, colour = CLR_NAME } }
+      gWin:add_text (s, false, l)
+    end
+
+    if p.pending then
+      -- buttons hidden while we wait, so it cannot be sent twice
+      s, l = promptLine { { text = "  sending...", colour = CLR_TAG } }
+      gWin:add_text (s, false, l)
+    else
+      -- indent kept out of the links so only the buttons are clickable
+      local segs = { { text = "  " } }
+      if p.bid then
+        segs [#segs + 1] = {
+          text = "[ BID " .. commafy (p.bid) .. " ]", colour = CLR_HI,
+          code = string.format ("MW_PopupAct(%d,%q)", p.id, p.bidkind),
+          tip  = "Send the bid now" }
+        if p.buy then segs [#segs + 1] = { text = "   " } end
+      end
+      if p.buy then
+        segs [#segs + 1] = {
+          text = "[ BUY IT NOW " .. commafy (p.buy) .. " ]", colour = CLR_NAME,
+          code = string.format ("MW_PopupAct(%d,\"buy\")", p.id),
+          tip  = "Win it outright now" }
+      end
+      s, l = promptLine (segs)
+      gWin:add_text (s, false, l)
+    end
+  end
+
+  local s, l = promptLine {
+    { text = "  " },
+    { text = "[ No ]", colour = CLR_NAME,
+      code = "MW_PopupNo()", tip = "Close this window and do nothing" },
+  }
+  gWin:add_text (s, false, l)
+
+  pcall (function () gWin:fit_contents (700, 400) end)
+  gWin:draw ()
+  gWin:show ()
+  -- We are usually inside a trigger or timer here, and MUSHclient holds the
+  -- screen until that returns - without this the window does not appear until
+  -- something else happens to repaint.
+  pcall (Repaint)
+end
+
+-- Add a prompt.  Returns true when the pop-up has taken responsibility for
+-- this item, so the caller can skip its normal echo and not say it twice.
+--
+-- p = { id, family = "mkt"|"auc", num, name, note,
+--       bid = <amount>, bidkind = "bid"|"auc",   -- optional
+--       buy = <buyout> }                          -- optional
+local gPromptSeq = 0
+
+local function popupAdd (p)
+  if not gCfg.popup or not gHaveWin then return false end
+  for _, q in ipairs (gPrompts) do
+    -- market and auction numbers are different spaces, so match on both
+    if q.num == p.num and q.family == p.family then return true end
+  end
+  gPromptSeq = gPromptSeq + 1
+  p.id   = gPromptSeq
+  p.when = os.time ()
+  gPrompts [#gPrompts + 1] = p
+  popupBuild ()
+  -- Never leave it sitting there if nobody is at the keyboard.
+  DoAfterSpecial (POPUP_TTL + 1, "MW_PopupExpire ()", sendto.script)
+  -- Only claim it if a window really exists now.  If the build failed the
+  -- item must go back to the normal echo rather than vanish from both.
+  if not gWin then
+    for i, q in ipairs (gPrompts) do
+      if q.id == p.id then table.remove (gPrompts, i) break end
+    end
+    return false
+  end
+  return true
+end
+
+-- Called by a link click.  The id makes this unambiguous - matching on the
+-- item number alone could hit the wrong entry, since auction 97 and market 97
+-- are different items.
+function MW_PopupAct (id, action)
+  id = tonumber (id)
+  if not id then return end
+  local target
+  for _, p in ipairs (gPrompts) do
+    if p.id == id then target = p break end
+  end
+  if not target then return end
+  if target.pending then return end   -- already waiting on this one
+
+  -- The prompt is NOT removed here.  Whether the bid actually goes through is
+  -- only known once the MUD answers, and if it fails for want of gold the
+  -- window has to stay up with the buttons still on it.
+  target.pending = true
+  target.problem = nil
+  target.when    = os.time ()         -- restart its expiry clock
+
+  local num = target.num
+  if action == "auc" then
+    MW_Click_AucBid (nil, nil, { tostring (num) })
+  elseif action == "buy" then
+    MW_Click_Buy (nil, nil, { tostring (num) })
+  else
+    MW_Click_Bid (nil, nil, { tostring (num) })
+  end
+  -- redraw once we are out of the click callback, same reasoning as the
+  -- deferred teardown above
+  DoAfterSpecial (0.2, "MW_PopupRefresh ()", sendto.script)
+  DoAfterSpecial (6, "MW_PopupSettle (" .. id .. ")", sendto.script)
+end
+
+-- A few seconds after acting, decide what happened.  The ledger is the
+-- evidence: a bid that went through is recorded there, and one that failed
+-- has been un-recorded again by MW_NotEnoughGold.
+function MW_PopupSettle (id)
+  id = tonumber (id)
+  local target, index
+  for i, p in ipairs (gPrompts) do
+    if p.id == id then target, index = p, i break end
+  end
+  if not target or not target.pending then return end
+
+  local placed = (target.family == "auc") and gAucBid [target.num]
+                 or (target.family ~= "auc") and gBid [target.num]
+
+  if placed then
+    target.pending = false
+    table.remove (gPrompts, index)    -- done with it
+    popupBuild ()
+    return
+  end
+
+  -- Not recorded yet.  A market bid re-reads the item with a silent lbid
+  -- first, which can outlast this timer, so give it a couple more goes before
+  -- calling it a failure.
+  target.settleTries = (target.settleTries or 0) + 1
+  if target.settleTries < 3 then
+    DoAfterSpecial (6, "MW_PopupSettle (" .. id .. ")", sendto.script)
+    return
+  end
+
+  target.pending = false
+  if not target.problem then
+    target.problem = "that did not go through - still yours to take"
+  end
+  popupBuild ()
+end
+
+-- Called when the MUD refuses a bid.  Keeps the prompt on screen, says why.
+local function popupFail (family, num, message)
+  for _, p in ipairs (gPrompts) do
+    if p.num == num and p.family == family then
+      p.pending = false
+      p.problem = message
+      p.when    = os.time ()          -- give it a fresh minute to act on
+      popupBuild ()
+      return true
+    end
+  end
+  return false
+end
+
+function MW_PopupNo ()
+  popupClose ()
+end
+
+-- Drop anything that has sat unanswered for too long.
+function MW_PopupExpire ()
+  local now, kept = os.time (), {}
+  for _, p in ipairs (gPrompts) do
+    if now - (p.when or 0) < POPUP_TTL then kept [#kept + 1] = p end
+  end
+  if #kept == #gPrompts then return end
+  gPrompts = kept
+  popupBuild ()          -- closes the window if that emptied it
+end
+
+-- Drop the prompt for an item that is no longer for sale.  Called from the
+-- "sold" lines on both channels - who won does not matter, the chance is gone.
+local function popupDrop (family, num, name)
+  local kept, dropped = {}, false
+  local target = name and norm (name) or nil
+  for _, p in ipairs (gPrompts) do
+    local hit = (p.family == family)
+                and ((num and p.num == num)
+                     or (target and target ~= "" and norm (p.name) == target))
+    if hit then dropped = true else kept [#kept + 1] = p end
+  end
+  if not dropped then return end
+  gPrompts = kept
+  popupBuild ()
+end
+
+-- "Auction: A Trivia Point Token SOLD to Madrox for 12,000,665 gold."
+function MW_AuctionSold (name, line, wildcards)
+  line = tostring (line)
+  -- the market's own sold line carries a "Num nnnnn" - that one is not ours
+  if line:find ("Num%s+%d+") then return end
+  local item = line:match ("^%s*[Aa]uction:%s*(.-)%s+SOLD to")
+            or line:match ("^%s*(.-)%s+SOLD to")
+  if not item or item == "" then return end
+  popupDrop ("auc", nil, item)
+end
+
+-- "Market: (Vibrant) {>-Long dark green leaf-<} (Level 198, Num 64808) sold to Pigmao for 5,250,000 Gold."
+function MW_MarketSold (name, line, wildcards)
+  local num = tonumber (tostring (line):match ("%(Level%s+%d+,%s*Num%s+(%d+)%)%s+sold to"))
+  if not num then return end
+  popupDrop ("mkt", num, nil)
+  -- it has left the market, so the ledgers should forget it now rather than
+  -- waiting for the next scan to notice
+  if gBid [num] or gKnownBuyout [num] then
+    gBid [num] = nil
+    gKnownBuyout [num] = nil
+    saveData ()
+  end
+  gRows [num] = nil
+end
+
+-- =====================================================================
 -- The LIVE auction channel
 --
 -- Sample line this was written against:
@@ -937,15 +1304,18 @@ function MW_AuctionLine (name, line, wildcards)
 
   gAuc [num] = { name = item, level = level, bid = cur, entry = w, when = now }
 
+  -- Auctions are over in minutes, so every one of these gets the pop-up.
+  -- When the window takes it, the echo below would only say it twice.
+  if popupAdd { family = "auc", num = num, name = item,
+                bid = w.max, bidkind = "auc",
+                note = (cur and ("current bid " .. commafy (cur) .. "   ") or "") ..
+                       "your max " .. commafy (w.max) } then
+    return
+  end
+
   echoHi ("auction match: ", item,
           string.format ("   (Num %d, L%s%s)", num, tostring (level or "?"),
                          cur and (", bid " .. commafy (cur)) or ""))
-
-  local reasons = {}
-  if #reasons > 0 then
-    ColourNote (CLR_WARN, "", "        no bid link: " .. table.concat (reasons, "; "))
-    return
-  end
 
   local preview = CMD_AUC:gsub ("%$num", intstr (num)):gsub ("%$amt", intstr (w.max))
   ColourTell (CLR_MSG, "", "        ")
@@ -1072,14 +1442,6 @@ function MW_AnnounceRender (num)
   local w  = row.entry
   local st = row.stats
 
-  echoHi ("market listing: ", row.visible,
-          string.format ("   (Num %d, L%s, %s)", num,
-                         tostring (row.level or "?"), tostring (row.ctype)))
-
-  local detail = string.format ("        matches %q   your max %s", w.raw, commafy (w.max))
-  if st and st.buyout then detail = detail .. "   buyout " .. commafy (st.buyout) end
-  ColourNote (CLR_DIM, "", detail)
-
   local reasons = {}
   if row.ctype ~= "Gold" then
     reasons [#reasons + 1] = "not a gold auction"
@@ -1087,6 +1449,24 @@ function MW_AnnounceRender (num)
 
   local canBuy = st and st.buyout and w.max >= st.buyout
                  and row.ctype == "Gold"
+
+  -- A buyout you can actually afford is the one market case worth
+  -- interrupting for.  The window then carries BOTH actions, so the echo
+  -- below is skipped rather than repeating it all.
+  if canBuy and popupAdd { family = "mkt", num = num, name = row.visible,
+                           bid = w.max, bidkind = "bid", buy = st.buyout,
+                           note = "buyout " .. commafy (st.buyout) ..
+                                  "   your max " .. commafy (w.max) } then
+    return
+  end
+
+  echoHi ("market listing: ", row.visible,
+          string.format ("   (Num %d, L%s, %s)", num,
+                         tostring (row.level or "?"), tostring (row.ctype)))
+
+  local detail = string.format ("        matches %q   your max %s", w.raw, commafy (w.max))
+  if st and st.buyout then detail = detail .. "   buyout " .. commafy (st.buyout) end
+  ColourNote (CLR_DIM, "", detail)
 
   if #reasons > 0 then
     ColourNote (CLR_WARN, "", "        no bid link: " .. table.concat (reasons, "; "))
@@ -1143,6 +1523,12 @@ function MW_NotEnoughGold (name, line, wildcards)
   -- would stay hidden from every future scan for something we never bought.
   if b.auction then gAucBid [b.num] = nil else gBid [b.num] = nil end
   saveData ()
+
+  -- If this came from the pop-up, keep the window open and say why, with the
+  -- buttons live again so it can be retried once there is gold in hand.
+  popupFail (b.auction and "auc" or "mkt", b.num,
+             "not enough gold on hand - nothing was sent" ..
+             (carrying and (" (carrying " .. commafy (carrying) .. ")") or ""))
 
   local retryAlias = b.auction and ("mwaucbid " .. b.num) or ("mwbid " .. b.num)
 
@@ -1254,6 +1640,26 @@ function MW_Cmd_WithdrawRoom (name, line, wildcards)
   gCfg.withdrawroom = num
   saveData ()
   echoHi ("withdrawals will only be done in room ", tostring (num), ".")
+end
+
+function MW_Cmd_Popup (name, line, wildcards)
+  local arg = trim (wildcards [1]):lower ()
+  if arg == "on"  then gCfg.popup = true
+  elseif arg == "off" then gCfg.popup = false popupClose ()
+  elseif arg == "close" then popupClose () echo ("closing the pop-up.") return
+  elseif arg == "" then
+    echoHi ("pop-up prompts are ", gCfg.popup and "ON" or "OFF", "")
+    if not gHaveWin then
+      ColourNote (CLR_DIM, "", "  (themed_miniwindows did not load - no window is possible)")
+    end
+    ColourNote (CLR_DIM, "", "  marketw popup on|off")
+    return
+  else
+    warn ("usage: marketw popup on|off")
+    return
+  end
+  saveData ()
+  echoHi ("pop-up prompts are ", gCfg.popup and "ON" or "OFF", "")
 end
 
 function MW_Cmd_Mkt (name, line, wildcards)
@@ -1515,6 +1921,7 @@ function MW_Cmd_Help ()
   Note ("")
   helpLine ("marketw auc on|off|debug",     "watch the live auction channel")
   helpLine ("marketw mkt on|off",           "watch the market channel for new listings")
+  helpLine ("marketw popup on|off",         "pop a window up for buyouts and auctions")
   Note ("")
   helpLine ("marketw withdraw on|off",      "top up from the bank when a bid falls short")
   helpLine ("marketw withdrawroom here",    "only ever withdraw in this room")
@@ -1709,6 +2116,7 @@ end
 -- =====================================================================
 function OnPluginInstall ()
   loadData ()
+  pcall (WindowDelete, "MarketWatch_prompt")   -- clear anything left behind
   EnableTrigger ("mw_auc_debug", gCfg.aucdebug and true or false)
   if not gHaveCapture then
     warn ("wrapped_captures.lua did not load - scanning will not work.")
@@ -1725,6 +2133,7 @@ end
 
 function OnPluginClose ()
   saveData ()
+  popupClose ()
 end
 
 ]]>

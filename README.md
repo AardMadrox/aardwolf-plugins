@@ -18,7 +18,7 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 | **MatronReporter** | Times Matron Dragon runs and reports rewards. |
 | **SKDReport** | Times SKD runs and reports trains/gold/TP/Repop Token/Sigil rewards. |
 | **SKDMoonlight** | Finds the good moonlight room during the SKD taunt phase (`ml` / `mlf`). ⚠️ New — still needs live testing. |
-| **MarketWatch** | Watches the marketplace and the live auction/market channels for items on your list and gives you a one-click bid or buyout up to a maximum price you set per item (`marketw`). |
+| **MarketWatch** | Watches the marketplace and the live auction/market channels for items on your list and gives you a one-click bid or buyout up to a maximum price you set per item (`marketw`), optionally as a pop-up window (`marketw popup on`). |
 | **Nokfah's Dull with Epic Bonus Reward tracking** | Character development tracker (`dull`) — session/lifetime XP, gold, QP, trains, TP, epics, and per-epic lifetime reward records (`dull epic<name>`). Modified from Nokfah's DullTracker. |
 | **RetreatFnSucks** | Retreat in one direction and keep retrying it on every `You FAIL to retreat!` (`re` `rw` `rn` `rs` `ru` `rd`), with on/off (`ret`) and a quiet mode (`retsilent`). ⚠️ New — still needs live testing. |
 
