@@ -8,7 +8,7 @@
    language="Lua"
    purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
    date_written="2026-08-28"
-   version="1.3"
+   version="1.8"
    >
 </plugin>
 
@@ -134,6 +134,20 @@ local COMBAT_STATE = 8    -- char.status "state": fighting
 -- long over and stop retrying on a stale direction.
 local STALE_SECS = 60
 
+-- How many directions can be stacked up: the leg we are doing now plus two
+-- behind it.  Picking one more than this cancels the lot.
+local QUEUE_MAX = 3
+
+-- After a retreat lands we wait for the next char.status to say whether the
+-- mob in the new room has us fighting again.  It arrives with the next prompt;
+-- this is only a fail-safe in case one never does.
+local VERDICT_SECS = 5
+
+-- Combat breaking ends the queue - but the room change for the retreat that
+-- broke it can reach us a moment later than the status that reports it, so
+-- give the move this long to show up before dropping everything.
+local GRACE_SECS = 2
+
 local DIRS = {
   e = "east",
   w = "west",
@@ -148,21 +162,44 @@ local DIRS = {
 -- =====================================================================
 local gEnabled = true    -- reton / retoff / ret
 local gSilent  = false   -- retsilent: hide the per-retry "Retreat failed" line
-local gDir     = nil     -- direction word we are committed to, or nil
+local gQueue   = {}      -- stacked directions; [1] is the one we are doing now
+local gWaiting = false   -- retreat landed; [1] is held until the next
+                         -- char.status says whether we are still fighting
 local gLast    = 0       -- os.time () of the last retreat we sent
-local gTries   = 0       -- retreats sent this attempt
+local gTries   = 0       -- retreats sent for gQueue[1]
 local gVnum    = nil     -- last room.info vnum seen
 local gState   = nil     -- last char.status "state" seen (nil = not seen yet)
+local gEndedAt = nil     -- os.time () the fight ended without us moving
+local gWalked  = false   -- the leg in flight is a plain walk, not a retreat
 
--- The attempt is over: moved, out of combat, cancelled, or plugin off.
-local function clearAttempt ()
-  gDir   = nil
-  gTries = 0
-  gLast  = 0
+-- Everything is off: moved on, fight over, cancelled, or plugin off.
+local function clearQueue ()
+  gQueue   = {}
+  gWaiting = false
+  gTries   = 0
+  gLast    = 0
+  gEndedAt = nil
+  gWalked  = false
 end
 
-local function attemptLive ()
-  return gDir ~= nil and (os.time () - gLast) <= STALE_SECS
+-- Drop the queue once it can no longer mean anything.  Called before we read
+-- it, so no timer is needed: char.status arrives with the prompt constantly.
+local function sweep ()
+  if #gQueue == 0 then return end
+  local now = os.time ()
+  if now - gLast > STALE_SECS then clearQueue () return end
+  if gWaiting then
+    -- No verdict ever arrived; assume the fight is over.
+    if now - gLast > VERDICT_SECS then clearQueue () end
+  elseif gEndedAt and now - gEndedAt > GRACE_SECS then
+    -- The fight ended and we never moved: the retreat is moot.
+    clearQueue ()
+  end
+end
+
+local function queueLive ()
+  sweep ()
+  return #gQueue > 0
 end
 
 -- Out of combat the aliases are plain shortcuts: the retreat still goes to
@@ -174,9 +211,61 @@ local function inCombat ()
 end
 
 local function sendRetreat ()
-  gTries = gTries + 1
-  gLast  = os.time ()
-  Send ("retreat " .. gDir)
+  gTries   = gTries + 1
+  gWaiting = false
+  gWalked  = false
+  gLast    = os.time ()
+  Send ("retreat " .. gQueue[1])
+end
+
+-- Nothing is on us, so there is nothing to retreat from: walk this leg
+-- instead.  It stays at the front of the queue until the room change says it
+-- landed, exactly like a retreat does.
+local function walkNext ()
+  gWaiting = false
+  gWalked  = true
+  gEndedAt = nil
+  gTries   = 0
+  gLast    = os.time ()
+  local dir = gQueue[1]
+  Send (dir)
+  if not gSilent then
+    echoHi ("Nothing on us - walking ", dir, " instead.")
+  end
+end
+
+-- The retreat worked.  Drop it off the front and hold whatever was stacked
+-- behind it until the next char.status: still fighting (the mob in the new
+-- room is on us) means we retreat again, an empty room means we walk it.
+--
+-- We wait for that fresh reading rather than trusting the last char.status we
+-- saw, because room.info can reach us before the status that reports the
+-- fight ending - acting on the stale "still fighting" would fire a retreat
+-- into an empty room.  char.status carries enemypct, so it is re-sent every
+-- round of a fight: the wait is a prompt, not a pause.
+local function advanceQueue ()
+  -- We already know the room is clear if combat had broken before this move
+  -- arrived, or if the leg that just landed was a walk and nothing has
+  -- engaged us since - no need to wait for a verdict in either case.
+  local landedClear = gEndedAt ~= nil
+                   or (gWalked and gState ~= COMBAT_STATE)
+
+  table.remove (gQueue, 1)
+  gTries   = 0
+  gEndedAt = nil
+
+  if #gQueue == 0 then
+    clearQueue ()
+    return
+  end
+
+  if landedClear then
+    walkNext ()
+    return
+  end
+
+  gWaiting = true
+  gLast    = os.time ()
 end
 
 -- =====================================================================
@@ -188,29 +277,38 @@ function RetreatDir (letter)
   local dir = DIRS[string.lower (letter or "")]
   if not dir then return end
 
-  -- Plugin off, or not fighting: send it, but don't arm a retry.
-  if not gEnabled or not inCombat () then
-    clearAttempt ()
+  -- A queued direction still counts as live while it waits for the next
+  -- fight, so pick the queue up before deciding what this keypress means.
+  local live = queueLive ()
+
+  -- Plugin off, or not fighting with nothing stacked up: send it, but don't
+  -- arm a retry.
+  if not gEnabled or (not inCombat () and not live) then
+    clearQueue ()
     Send ("retreat " .. dir)
     return
   end
 
-  -- Already committed to a different direction on a live attempt: cancel,
-  -- and retry nothing until a direction is picked again.
-  if attemptLive () and gDir ~= dir then
-    clearAttempt ()
+  -- The stack is full and here comes one more: cancel the lot.
+  if #gQueue >= QUEUE_MAX then
+    clearQueue ()
     echo ("Conflicting Messages: Make Up Your Mind.")
     return
   end
 
-  if not attemptLive () then gTries = 0 end
-  gDir = dir
-  sendRetreat ()
+  table.insert (gQueue, dir)
+
+  if #gQueue == 1 then
+    gTries = 0
+    sendRetreat ()
+  elseif not gSilent then
+    echoHi ("Queued: ", dir, " once the current retreat lands.")
+  end
 end
 
 function RetreatSetOn (on)
   gEnabled = on and true or false
-  if not gEnabled then clearAttempt () end
+  if not gEnabled then clearQueue () end
   SetVariable ("enabled", gEnabled and "1" or "0")
   if gEnabled then
     echoHi ("Auto-retry is ", "ON", " - a failed retreat repeats the same direction.")
@@ -247,10 +345,15 @@ function RetreatHelp ()
   ColourNote (CLR_MSG, "", "  Every ",
               CLR_HI,  "", "You FAIL to retreat!",
               CLR_MSG, "", " sends the same direction again, as many")
-  ColourNote (CLR_MSG, "", "  times as it takes.  Picking a different direction mid-attempt cancels it.")
+  ColourNote (CLR_MSG, "", "  times as it takes.")
+  -- The direction stack is deliberately undocumented here.
+  sweep ()
+  local q = ""
+  if #gQueue > 0 and not gWaiting then
+    q = gWalked and (", walking " .. gQueue[1]) or (", retreating " .. gQueue[1])
+  end
   echoHi ("Currently ", gEnabled and "ON" or "OFF",
-          (gDir and (", retreating " .. gDir) or "") ..
-          (gSilent and ", retry messages off." or "."))
+          q .. (gSilent and ", retry messages off." or "."))
 end
 
 -- =====================================================================
@@ -258,15 +361,16 @@ end
 -- =====================================================================
 function RetreatFailed ()
   if not gEnabled then return end
-  if not attemptLive () then return end
+  if not queueLive () then return end
+  local dir = gQueue[1]
   sendRetreat ()
   if not gSilent then
-    echoHi ("Retreat failed - going ", gDir, " again (try " .. gTries .. ").")
+    echoHi ("Retreat failed - going ", dir, " again (try " .. gTries .. ").")
   end
 end
 
 -- =====================================================================
--- GMCP (telnet option 201) - end the attempt once it is resolved
+-- GMCP (telnet option 201) - advance or end the queue as the fight resolves
 -- =====================================================================
 function OnPluginTelnetSubnegotiation (theType, data)
   if theType ~= 201 then return end
@@ -275,22 +379,53 @@ function OnPluginTelnetSubnegotiation (theType, data)
   if not message then return end
   message = string.lower (message)
 
-  -- Moved rooms: the retreat worked (or something else moved us).
+  -- Moved rooms: the retreat worked (or something else moved us).  Whatever
+  -- was stacked behind it is next.
   if message == "room.info" then
     local vnum = string.match (data, '"num"%s*:%s*"?(%-?%d+)"?')
     if vnum and vnum ~= gVnum then
       gVnum = vnum
-      if gDir then clearAttempt () end
+      if #gQueue > 0 then advanceQueue () end
     end
     return
   end
 
-  -- Out of combat: nothing left to retreat from.
   if message == "char.status" then
     local st = tonumber (string.match (data, '"state"%s*:%s*(%d+)') or "")
-    if st then
-      gState = st
-      if st ~= COMBAT_STATE and gDir then clearAttempt () end
+    if not st then return end
+    gState = st
+
+    if st == COMBAT_STATE then
+      gEndedAt = nil
+      -- Still fighting after the retreat landed: the mob in the new room has
+      -- us, which is exactly what the stacked direction was for.  Go.
+      if gWaiting and gEnabled and queueLive () then
+        local dir = gQueue[1]
+        sendRetreat ()
+        if not gSilent then
+          echoHi ("Retreat landed - now going ", dir, ".")
+        end
+
+      -- Something engaged us on a leg we were walking.  A plain move will not
+      -- get out of a fight, so redo that leg as a retreat.
+      elseif gWalked and gEnabled and queueLive () then
+        local dir = gQueue[1]
+        sendRetreat ()
+        if not gSilent then
+          echoHi ("Caught in a fight - retreating ", dir, " instead.")
+        end
+      end
+    else
+      -- Combat broke.  If we had just landed, the room is empty: walk the
+      -- next leg rather than retreating it.  If we never moved at all, the
+      -- retreat is moot - the grace below only covers the room change for
+      -- THIS retreat arriving a beat late.
+      if gWaiting then
+        if gEnabled and queueLive () then walkNext () else clearQueue () end
+      else
+        if #gQueue > 0 and not gEndedAt then gEndedAt = os.time () end
+        sweep ()
+      end
     end
   end
 end
@@ -301,7 +436,7 @@ end
 function OnPluginInstall ()
   gEnabled = GetVariable ("enabled") ~= "0"
   gSilent  = GetVariable ("silent")  == "1"
-  clearAttempt ()
+  clearQueue ()
 end
 
 function OnPluginSaveState ()
