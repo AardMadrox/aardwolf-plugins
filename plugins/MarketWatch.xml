@@ -37,7 +37,7 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="3.7"
+   version="4.0"
 >
 </plugin>
 
@@ -118,6 +118,8 @@
 
   <!-- internal: fired by the hyperlinks -->
   <alias match="^mwaucbid (\d+)$"   enabled="y" regexp="y" ignore_case="y" script="MW_Click_AucBid"   sequence="80"></alias>
+  <alias match="^mwid (\d+)$"       enabled="y" regexp="y" ignore_case="y" script="MW_Click_ShowId"    sequence="80"></alias>
+  <alias match="^mwaucid (\d+)$"    enabled="y" regexp="y" ignore_case="y" script="MW_Click_ShowAucId" sequence="80"></alias>
   <alias match="^mwbid (\d+)$"      enabled="y" regexp="y" ignore_case="y" script="MW_Click_Bid"      sequence="80"></alias>
   <alias match="^mwbidforce (\d+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Click_BidForce" sequence="80"></alias>
   <alias match="^mwbuy (\d+)$"      enabled="y" regexp="y" ignore_case="y" script="MW_Click_Buy"      sequence="80"></alias>
@@ -313,6 +315,7 @@ local CMD_BID   = "lbid $num $amt proxy confirm"
 local CMD_BUY   = "lbid $num $amt"
 local CMD_PROBE = "lbid $num"
 local CMD_AUC   = "bid $num $amt"
+local CMD_AUCID = "bid $num"      -- shows the auction item, no amount = no bid
 
 local DATA_FILE = "MarketWatch_data.lua"
 
@@ -670,10 +673,12 @@ local function renderRow (row)
 
   if #reasons > 0 then
     ColourNote (CLR_WARN, "", "        no bid link: " .. table.concat (reasons, "; "))
-    if not canBuy then return end
   end
 
+  -- The action line always carries [ ID ], even when there is nothing to bid
+  -- with - being able to look the item over is useful either way.
   ColourTell (CLR_MSG, "", "        ")
+  local wrote = false
   if #reasons == 0 then
     local bidPreview = CMD_BID:gsub ("%$num", intstr (row.num))
                                   :gsub ("%$amt", intstr (w.max))
@@ -681,14 +686,20 @@ local function renderRow (row)
                "[ BID up to " .. commafy (w.max) .. " ]",
                "Re-check this item, then send: " .. bidPreview,
                CLR_HI, "black", 0, 1)
-    if canBuy then ColourTell (CLR_MSG, "", "  ") end
+    wrote = true
   end
   if canBuy then
+    if wrote then ColourTell (CLR_MSG, "", "  ") end
     Hyperlink ("mwbuy " .. row.num,
                "[ BUY OUT " .. commafy (st.buyout) .. " ]",
                "Buy this item outright for " .. commafy (st.buyout),
                CLR_NAME, "black", 0, 1)
+    wrote = true
   end
+  if wrote then ColourTell (CLR_MSG, "", "  ") end
+  Hyperlink ("mwid " .. row.num, "[ ID ]",
+             "Show the full item: " .. CMD_PROBE:gsub ("%$num", intstr (row.num)),
+             CLR_TAG, "black", 0, 1)
   ColourNote (CLR_MSG, "", "")
 end
 
@@ -1049,6 +1060,12 @@ popupBuild = function ()
           code = string.format ("MW_PopupAct(%d,\"buyover\")", p.id),
           tip  = "Buy it outright for MORE than your max for this item" }
       end
+      -- looking the item over never bids, so it is always on offer
+      segs [#segs + 1] = { text = "   " }
+      segs [#segs + 1] = {
+        text = "[ ID ]", colour = CLR_TAG,
+        code = string.format ("MW_PopupId(%d)", p.id),
+        tip  = "Show the full item in the main window" }
       s, l = promptLine (segs)
       gWin:add_text (s, false, l)
     end
@@ -1188,6 +1205,22 @@ local function popupFail (family, num, message)
     end
   end
   return false
+end
+
+-- Show the item.  Deliberately does NOT touch the prompt: reading the id is
+-- not a decision, so the window stays exactly as it was.
+function MW_PopupId (id)
+  id = tonumber (id)
+  for _, p in ipairs (gPrompts) do
+    if p.id == id then
+      if p.family == "auc" then
+        Send (CMD_AUCID:gsub ("%$num", intstr (p.num)))
+      else
+        Send (CMD_PROBE:gsub ("%$num", intstr (p.num)))
+      end
+      return
+    end
+  end
 end
 
 function MW_PopupNo ()
@@ -1335,6 +1368,10 @@ function MW_AuctionLine (name, line, wildcards)
              "[ BID " .. commafy (w.max) .. " ]",
              "Send: " .. preview,
              CLR_HI, "black", 0, 1)
+  ColourTell (CLR_MSG, "", "  ")
+  Hyperlink ("mwaucid " .. num, "[ ID ]",
+             "Show the item: " .. CMD_AUCID:gsub ("%$num", intstr (num)),
+             CLR_TAG, "black", 0, 1)
   ColourNote (CLR_DIM, "", "   matches " .. string.format ("%q", w.raw))
 end
 
@@ -1513,6 +1550,10 @@ function MW_AnnounceRender (num)
                "Win it outright - sends: " .. preview,
                CLR_NAME, "black", 0, 1)
   end
+  ColourTell (CLR_MSG, "", "  ")
+  Hyperlink ("mwid " .. num, "[ ID ]",
+             "Show the full item: " .. CMD_PROBE:gsub ("%$num", intstr (num)),
+             CLR_TAG, "black", 0, 1)
   ColourNote (CLR_MSG, "", "")
 end
 
@@ -2079,6 +2120,18 @@ local function clickBid (num, forced)
     function () warn ("re-check timed out - nothing sent.") end,
     12)
   if not ok then warn ("re-check failed to start - nothing sent.") end
+end
+
+-- "[ ID ]" - show the item.  Sent visibly on purpose: the whole point is to
+-- read the output, so this must NOT go through the silent capture.
+function MW_Click_ShowId (name, line, wildcards)
+  local num = tonumber (wildcards [1])
+  if num then Send (CMD_PROBE:gsub ("%$num", intstr (num))) end
+end
+
+function MW_Click_ShowAucId (name, line, wildcards)
+  local num = tonumber (wildcards [1])
+  if num then Send (CMD_AUCID:gsub ("%$num", intstr (num))) end
 end
 
 function MW_Click_Bid (name, line, wildcards)      clickBid (tonumber (wildcards [1]), false) end
