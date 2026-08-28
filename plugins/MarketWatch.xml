@@ -37,7 +37,7 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="3.5"
+   version="3.7"
 >
 </plugin>
 
@@ -1033,13 +1033,21 @@ popupBuild = function ()
           text = "[ BID " .. commafy (p.bid) .. " ]", colour = CLR_HI,
           code = string.format ("MW_PopupAct(%d,%q)", p.id, p.bidkind),
           tip  = "Send the bid now" }
-        if p.buy then segs [#segs + 1] = { text = "   " } end
+        if p.buy or p.buyover then segs [#segs + 1] = { text = "   " } end
       end
       if p.buy then
         segs [#segs + 1] = {
           text = "[ BUY IT NOW " .. commafy (p.buy) .. " ]", colour = CLR_NAME,
           code = string.format ("MW_PopupAct(%d,\"buy\")", p.id),
           tip  = "Win it outright now" }
+      elseif p.buyover then
+        -- Deliberately worded and coloured differently from the normal buyout:
+        -- this one spends more than the maximum you set for this item.
+        segs [#segs + 1] = {
+          text = "[ BUY ANYWAY " .. commafy (p.buyover) .. " - over your max ]",
+          colour = CLR_TAG,
+          code = string.format ("MW_PopupAct(%d,\"buyover\")", p.id),
+          tip  = "Buy it outright for MORE than your max for this item" }
       end
       s, l = promptLine (segs)
       gWin:add_text (s, false, l)
@@ -1119,6 +1127,9 @@ function MW_PopupAct (id, action)
     MW_Click_AucBid (nil, nil, { tostring (num) })
   elseif action == "buy" then
     MW_Click_Buy (nil, nil, { tostring (num) })
+  elseif action == "buyover" then
+    -- you clicked a button that spells out the price, so the max is waived
+    MW_Click_Buy (nil, nil, { tostring (num) }, true)
   else
     MW_Click_Bid (nil, nil, { tostring (num) })
   end
@@ -1308,8 +1319,9 @@ function MW_AuctionLine (name, line, wildcards)
   -- When the window takes it, the echo below would only say it twice.
   if popupAdd { family = "auc", num = num, name = item,
                 bid = w.max, bidkind = "auc",
-                note = (cur and ("current bid " .. commafy (cur) .. "   ") or "") ..
-                       "your max " .. commafy (w.max) } then
+                note = "Auction " .. num ..
+                       (cur and ("   current bid " .. commafy (cur)) or "") ..
+                       "   your max " .. commafy (w.max) } then
     return
   end
 
@@ -1450,14 +1462,25 @@ function MW_AnnounceRender (num)
   local canBuy = st and st.buyout and w.max >= st.buyout
                  and row.ctype == "Gold"
 
-  -- A buyout you can actually afford is the one market case worth
-  -- interrupting for.  The window then carries BOTH actions, so the echo
-  -- below is skipped rather than repeating it all.
-  if canBuy and popupAdd { family = "mkt", num = num, name = row.visible,
-                           bid = w.max, bidkind = "bid", buy = st.buyout,
-                           note = "buyout " .. commafy (st.buyout) ..
-                                  "   your max " .. commafy (w.max) } then
-    return
+  -- Every listing you could act on goes to the window - with BUY IT NOW too
+  -- when the buyout is within reach.  Only listings with nothing to click
+  -- (not a gold auction) fall through to the echo below.
+  if #reasons == 0 then
+    local note = "Num " .. num
+    if st and st.buyout then note = note .. "   buyout " .. commafy (st.buyout) end
+    note = note .. "   your max " .. commafy (w.max)
+    -- a buyout within your max is the normal button; one above it is
+    -- offered too, but as a separate, clearly-labelled action
+    local buyAmt, buyOver
+    if st and st.buyout then
+      if canBuy then buyAmt = st.buyout else buyOver = st.buyout end
+    end
+    if popupAdd { family = "mkt", num = num, name = row.visible,
+                  bid = w.max, bidkind = "bid",
+                  buy = buyAmt, buyover = buyOver,
+                  note = note } then
+      return
+    end
   end
 
   echoHi ("market listing: ", row.visible,
@@ -1921,7 +1944,7 @@ function MW_Cmd_Help ()
   Note ("")
   helpLine ("marketw auc on|off|debug",     "watch the live auction channel")
   helpLine ("marketw mkt on|off",           "watch the market channel for new listings")
-  helpLine ("marketw popup on|off",         "pop a window up for buyouts and auctions")
+  helpLine ("marketw popup on|off",         "live listings pop up in a window, not the output")
   Note ("")
   helpLine ("marketw withdraw on|off",      "top up from the bank when a bid falls short")
   helpLine ("marketw withdrawroom here",    "only ever withdraw in this room")
@@ -2061,17 +2084,25 @@ end
 function MW_Click_Bid (name, line, wildcards)      clickBid (tonumber (wildcards [1]), false) end
 function MW_Click_BidForce (name, line, wildcards) clickBid (tonumber (wildcards [1]), true)  end
 
-function MW_Click_Buy (name, line, wildcards)
+function MW_Click_Buy (name, line, wildcards, force)
   local num = tonumber (wildcards [1])
   local row = gRows [num]
   if not row or not row.entry or not row.stats or not row.stats.buyout then
     warn ("no confirmed buyout price for item " .. tostring (num) .. ".  Run 'marketw' again.")
     return
   end
-  if row.entry.max < row.stats.buyout then
+  if gBid [num] then
+    warn ("you already have a bid on item " .. num .. " - nothing sent.")
+    return
+  end
+  if not force and row.entry.max < row.stats.buyout then
     warn ("refused: buyout " .. commafy (row.stats.buyout) ..
           " is over your max " .. commafy (row.entry.max) .. ".")
     return
+  end
+  if force and row.entry.max < row.stats.buyout then
+    warn ("buying over your max: " .. commafy (row.stats.buyout) ..
+          " vs " .. commafy (row.entry.max) .. " - you asked for this one.")
   end
   -- send exactly the buyout price, not your max
   local cmd = CMD_BUY:gsub ("%$num", intstr (num))
