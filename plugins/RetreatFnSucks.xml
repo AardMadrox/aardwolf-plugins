@@ -8,7 +8,7 @@
    language="Lua"
    purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
    date_written="2026-08-28"
-   version="1.8"
+   version="2.1"
    >
 </plugin>
 
@@ -68,6 +68,16 @@
   </alias>
 
   <alias
+   match="^retdebug$"
+   enabled="y"
+   regexp="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatDebug ()</send>
+  </alias>
+
+  <alias
    match="^ret\s*(?:help|\?)$"
    enabled="y"
    regexp="y"
@@ -92,6 +102,33 @@
    sequence="100"
   >
   <send>RetreatFailed ()</send>
+  </trigger>
+
+  <!--  The retreat worked.  This is the MUD saying so, which beats waiting
+        for a GMCP room change - inside a maze the room number can repeat, and
+        then nothing ever tells us the leg landed.  -->
+  <trigger
+   match="^You retreat from the fight\!$"
+   enabled="y"
+   regexp="y"
+   keep_evaluating="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatLanded ()</send>
+  </trigger>
+
+  <!--  A plain move refused because we are in a fight: redo that leg as a
+        retreat.  -->
+  <trigger
+   match="^Not while you are fighting\!$"
+   enabled="y"
+   regexp="y"
+   keep_evaluating="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatBlocked ()</send>
   </trigger>
 </triggers>
 
@@ -168,9 +205,13 @@ local gWaiting = false   -- retreat landed; [1] is held until the next
 local gLast    = 0       -- os.time () of the last retreat we sent
 local gTries   = 0       -- retreats sent for gQueue[1]
 local gVnum    = nil     -- last room.info vnum seen
+local gZone    = nil     -- last room.info zone (area) seen
 local gState   = nil     -- last char.status "state" seen (nil = not seen yet)
 local gEndedAt = nil     -- os.time () the fight ended without us moving
 local gWalked  = false   -- the leg in flight is a plain walk, not a retreat
+local gLegSent = false   -- a leg is out there waiting to land; whichever
+                         -- signal reports it first advances the queue once
+local gGmcp    = 0       -- room.info / char.status messages seen (retdebug)
 
 -- Everything is off: moved on, fight over, cancelled, or plugin off.
 local function clearQueue ()
@@ -180,6 +221,7 @@ local function clearQueue ()
   gLast    = 0
   gEndedAt = nil
   gWalked  = false
+  gLegSent = false
 end
 
 -- Drop the queue once it can no longer mean anything.  Called before we read
@@ -214,6 +256,7 @@ local function sendRetreat ()
   gTries   = gTries + 1
   gWaiting = false
   gWalked  = false
+  gLegSent = true
   gLast    = os.time ()
   Send ("retreat " .. gQueue[1])
 end
@@ -224,6 +267,7 @@ end
 local function walkNext ()
   gWaiting = false
   gWalked  = true
+  gLegSent = true
   gEndedAt = nil
   gTries   = 0
   gLast    = os.time ()
@@ -253,6 +297,7 @@ local function advanceQueue ()
   table.remove (gQueue, 1)
   gTries   = 0
   gEndedAt = nil
+  gLegSent = false
 
   if #gQueue == 0 then
     clearQueue ()
@@ -333,6 +378,23 @@ function RetreatToggleSilent ()
   end
 end
 
+-- retdebug: what the plugin thinks is going on.  Mostly here to show whether
+-- GMCP is reaching us at all - the queue leans on it for everything except
+-- the "You retreat from the fight!" line.
+function RetreatDebug ()
+  echo ("Debug:")
+  helpLine ("gmcp",   gGmcp .. " room.info/char.status messages seen"
+                      .. (gGmcp == 0 and "  <- NONE ARRIVING" or ""))
+  helpLine ("room",   tostring (gVnum) .. "   area: " .. tostring (gZone))
+  helpLine ("state",  tostring (gState) .. (gState == COMBAT_STATE and " (fighting)" or ""))
+  helpLine ("queue",  (#gQueue == 0) and "(empty)" or table.concat (gQueue, ", "))
+  helpLine ("leg",    (gLegSent and "in flight" or "none")
+                      .. (gWalked and ", walking" or ", retreating")
+                      .. (gWaiting and ", held for verdict" or "")
+                      .. ", tries " .. gTries)
+  helpLine ("age",    (gLast == 0) and "-" or (os.time () - gLast) .. "s since last send")
+end
+
 function RetreatHelp ()
   echo ("Retreat, and keep retreating, in one direction.")
   helpLine ("re rw rn", "retreat east / west / north")
@@ -370,6 +432,32 @@ function RetreatFailed ()
 end
 
 -- =====================================================================
+-- Trigger callback: "You retreat from the fight!"
+-- =====================================================================
+-- The retreat landed.  This is THE signal for a retreat leg: a nomap room
+-- reports no room number over GMCP, so a room change may never arrive, and
+-- the leg would sit at the front of the queue forever - swallowing the next
+-- direction you type instead of retreating with it.
+function RetreatLanded ()
+  if #gQueue > 0 and gLegSent then advanceQueue () end
+end
+
+-- =====================================================================
+-- Trigger callback: "Not while you are fighting!"
+-- =====================================================================
+-- A plain move refused because something is on us.  Retreat that leg instead.
+function RetreatBlocked ()
+  if not gEnabled then return end
+  if not gWalked or not gLegSent then return end
+  if not queueLive () then return end
+  local dir = gQueue[1]
+  sendRetreat ()
+  if not gSilent then
+    echoHi ("Caught in a fight - retreating ", dir, " instead.")
+  end
+end
+
+-- =====================================================================
 -- GMCP (telnet option 201) - advance or end the queue as the fight resolves
 -- =====================================================================
 function OnPluginTelnetSubnegotiation (theType, data)
@@ -379,13 +467,35 @@ function OnPluginTelnetSubnegotiation (theType, data)
   if not message then return end
   message = string.lower (message)
 
+  if message == "room.info" or message == "char.status" then
+    gGmcp = gGmcp + 1
+  end
+
   -- Moved rooms: the retreat worked (or something else moved us).  Whatever
   -- was stacked behind it is next.
   if message == "room.info" then
     local vnum = string.match (data, '"num"%s*:%s*"?(%-?%d+)"?')
+    local zone = string.match (data, '"zone"%s*:%s*"([^"]*)"')
+
+    -- A different area means we are not where we were escaping from any
+    -- more - death dumps us in our home city, and a recall or portal is the
+    -- same story.  Whatever was stacked up is meaningless there.
+    if zone and gZone and zone ~= gZone then
+      gVnum = vnum or gVnum
+      gZone = zone
+      if #gQueue > 0 then clearQueue () end
+      return
+    end
+    if zone then gZone = zone end
+
     if vnum and vnum ~= gVnum then
       gVnum = vnum
-      if #gQueue > 0 then advanceQueue () end
+      -- Retreat legs do NOT land on this signal - they land on the MUD's own
+      -- "You retreat from the fight!" line.  A nomap room reports no room
+      -- number, so waiting on a room change there leaves the leg stuck at the
+      -- front of the queue forever.  Walk legs have no success line of their
+      -- own, so they still land here.
+      if #gQueue > 0 and gLegSent and gWalked then advanceQueue () end
     end
     return
   end
