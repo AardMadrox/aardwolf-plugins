@@ -8,7 +8,7 @@
    language="Lua"
    purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
    date_written="2026-08-28"
-   version="2.1"
+   version="2.2"
    >
 </plugin>
 
@@ -116,6 +116,19 @@
    sequence="100"
   >
   <send>RetreatLanded ()</send>
+  </trigger>
+
+  <!--  No exit that way.  Retrying it can only fail the same way, so the
+        whole chain stops rather than sticking.  -->
+  <trigger
+   match="^You cannot retreat in that direction\!$"
+   enabled="y"
+   regexp="y"
+   keep_evaluating="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatNoExit ()</send>
   </trigger>
 
   <!--  A plain move refused because we are in a fight: redo that leg as a
@@ -440,6 +453,19 @@ end
 -- direction you type instead of retreating with it.
 function RetreatLanded ()
   if #gQueue > 0 and gLegSent then advanceQueue () end
+end
+
+-- =====================================================================
+-- Trigger callback: "You cannot retreat in that direction!"
+-- =====================================================================
+-- There is no exit that way, so every retry would fail identically and the
+-- leg would never land.  Drop the whole chain and say so - this one is worth
+-- printing even in silent mode, because it is why nothing else happens.
+function RetreatNoExit ()
+  if #gQueue == 0 then return end
+  local dir = gQueue[1]
+  clearQueue ()
+  echoHi ("No exit ", dir, " - stopped.")
 end
 
 -- =====================================================================
