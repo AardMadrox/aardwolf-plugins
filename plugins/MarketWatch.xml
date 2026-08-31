@@ -37,7 +37,7 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="4.0"
+   version="4.1"
 >
 </plugin>
 
@@ -1214,9 +1214,9 @@ function MW_PopupId (id)
   for _, p in ipairs (gPrompts) do
     if p.id == id then
       if p.family == "auc" then
-        Send (CMD_AUCID:gsub ("%$num", intstr (p.num)))
+        Send ((CMD_AUCID:gsub ("%$num", intstr (p.num))))
       else
-        Send (CMD_PROBE:gsub ("%$num", intstr (p.num)))
+        Send ((CMD_PROBE:gsub ("%$num", intstr (p.num))))
       end
       return
     end
@@ -2126,12 +2126,12 @@ end
 -- read the output, so this must NOT go through the silent capture.
 function MW_Click_ShowId (name, line, wildcards)
   local num = tonumber (wildcards [1])
-  if num then Send (CMD_PROBE:gsub ("%$num", intstr (num))) end
+  if num then Send ((CMD_PROBE:gsub ("%$num", intstr (num)))) end
 end
 
 function MW_Click_ShowAucId (name, line, wildcards)
   local num = tonumber (wildcards [1])
-  if num then Send (CMD_AUCID:gsub ("%$num", intstr (num))) end
+  if num then Send ((CMD_AUCID:gsub ("%$num", intstr (num)))) end
 end
 
 function MW_Click_Bid (name, line, wildcards)      clickBid (tonumber (wildcards [1]), false) end
