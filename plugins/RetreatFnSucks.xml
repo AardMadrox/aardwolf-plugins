@@ -8,7 +8,7 @@
    language="Lua"
    purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
    date_written="2026-08-28"
-   version="2.3"
+   version="2.4"
    >
 </plugin>
 
@@ -116,6 +116,19 @@
    sequence="100"
   >
   <send>RetreatLanded ()</send>
+  </trigger>
+
+  <!--  Nothing to retreat from.  The armed direction is meaningless now and
+        would only go off in some later fight, so drop the chain.  -->
+  <trigger
+   match="^You aren't fighting anyone\.$"
+   enabled="y"
+   regexp="y"
+   keep_evaluating="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatNotFighting ()</send>
   </trigger>
 
   <!--  No exit that way.  Retrying it can only fail the same way, so the
@@ -476,6 +489,23 @@ end
 -- direction you type instead of retreating with it.
 function RetreatLanded ()
   if #gQueue > 0 and gLegSent then advanceQueue () end
+end
+
+-- =====================================================================
+-- Trigger callback: "You aren't fighting anyone."
+-- =====================================================================
+-- The retreat found no fight, so the whole chain is void: nothing is chasing
+-- us, nothing landed, and leaving the direction armed only means it goes off
+-- in whatever fight happens next.  This is the authoritative version of the
+-- ARM_SECS timeout - the MUD telling us straight away.
+function RetreatNotFighting ()
+  if #gQueue == 0 then return end
+  local pending = #gQueue > 1
+  clearQueue ()
+  -- One misfired retreat explains itself; a dropped chain does not.
+  if pending and not gSilent then
+    echo ("Not in a fight - chain dropped.")
+  end
 end
 
 -- =====================================================================
