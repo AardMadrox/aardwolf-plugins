@@ -8,7 +8,7 @@
    language="Lua"
    purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
    date_written="2026-08-28"
-   version="2.4"
+   version="2.5"
    >
 </plugin>
 
@@ -102,6 +102,18 @@
    sequence="100"
   >
   <send>RetreatFailed ()</send>
+  </trigger>
+
+  <!--  Stunned: the retreat did not happen either.  Same treatment.  -->
+  <trigger
+   match="^You are stunned\!$"
+   enabled="y"
+   regexp="y"
+   keep_evaluating="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatFailed ("Stunned")</send>
   </trigger>
 
   <!--  The retreat worked.  This is the MUD saying so, which beats waiting
@@ -466,7 +478,11 @@ end
 -- =====================================================================
 -- Trigger callback: "You FAIL to retreat!"
 -- =====================================================================
-function RetreatFailed ()
+-- `why` is only the wording for the echo: a stun and a failed retreat are the
+-- same event as far as the queue is concerned - the leg did not happen, so
+-- send it again.  Only fires while a leg is armed, so the stun lines flying
+-- around an ordinary fight are ignored.
+function RetreatFailed (why)
   if not gEnabled then return end
   -- This line only exists because a real fight refused a real retreat, so it
   -- is proof we are fighting - better proof than GMCP, and it has to be set
@@ -476,7 +492,7 @@ function RetreatFailed ()
   local dir = gQueue[1]
   sendRetreat ()
   if not gSilent then
-    echoHi ("Retreat failed - going ", dir, " again (try " .. gTries .. ").")
+    echoHi ((why or "Retreat failed") .. " - going ", dir, " again (try " .. gTries .. ").")
   end
 end
 
