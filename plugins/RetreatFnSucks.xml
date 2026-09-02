@@ -8,7 +8,7 @@
    language="Lua"
    purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
    date_written="2026-08-28"
-   version="2.2"
+   version="2.3"
    >
 </plugin>
 
@@ -198,6 +198,10 @@ local VERDICT_SECS = 5
 -- give the move this long to show up before dropping everything.
 local GRACE_SECS = 2
 
+-- A direction armed while nothing is fighting us waits this long for a fight
+-- to start before it is dropped.
+local ARM_SECS = 20
+
 local DIRS = {
   e = "east",
   w = "west",
@@ -225,6 +229,7 @@ local gWalked  = false   -- the leg in flight is a plain walk, not a retreat
 local gLegSent = false   -- a leg is out there waiting to land; whichever
                          -- signal reports it first advances the queue once
 local gGmcp    = 0       -- room.info / char.status messages seen (retdebug)
+local gFought  = false   -- we have actually been in combat on this chain
 
 -- Everything is off: moved on, fight over, cancelled, or plugin off.
 local function clearQueue ()
@@ -235,6 +240,7 @@ local function clearQueue ()
   gEndedAt = nil
   gWalked  = false
   gLegSent = false
+  gFought  = false
 end
 
 -- Drop the queue once it can no longer mean anything.  Called before we read
@@ -243,6 +249,10 @@ local function sweep ()
   if #gQueue == 0 then return end
   local now = os.time ()
   if now - gLast > STALE_SECS then clearQueue () return end
+  -- Armed while nothing was fighting us and nothing ever started: let it go
+  -- fairly quickly, so a direction typed minutes ago cannot jump into a
+  -- fight it was never meant for.
+  if not gFought and now - gLast > ARM_SECS then clearQueue () return end
   if gWaiting then
     -- No verdict ever arrived; assume the fight is over.
     if now - gLast > VERDICT_SECS then clearQueue () end
@@ -339,9 +349,13 @@ function RetreatDir (letter)
   -- fight, so pick the queue up before deciding what this keypress means.
   local live = queueLive ()
 
-  -- Plugin off, or not fighting with nothing stacked up: send it, but don't
-  -- arm a retry.
-  if not gEnabled or (not inCombat () and not live) then
+  -- Plugin off: send it and nothing else.
+  --
+  -- We arm the retry even when GMCP says we are not fighting.  A mob you walk
+  -- in on engages a moment AFTER the room arrives, so "not fighting" at the
+  -- instant you hit the key is routine - refusing to arm there is what left a
+  -- failed retreat sitting with nothing to retry it.
+  if not gEnabled then
     clearQueue ()
     Send ("retreat " .. dir)
     return
@@ -355,6 +369,10 @@ function RetreatDir (letter)
   end
 
   table.insert (gQueue, dir)
+
+  -- Already fighting when the chain starts: that counts, so the "the fight
+  -- ended and we never moved" cleanup still applies to it.
+  if gState == COMBAT_STATE then gFought = true end
 
   if #gQueue == 1 then
     gTries = 0
@@ -401,6 +419,7 @@ function RetreatDebug ()
   helpLine ("room",   tostring (gVnum) .. "   area: " .. tostring (gZone))
   helpLine ("state",  tostring (gState) .. (gState == COMBAT_STATE and " (fighting)" or ""))
   helpLine ("queue",  (#gQueue == 0) and "(empty)" or table.concat (gQueue, ", "))
+  helpLine ("fought", tostring (gFought) .. " (has a fight touched this chain)")
   helpLine ("leg",    (gLegSent and "in flight" or "none")
                       .. (gWalked and ", walking" or ", retreating")
                       .. (gWaiting and ", held for verdict" or "")
@@ -436,6 +455,10 @@ end
 -- =====================================================================
 function RetreatFailed ()
   if not gEnabled then return end
+  -- This line only exists because a real fight refused a real retreat, so it
+  -- is proof we are fighting - better proof than GMCP, and it has to be set
+  -- before the sweep or an armed-out-of-combat direction gets dropped here.
+  if #gQueue > 0 then gFought = true end
   if not queueLive () then return end
   local dir = gQueue[1]
   sendRetreat ()
@@ -533,6 +556,7 @@ function OnPluginTelnetSubnegotiation (theType, data)
 
     if st == COMBAT_STATE then
       gEndedAt = nil
+      if #gQueue > 0 then gFought = true end
       -- Still fighting after the retreat landed: the mob in the new room has
       -- us, which is exactly what the stacked direction was for.  Go.
       if gWaiting and gEnabled and queueLive () then
@@ -559,7 +583,9 @@ function OnPluginTelnetSubnegotiation (theType, data)
       if gWaiting then
         if gEnabled and queueLive () then walkNext () else clearQueue () end
       else
-        if #gQueue > 0 and not gEndedAt then gEndedAt = os.time () end
+        -- Only meaningful once a fight actually had us: before that, "not
+        -- fighting" is just the normal state of walking around.
+        if #gQueue > 0 and gFought and not gEndedAt then gEndedAt = os.time () end
         sweep ()
       end
     end
