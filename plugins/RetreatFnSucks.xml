@@ -8,7 +8,7 @@
    language="Lua"
    purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
    date_written="2026-08-28"
-   version="2.5"
+   version="2.6"
    >
 </plugin>
 
@@ -226,6 +226,10 @@ local GRACE_SECS = 2
 -- A direction armed while nothing is fighting us waits this long for a fight
 -- to start before it is dropped.
 local ARM_SECS = 20
+
+-- A fail/stun line only belongs to us if we sent a retreat this recently.
+-- Anything later is some other fight's business.
+local RETRY_WINDOW = 15
 
 local DIRS = {
   e = "east",
@@ -484,11 +488,20 @@ end
 -- around an ordinary fight are ignored.
 function RetreatFailed (why)
   if not gEnabled then return end
-  -- This line only exists because a real fight refused a real retreat, so it
-  -- is proof we are fighting - better proof than GMCP, and it has to be set
-  -- before the sweep or an armed-out-of-combat direction gets dropped here.
-  if #gQueue > 0 then gFought = true end
   if not queueLive () then return end
+
+  -- The line has to be answering a retreat WE sent moments ago.  Without this
+  -- an armed direction left over from earlier gets picked up by whatever
+  -- fight happens next - typing "re" outside a fight, portalling somewhere
+  -- else entirely, and having it fire there minutes later.
+  if os.time () - gLast > RETRY_WINDOW then
+    clearQueue ()
+    return
+  end
+
+  -- Now it is proof of a fight: a real one refused a retreat of ours.
+  gFought = true
+
   local dir = gQueue[1]
   sendRetreat ()
   if not gSilent then
@@ -590,7 +603,13 @@ function OnPluginTelnetSubnegotiation (theType, data)
       -- number, so waiting on a room change there leaves the leg stuck at the
       -- front of the queue forever.  Walk legs have no success line of their
       -- own, so they still land here.
-      if #gQueue > 0 and gLegSent and gWalked then advanceQueue () end
+      if #gQueue > 0 and gLegSent and gWalked then
+        advanceQueue ()
+      elseif #gQueue > 0 and not gFought then
+        -- Armed for a fight that never happened, and now we have walked,
+        -- portalled or speedwalked somewhere else: it is not wanted here.
+        clearQueue ()
+      end
     end
     return
   end
