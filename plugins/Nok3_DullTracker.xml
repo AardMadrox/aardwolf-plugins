@@ -14,7 +14,7 @@
    purpose="Aardwolf Character Development Tracking (Rewrite of SharpTracker)"
    save_state="y"   
    requires="4.70"
-   version="2.5"
+   version="2.7"
    >
 <description trim="n">
 		<![CDATA[
@@ -357,6 +357,14 @@ Type 'dull help' in game for the full command list.
 		script="Help"
 	>
 		<send>DTEcho("Not a command I know - here is the help:")</send>
+	</alias>
+
+	<!-- LOCAL PATCH: drop the most recent entry of one timer's history -->
+	<alias
+		name="forget_last" match="^dull forget (cp|gq|quest|lvl|pup|dbl|timed)$"
+		regexp="y" enabled="y"
+		script="ForgetLast"
+	>
 	</alias>
 
 	<!-- Reporting -->
@@ -2072,6 +2080,15 @@ Type 'dull help' in game for the full command list.
 			end
 		end
 		
+		-- LOCAL PATCH: prefer SnD's record of when this actually started, so a reload
+		-- part-way through doesn't report a short run (see SnDTrueStart above). Runs here
+		-- rather than at report time because .last is what every later reader uses.
+		if (timer == "cp") then
+			timers[timer].start = SnDTrueStart(SND_TYPE_CP, timers[timer].start)
+		elseif (timer == "quest") then
+			timers[timer].start = SnDTrueStart(SND_TYPE_QUEST, timers[timer].start)
+		end
+
 		timers[timer].last = os.time() - timers[timer].start		
 		
 		-- Add the timer to the queue and queue the report after a second
@@ -2127,23 +2144,36 @@ Type 'dull help' in game for the full command list.
 	-- writes one, so GQ times are recorded here and build up from the next gq onward.
 	--
 	-- TIME CAPS: a campaign or quest taken and then left sitting while you do something
-	-- else records as a multi-hour run and drags the average with it. Anything over the
-	-- cap counts AS the cap - it still counts, it just can't run away with the average.
+	-- else records as a multi-hour run. Anything over the cap is LEFT OUT of the figures
+	-- entirely.
+	--
+	-- It used to count AS the cap, which was still wrong: a campaign requested two hours
+	-- before it was actually started is not a six-minute campaign either, and folding it
+	-- in at six minutes pulled the average toward the cap for a run that never happened.
+	-- At level 201 roughly two thirds of campaigns were over it, so the average was mostly
+	-- reporting the cap rather than the play.
+	--
+	-- Excluding costs sample size - that is the trade, and it is the right one here: what
+	-- is left describes campaigns actually played through.
+	--
 	-- Nothing stored is altered (SnD's rows and dull's history keep their real times), so
 	-- setting a cap to 0 turns it off and the raw numbers come straight back.
 	TIME_CAP_CP_HIGH_LEVEL = 200      -- campaigns taken at this level or above...
 	TIME_CAP_CP_HIGH       = 6 * 60   -- ...are capped here
 	TIME_CAP_CP            = 5 * 60   -- campaigns taken at every level below it
-	TIME_CAP_QUEST         = 2 * 60   -- all quests, every level
-	TIME_CAP_GQ            = 0        -- global quests are not capped (0 = off)
+	TIME_CAP_QUEST         = 3 * 60   -- all quests, every level (matches SnD's own cap)
+	TIME_CAP_GQ            = 45 * 60  -- global quests; only catches a broken timer
 
 	local SND_TYPE_QUEST  = 1
 	local SND_TYPE_CP     = 3
 	local SND_STATUS_DONE = 2
+	local SND_STATUS_OPEN = 1   -- taken, not finished yet - the row is still being written
 
 	local GQ_TIMES_KEEP = 200   -- how many gq durations to remember
 	local gqTimes = {}
 
+	-- LOCAL PATCH: no longer called - caps EXCLUDE now rather than clamping. Kept so a
+	-- cap can be put back to clamping in one place if that ever turns out to be wanted.
 	function CapTime(seconds, cap)
 		if (cap ~= nil and cap > 0 and seconds > cap) then return cap end
 		return seconds
@@ -2161,18 +2191,17 @@ Type 'dull help' in game for the full command list.
 		if (probe == nil) then return nil end
 		probe:close()
 
-		local durExpr = "(end_time - start_time)"
+		-- LOCAL PATCH: over-cap rows are excluded, not clamped (see TIME CAPS above).
+		local capWhere = ""
 		if (cap ~= nil and cap > 0) then
-			durExpr = string.format(
-				"(CASE WHEN (end_time - start_time) > %d THEN %d ELSE (end_time - start_time) END)",
-				cap, cap)
+			capWhere = string.format(" AND (end_time - start_time) <= %d", cap)
 		end
 
 		local sql = string.format(
 			"SELECT count(*) AS n, min(dur) AS best, sum(dur) AS total FROM (" ..
-			" SELECT %s AS dur FROM history" ..
-			" WHERE type = %d AND status = %d AND end_time IS NOT NULL AND end_time < %d%s)",
-			durExpr, historyType, SND_STATUS_DONE, before, (where or ""))
+			" SELECT (end_time - start_time) AS dur FROM history" ..
+			" WHERE type = %d AND status = %d AND end_time IS NOT NULL AND end_time < %d%s%s)",
+			historyType, SND_STATUS_DONE, before, capWhere, (where or ""))
 
 		local stats = nil
 		local ok, err = pcall(function()
@@ -2190,6 +2219,50 @@ Type 'dull help' in game for the full command list.
 		return stats
 	end
 
+	-- ─── LOCAL PATCH — TRUE START, NOT THE RELOAD ───────────────────────────────
+	--
+	-- Reloading dull part-way through a campaign or quest restarts its timer, so the run
+	-- reports far shorter than it was: a 2m48s campaign came out as 1m36s and took over
+	-- "best" for the level.
+	--
+	-- SnD writes an open row (status 1) the moment you take the campaign or quest, so the
+	-- real start is already on disk. Two guards on trusting it:
+	--
+	--   * only ever move the start EARLIER. A reload can lose time, never gain it, so a
+	--     later start could not have come from this run.
+	--   * ignore a start older than SND_OPEN_START_MAX. SnD leaves rows open when one is
+	--     abandoned rather than finished - there is one from May sitting in the db right
+	--     now - and without a bound the newest open row could be that one.
+	--
+	-- Falls through to dull's own timer whenever there is nothing trustworthy to use, so
+	-- no SnD, no db, or a locked db all behave exactly as before.
+	SND_OPEN_START_MAX = 6 * 60 * 60
+
+	function SnDTrueStart(historyType, fallback)
+		if (sqlite3 == nil or fallback == nil) then return fallback end
+
+		local probe = io.open(GetInfo(66) .. "/SnDdb.db", "r")
+		if (probe == nil) then return fallback end
+		probe:close()
+
+		local found = nil
+		local ok = pcall(function()
+			local db = sqlite3.open(GetInfo(66) .. "/SnDdb.db")
+			if (db == nil) then return end
+			local sql = string.format(
+				"SELECT start_time FROM history WHERE type = %d AND status = %d" ..
+				" ORDER BY id DESC LIMIT 1", historyType, SND_STATUS_OPEN)
+			for r in db:nrows(sql) do found = tonumber(r.start_time) end
+			db:close_vm()
+		end)
+		if (not ok or found == nil) then return fallback end
+
+		if (found < fallback and (os.time() - found) <= SND_OPEN_START_MAX) then
+			return found
+		end
+		return fallback
+	end
+
 	-- Folds the run just finished into the stored figures and formats " [best X | avg Y]".
 	-- Returns "" when there is nothing to compare against yet.
 	function TimeStatsString(stats, current, cap)
@@ -2198,10 +2271,14 @@ Type 'dull help' in game for the full command list.
 		local count, best, total = 0, nil, 0
 		if (stats ~= nil) then count, best, total = stats.count, stats.best, stats.total end
 
-		local cur = CapTime(current, cap)
-		count = count + 1
-		total = total + cur
-		if (best == nil or cur < best) then best = cur end
+		-- LOCAL PATCH: the run just finished is folded in by hand, so it needs the same
+		-- treatment as the stored rows - left out when it ran over the cap, rather than
+		-- counted as the cap. Otherwise an interrupted run still lands in its own report.
+		if (cap == nil or cap <= 0 or current <= cap) then
+			count = count + 1
+			total = total + current
+			if (best == nil or current < best) then best = current end
+		end
 
 		if (count < 2) then return "" end
 
@@ -2235,15 +2312,22 @@ Type 'dull help' in game for the full command list.
 	-- record as it is reported, so the first gq after installing shows no figures yet.
 	function GQTimeStats(seconds)
 		local stats = nil
-		local count = table.getn(gqTimes)
+
+		-- LOCAL PATCH: over-cap runs are left out rather than counted as the cap
+		-- (see TIME CAPS above). The count is built up alongside the totals now,
+		-- because it is the number of runs KEPT, not the number stored - taking it
+		-- from table.getn ahead of the loop would divide a filtered total by an
+		-- unfiltered count and report an average far too low.
+		local count, best, total = 0, nil, 0
+		for _, t in ipairs(gqTimes) do
+			if (TIME_CAP_GQ <= 0 or t <= TIME_CAP_GQ) then
+				count = count + 1
+				total = total + t
+				if (best == nil or t < best) then best = t end
+			end
+		end
 
 		if (count > 0) then
-			local best, total = nil, 0
-			for _, t in ipairs(gqTimes) do
-				local capped = CapTime(t, TIME_CAP_GQ)
-				total = total + capped
-				if (best == nil or capped < best) then best = capped end
-			end
 			stats = { count = count, best = best, total = total }
 		end
 
@@ -2271,6 +2355,26 @@ Type 'dull help' in game for the full command list.
 	-- timers whose history we persist across reloads
 	local historyTimers = { "cp", "lvl", "pup", "quest", "gq", "dbl", "timed" }
 	local HISTORY_KEEP = 50   -- cap each timer's stored history so it can't grow without bound
+
+	-- ─── LOCAL PATCH — DROP THE LAST REPORT LINE ────────────────────────────────
+	--
+	-- History entries are finished report strings, so a run timed wrong is stuck in the
+	-- list as text - recomputing best/avg won't touch it. This removes the newest entry
+	-- of one timer and echoes what went, so removing the wrong one is immediately obvious.
+	function ForgetLast(name, line, wildcards)
+		local timer = wildcards[1]
+		local hist = timers[timer] and timers[timer].history
+
+		if (hist == nil or table.getn(hist) == 0) then
+			DTEcho("No " .. timer .. " history to forget.")
+			return
+		end
+
+		local gone = table.remove(hist)
+		SaveHistory()
+		DTEcho("Dropped this " .. timer .. " entry, " .. table.getn(hist) .. " left:")
+		Report(gone)
+	end
 
 	function SaveHistory()
 		local h = {}
@@ -2854,7 +2958,7 @@ Type 'dull help' in game for the full command list.
 			local infoString = ""			
 					
 			if (doubleRunning) then
-				infoString = infoString .. "[ DBL XPR | " .. string.format("%.1f", rates.xprDbl.rate)
+				infoString = infoString .. "[ DBL | " .. string.format("%.1f", rates.xprDbl.rate)
 			else
 				infoString = infoString .. "[ XPR | " .. string.format("%.1f", rates.xpr.rate) 
 			end
@@ -2862,7 +2966,7 @@ Type 'dull help' in game for the full command list.
 			local epicTR = (sessionData["tr"] ~= nil and sessionData["tr"]["epic"] ~= nil) and sessionData["tr"]["epic"] or 0
 		
 		infoString = infoString ..
-				" ]   [ GOLD | " .. comma_value(SumField(sessionData["gold"])) ..
+				" ]   [ $ | " .. comma_value(SumField(sessionData["gold"])) ..
 				" ]   [ XP | " .. comma_value(SumField(sessionData["xp"])) ..
 				" ]   [ QP | " .. comma_value(SumField(sessionData["qp"])) .. " |" .. ReportField(sessionData["qp"], 1) .. " ]"				
 				
