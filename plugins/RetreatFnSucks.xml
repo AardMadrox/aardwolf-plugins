@@ -8,7 +8,7 @@
    language="Lua"
    purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
    date_written="2026-08-28"
-   version="2.6"
+   version="2.7"
    >
 </plugin>
 
@@ -141,6 +141,19 @@
    sequence="100"
   >
   <send>RetreatNotFighting ()</send>
+  </trigger>
+
+  <!--  Webbed: nothing is going anywhere until it is dealt with, so retrying
+        is pointless.  Drop the chain.  -->
+  <trigger
+   match="^You are entangled in an invisible web\.$"
+   enabled="y"
+   regexp="y"
+   keep_evaluating="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatEntangled ()</send>
   </trigger>
 
   <!--  No exit that way.  Retrying it can only fail the same way, so the
@@ -535,6 +548,19 @@ function RetreatNotFighting ()
   if pending and not gSilent then
     echo ("Not in a fight - chain dropped.")
   end
+end
+
+-- =====================================================================
+-- Trigger callback: "You are entangled in an invisible web."
+-- =====================================================================
+-- Webbed in place.  Hammering retreat at it just burns rounds, and anything
+-- stacked behind was routed through a room we are not going to reach, so the
+-- whole chain goes.  Said out loud even in silent mode: it is why nothing
+-- else happens.
+function RetreatEntangled ()
+  if #gQueue == 0 then return end
+  clearQueue ()
+  echo ("Entangled in a web - stopped.")
 end
 
 -- =====================================================================
