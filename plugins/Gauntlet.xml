@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="1.5"
+   version="1.6"
    >
 </plugin>
 
@@ -1120,6 +1120,54 @@ function gt_command (name, line, wildcards)
 
   local n = tonumber (arg:match ("^(%d+)$"))
   if n then pick (n) return end
+
+  if arg == "debug" then
+    debug_on = not debug_on
+    note ("Debug is now @x048" .. (debug_on and "on" or "off") .. "@w.")
+    return
+  end
+
+  if arg == "here" then
+    -- Ask the MUD to print this room again and show what it lists, so a
+    -- mob whose description does not match its name can be pinned down.
+    dump_here = true
+    here_mobs = {}
+    SendNoEcho ("tags roomchars on")
+    SendNoEcho ("look")
+    DoAfterSpecial (3, "gt_here_timeout ()", 12)
+    return
+  end
+
+  local w = arg:match ("^wait%s+(%d+)$")
+  if w then
+    move_wait = math.max (5, math.min (120, tonumber (w)))
+    save_map ()
+    note ("Will wait @x048" .. move_wait .. "@w seconds for a move to be " ..
+          "answered before writing that exit off.")
+    return
+  end
+  if arg == "wait" then
+    note ("Currently waiting @x048" .. move_wait .. "@w seconds per move. " ..
+          "Change it with @x048gaunt wait <seconds>@w.")
+    return
+  end
+
+  local dmob, dphrase = arg:match ("^desc%s+(.-)%s*=%s*(.+)$")
+  if dmob then
+    ROOMDESC[normalise (dmob)] = dphrase:lower ()
+    save_descs ()
+    note ("Noted: @x048" .. dmob .. "@w is recognised in a room by \"@x048" ..
+          dphrase .. "@w\".")
+    return
+  end
+  if arg == "desc" then
+    note ("Room-description overrides:")
+    for k, v in pairs (ROOMDESC) do
+      ColourNote (CLR_MSG, "", "   " .. k, CLR_TAG, "", "  ->  ", CLR_HI, "", v)
+    end
+    ColourNote (CLR_TAG, "", "   set one with:  gaunt desc <mob> = <phrase>")
+    return
+  end
 
   if arg == "stop" then
     if running then stop ("Stopped.") else note ("Not sweeping.") end
