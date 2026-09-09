@@ -15,6 +15,98 @@
 >
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+STATUS: still flagged in purpose= as needing live testing, and that flag
+  has not been cleared, so treat the behaviour below as unconfirmed.
+
+WHAT IT DOES
+  Finds the GOOD moonlight room during the Sea King's Dominion taunt
+  phase, and gtells it to the group with the adjacent tanking spots.
+  Idea taken from Kanaye's SKDAssistant.
+
+  The problem it solves: during the taunt phase several arena rooms are
+  moonlit. Some are bad (entering one has a RANDOM chance of a
+  "moonlight caresses your cheek" message and pain). One is good and
+  never caresses. A single clean entry therefore proves nothing.
+
+COMMANDS
+  ml                 gtell the good moonlight from the room you are in
+  mlf                auto walk the arena and find it hands free
+  mlf stop           abort a running hunt
+  mlf bounces <n>    set the clean entry count (1 to 99, default 5)
+  mlf help           help
+
+HOW IT WORKS
+  There are two modes.
+
+  STANDING DETECTION (passive, always on). bad_ml_line records every room
+  where a caress happens. ml_bad_queue keeps at most TWO such rooms,
+  dropping the oldest when a third appears, because there are only ever
+  two bad moonlights and an older sighting means the moonlight has moved.
+  Once two bad rooms are known, good_ml_line treats any OTHER moonlit
+  room you walk into as the good one by elimination and gtells it.
+
+  THE HUNT (mlf). A state machine that walks the twelve arena rooms and
+  bounce tests each moonlit one, exactly the way a person would:
+    walk into a room, wait HUNT_PEEK (0.25s), then judge
+    caress seen           the room is bad, move on
+    not moonlit           skip it
+    moonlit, both bads
+      already known       call it good by elimination, no bouncing
+    moonlit, otherwise    bounce out to an adjacent room and back in,
+                          counting clean entries; after HUNT_BOUNCES of
+                          them with no caress, call it good
+
+  NAVIGATION IS STRICTLY ONE MOVE AT A TIME. hunt_go() issues exactly one
+  "mapper goto" and arms a watchdog; no further movement is sent until
+  GMCP room.info confirms arrival at hunt_await. This is the core of the
+  design and is what stops the hunt walking into walls.
+
+  hunt_move_watchdog uses hunt_move_tok as a token so a stale watchdog
+  from an earlier move cannot abort a newer one. HUNT_MOVE_TIMEOUT is 6
+  seconds.
+
+  OnPluginBroadcast on the GMCP handler drives everything: room.info is
+  arrival (and is IGNORED unless the room matches hunt_await, so rooms
+  passed through on the way do not confuse it), and char.status state 8
+  means you are being attacked, which aborts the hunt.
+
+  ml_reset aborts the hunt and clears all bad room knowledge whenever the
+  moonlight moves: any taunt landing (yours or someone else's), the Sea
+  King leaping to the ceiling or dropping back down, or the soul pull
+  line.
+
+  pick_partner() chooses the bounce out room, preferring an adjacent tank
+  room NOT already known to be bad, so you take less avoidable pain.
+
+DATA AND STATE
+  save_state is "n". The bounce count is saved to
+  SKDMoonlight_config.txt next to the plugin, located with
+  GetPluginInfo(GetPluginID(), 20), because SetVariable state is lost on a
+  manual reinstall. Nothing else persists.
+
+  ml_rooms is the hardcoded map of the twelve arena room numbers to their
+  compass label and adjacent tank spots. GMCP room numbers arrive as
+  STRINGS, so the keys are strings; do not change them to numbers.
+
+WHEN EDITING
+  * hunt_order is a full circuit of the arena. cmd_mlhunt rotates it so
+    the hunt starts from wherever you are standing.
+  * HUNT_MAX_LAPS is 3; after three fruitless circuits the hunt gives up
+    rather than running forever.
+  * bad_ml_line NEVER drives navigation. It only records facts. All
+    movement decisions belong to the hunt state machine. Keep that split.
+  * DEAD CODE: hunt_alas_line() exists to re path after a blocked move,
+    but there is no trigger in the XML that calls it. If blocked moves
+    are a real problem, add a trigger for the "Alas, you cannot go that
+    way" line pointing at it; otherwise the function can be deleted.
+  * cnote uses ColoursToStyles and stylesToANSI, pulled in with an
+    explicit dofile of aardwolf_colors.lua. They are not free inside a
+    plugin, so that line must stay.
+-->
+
 <aliases>
   <alias match="^ml$"                    enabled="y" regexp="y" sequence="200" script="cmd_ml"></alias>
   <alias match="^mlf$"                   enabled="y" regexp="y" sequence="200" script="cmd_mlhunt"></alias>
