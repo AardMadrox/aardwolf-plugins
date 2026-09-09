@@ -8,7 +8,7 @@
    language="Lua"
    purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
    date_written="2026-08-28"
-   version="2.9"
+   version="3.0"
    >
 </plugin>
 
@@ -80,6 +80,10 @@ WHY THE TIME WINDOWS EXIST
   have dropped.
 
 OTHER THINGS WORTH KNOWING
+  * The load line prints the VERSION local near the top of the script.
+    Bump that at the same time as version= in the header - they are two
+    separate places on purpose, because no GetPluginInfo field for the
+    version was verified against the source.
   * The aliases arm the retry even when GMCP says we are not
     fighting.  A mob you walk in on engages a moment AFTER the room
     arrives, so "not fighting" at the instant you hit the key is
@@ -297,6 +301,9 @@ local CLR_MSG  = "#FFFFFF"   -- W
 local CLR_HI   = "#00FF87"   -- x048
 
 local TAG = "RetreatFnSucks"
+
+-- Shown in the load line.  Keep in step with version= in the header above.
+local VERSION = "3.0"
 
 local function echo (msg)
   ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
@@ -894,6 +901,8 @@ function OnPluginInstall ()
   else
     gStopWord = ""
   end
+
+  echoHi ("v" .. VERSION .. " loaded - type ", "ret help", " for commands.")
 end
 
 function OnPluginSaveState ()
