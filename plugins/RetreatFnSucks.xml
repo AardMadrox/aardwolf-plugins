@@ -8,7 +8,7 @@
    language="Lua"
    purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
    date_written="2026-08-28"
-   version="2.8"
+   version="2.9"
    >
 </plugin>
 
@@ -25,6 +25,11 @@ COMMANDS
   reton / retoff      enable / disable
   ret                 toggle
   rstop               cancel everything armed or stacked
+  retstopcmd <word>   add a second word for rstop ("none" removes it).
+                      Built with AddAlias as Temporary and rebuilt from
+                      our own saved variable on load, so it never gets
+                      written into the world file.  rstop is in the XML
+                      and always works.
   retsilent           hide the per-retry message
   ret help            help
   retdebug            state dump, incl. whether GMCP is arriving
@@ -151,6 +156,16 @@ OTHER THINGS WORTH KNOWING
    sequence="100"
   >
   <send>RetreatStop ()</send>
+  </alias>
+
+  <alias
+   match="^retstopcmd(?:\s+(\S+))?$"
+   enabled="y"
+   regexp="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>RetreatStopCmd ("%1")</send>
   </alias>
 
   <alias
@@ -295,7 +310,7 @@ local function echoHi (msg, hi, tail)
 end
 
 local function helpLine (left, right)
-  ColourNote (CLR_HI, "", string.format ("  %-10s", left), CLR_MSG, "", right)
+  ColourNote (CLR_HI, "", string.format ("  %-11s", left), CLR_MSG, "", right)
 end
 
 -- =====================================================================
@@ -344,6 +359,7 @@ local DIRS = {
 -- =====================================================================
 local gEnabled = true    -- reton / retoff / ret
 local gSilent  = false   -- retsilent: hide the per-retry "Retreat failed" line
+local gStopWord = ""     -- extra word for rstop, "" for none
 local gQueue   = {}      -- stacked directions; [1] is the one we are doing now
 local gWaiting = false   -- retreat landed; [1] is held until the next
                          -- char.status says whether we are still fighting
@@ -525,6 +541,83 @@ function RetreatToggle ()
   RetreatSetOn (not gEnabled)
 end
 
+-- ---------------------------------------------------------------------
+-- The extra word for rstop
+-- ---------------------------------------------------------------------
+-- rstop itself is in the XML above and always works; this only adds a
+-- second alias pointing at the same function.  It is built with AddAlias
+-- (MUSHclient builtin: AddAlias (name, match, response, flags, script)) as
+-- Temporary, so nothing is written into the world file - we recreate it from
+-- our own saved variable on every load.
+local STOP_ALIAS = "RetreatFnSucks_stop_extra"   -- internal name, not typed
+
+-- Words that already mean something here, so we do not shadow them.
+local TAKEN = {
+  re = true, rw = true, rn = true, rs = true, ru = true, rd = true,
+  ret = true, reton = true, retoff = true, rstop = true,
+  retsilent = true, retdebug = true, retstopcmd = true,
+}
+
+-- IsAlias returns a result code; error_code.eOK means it is there.  (Same
+-- idiom the bundled check.lua uses - error_code is a builtin table.)
+local function dropStopAlias ()
+  if IsAlias (STOP_ALIAS) == error_code.eOK then DeleteAlias (STOP_ALIAS) end
+end
+
+-- Plain (non-regexp) match text: an alias matches the whole command line, and
+-- the word is restricted to letters and digits, so there is nothing for the
+-- wildcard matcher to misread.
+local function makeStopAlias (word)
+  dropStopAlias ()
+  AddAlias (STOP_ALIAS, word, "",
+            alias_flag.Enabled + alias_flag.Temporary, "RetreatStop")
+end
+
+-- retstopcmd <word>  - add your own word for rstop
+-- retstopcmd none    - remove it
+-- retstopcmd         - say what it is
+function RetreatStopCmd (word)
+  word = string.lower (string.gsub (word or "", "%s", ""))
+
+  if word == "" then
+    if gStopWord == "" then
+      echoHi ("Stop command is ", "rstop", ".  retstopcmd <word> adds another.")
+    else
+      echoHi ("Stop commands are ", "rstop", " and " .. gStopWord
+              .. ".  retstopcmd none removes the second.")
+    end
+    return
+  end
+
+  if word == "none" or word == "off" or word == "clear" then
+    dropStopAlias ()
+    gStopWord = ""
+    SetVariable ("stopword", "")
+    echoHi ("Extra stop command removed - ", "rstop", " still works.")
+    return
+  end
+
+  if not string.match (word, "^%a[%w]*$") then
+    echo ("A stop word has to be letters and digits, starting with a letter.")
+    return
+  end
+
+  if #word > 20 then
+    echo ("That is too long for a stop word - 20 characters at most.")
+    return
+  end
+
+  if TAKEN[word] then
+    echoHi ("", word, " is already one of this plugin's commands.")
+    return
+  end
+
+  makeStopAlias (word)
+  gStopWord = word
+  SetVariable ("stopword", word)
+  echoHi ("Stop commands are now ", "rstop", " and " .. word .. ".")
+end
+
 -- rstop: drop everything armed or stacked, without touching the on/off
 -- setting.  The escape hatch for "stop sending retreats, right now".
 function RetreatStop ()
@@ -574,7 +667,9 @@ function RetreatHelp ()
   helpLine ("reton",    "turn auto-retry on")
   helpLine ("retoff",   "turn auto-retry off")
   helpLine ("ret",       "toggle auto-retry")
-  helpLine ("rstop",     "cancel a retreat in progress")
+  helpLine ("rstop",     "cancel a retreat in progress"
+                         .. (gStopWord ~= "" and ("  (also " .. gStopWord .. ")") or ""))
+  helpLine ("retstopcmd", "<word> adds your own word for rstop; none removes it")
   helpLine ("retsilent", "toggle the per-retry message")
   helpLine ("ret help",  "this screen")
   ColourNote (CLR_MSG, "", "  Every ",
@@ -789,11 +884,22 @@ function OnPluginInstall ()
   gEnabled = GetVariable ("enabled") ~= "0"
   gSilent  = GetVariable ("silent")  == "1"
   clearQueue ()
+
+  -- Rebuild the extra stop alias: it is Temporary, so it never survives a
+  -- reload on its own.
+  local word = GetVariable ("stopword") or ""
+  if string.match (word, "^%a[%w]*$") and not TAKEN[word] then
+    gStopWord = word
+    makeStopAlias (word)
+  else
+    gStopWord = ""
+  end
 end
 
 function OnPluginSaveState ()
   SetVariable ("enabled", gEnabled and "1" or "0")
   SetVariable ("silent",  gSilent  and "1" or "0")
+  SetVariable ("stopword", gStopWord)
 end
 
 ]]>
