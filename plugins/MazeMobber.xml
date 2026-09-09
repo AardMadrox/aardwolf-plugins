@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="2.6"
+   version="2.7"
    >
 </plugin>
 
@@ -885,6 +885,7 @@ local laps    = 0
 local begin                -- forward: the GMCP handler starts a second
                            -- leg (dive, then on to the ship) before this
                            -- is defined further down
+local auto_token = 0       -- guards the delayed automatic list
 local menu                 -- defined down in the commands section; the GMCP
                            -- handler above it needs to be able to call it
 
@@ -1618,6 +1619,15 @@ function offer_resume ()
   ColourNote (CLR_TAG, "", "")
 end
 
+-- The delayed automatic list.  Only prints if nothing has moved on: same
+-- token, same room, and no sweep started in the meantime.
+function mm_automenu (tok, room)
+  if tok ~= auto_token then return end
+  if running then return end
+  if cur ~= room then return end
+  menu ()
+end
+
 function OnPluginBroadcast (msg, id, bname, text)
   if id ~= GMCP_ID then return end
 
@@ -1690,7 +1700,11 @@ function OnPluginBroadcast (msg, id, bname, text)
     local from_area = ROOM2AREA[was]
     if not from_area or from_area.key ~= here_area.key then
       use_area (here_area)
-      menu ()
+      -- A second's grace: GMCP arrives before the room description, so
+      -- printing straight away puts the list above the desc and it just
+      -- scrolls away.  The token means a later room wins if you keep going.
+      auto_token = auto_token + 1
+      DoAfterSpecial (1, "mm_automenu (" .. auto_token .. ", " .. num .. ")", 12)
     end
   end
 
