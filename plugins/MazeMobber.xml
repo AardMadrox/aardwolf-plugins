@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="2.7"
+   version="2.8"
    >
 </plugin>
 
@@ -1700,11 +1700,11 @@ function OnPluginBroadcast (msg, id, bname, text)
     local from_area = ROOM2AREA[was]
     if not from_area or from_area.key ~= here_area.key then
       use_area (here_area)
-      -- A second's grace: GMCP arrives before the room description, so
+      -- Half a second's grace: GMCP arrives before the room description, so
       -- printing straight away puts the list above the desc and it just
       -- scrolls away.  The token means a later room wins if you keep going.
       auto_token = auto_token + 1
-      DoAfterSpecial (1, "mm_automenu (" .. auto_token .. ", " .. num .. ")", 12)
+      DoAfterSpecial (0.5, "mm_automenu (" .. auto_token .. ", " .. num .. ")", 12)
     end
   end
 
@@ -1714,9 +1714,15 @@ function OnPluginBroadcast (msg, id, bname, text)
   -- Checked before anything else, because it does not matter how we got
   -- here - a step that led out, a resync that found us adrift - the answer
   -- is the same: go back in and carry on.  Skipped during travel (we walk
-  -- through 2010 on the way in) and while deliberately heading out.
+  -- through 2010 on the way in), and skipped if this room IS the exit we
+  -- were deliberately walking to.  Note it is not enough to ask whether
+  -- 'leaving' is set: every room on Prosper's list is a "place", so it is
+  -- set for any walk there, and testing it alone disabled recovery for the
+  -- whole area.
   local back_in = A and A.recover and A.recover[num]
-  if back_in and phase ~= "travel" and not leaving and not journey then
+  if back_in and phase ~= "travel"
+     and not (leaving and leaving.room == num)
+     and not (journey and journey.room == num) then
     recovers = recovers + 1
     if recovers > 5 then
       stop ("Kept falling out into " .. (back_in.label or ("room " .. num)) ..
