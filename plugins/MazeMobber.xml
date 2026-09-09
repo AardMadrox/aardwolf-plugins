@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="1.9"
+   version="2.2"
    >
 </plugin>
 
@@ -1538,9 +1538,11 @@ end
 -- Printed once the fight is over, in the room the sweep stopped in.
 function offer_resume ()
   if not paused then return end
-  ColourTell (CLR_TAG, "", "[", CLR_NAME, "", "Nenukon", CLR_TAG, "", "] ")
+  ColourTell (CLR_TAG, "", "[", CLR_NAME, "", "MazeMobber", CLR_TAG, "", "] ")
   Hyperlink ((BYKEY[paused.area] and BYKEY[paused.area].cmd or "mm") ..
-             " resume", "Resume finding " .. paused.show,
+             " resume",
+             ((paused.kind == "goto") and "Resume walking to " or "Resume finding ")
+             .. paused.show,
              "Pick the sweep back up from here", CLR_HI, "black", 0, 1)
   ColourNote (CLR_TAG, "", "")
 end
@@ -1557,7 +1559,14 @@ function OnPluginBroadcast (msg, id, bname, text)
       -- Attacked mid-sweep, by a mob or a player.  Remember the hunt so
       -- it can be resumed on the spot rather than started over.
       if want_show then
-        paused = { show = want_show, noscan = noscan_mode, extra = wide,
+        paused = { kind = "hunt", show = want_show, noscan = noscan_mode,
+                   extra = wide, room = cur, area = A.key, offered = false }
+      elseif target then
+        -- Walking to a room or a place counts just as much as a hunt.
+        paused = { kind = "goto",
+                   show = (leaving and (leaving.label or roomname (leaving.room)))
+                          or roomname (target),
+                   target = target, leg = leaving, onward = journey,
                    room = cur, area = A.key, offered = false }
       end
       stop ("In combat - stopped.", true)
@@ -1567,7 +1576,11 @@ function OnPluginBroadcast (msg, id, bname, text)
     -- Out of the fight again: offer to pick up where we left off, but
     -- only while still standing in the room it was interrupted in.
     if paused and state ~= 8 and not running then
-      if cur == paused.room and not paused.offered then
+      -- Anywhere in the same area is close enough.  Requiring the exact
+      -- room almost never held: a move is usually already in flight when
+      -- something jumps you, so it lands and you finish a room further on
+      -- than where the attack registered.  Resuming re-routes anyway.
+      if A and A.key == paused.area and not paused.offered then
         paused.offered = true
         offer_resume ()
       end
@@ -2014,7 +2027,12 @@ function mm_command (name, line, wildcards)
     paused = nil
     if p.area and BYKEY[p.area] then use_area (BYKEY[p.area]) end
     note ("Picking @x048" .. p.show .. "@w back up.")
-    begin ("hunt", nil, p.show, p.noscan, p.extra)
+    if p.kind == "goto" then
+      leaving, journey = p.leg, p.onward
+      if cur == p.target then take_exit () else begin ("goto", p.target, nil, false) end
+    else
+      begin ("hunt", nil, p.show, p.noscan, p.extra)
+    end
     return
   end
 
