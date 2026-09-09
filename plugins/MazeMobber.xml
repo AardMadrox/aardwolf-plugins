@@ -6,23 +6,23 @@
    author="Eric"
    id="a7d34e9105c8b26f4a01de73"
    language="Lua"
-   purpose="mm and mmout solve the mazes in Gauntlet, Gwillimberry, Nenukon, Xylmos and Helegear"
+   purpose="mm and mmout solve the mazes in Prosper, Gauntlet, Gwillimberry, Nenukon, Xylmos, Helegear"
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="2.2"
+   version="2.5"
    >
 </plugin>
 
 <aliases>
   <alias
-    match="^(gaunt|gard|nenukon|xyl|hele|mm)(?:\s+(.*))?$"
+    match="^(gaunt|gard|nenukon|xyl|hele|prosper|mm)(?:\s+(.*))?$"
     script="mm_command" name="mm_command"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
   </alias>
   <alias
-    match="^(gardout|nenukonout|xylout|heleout|mmout)$"
+    match="^(gardout|nenukonout|xylout|heleout|prosperout|mmout)$"
     script="mm_out" name="mm_out"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -90,6 +90,7 @@ local GMCP_ID = "3e7dedbe37e44942dd46d264"
 --    nenukon  The Nenukon, in Nenukon            31784-31833  nenukonout
 --    xyl      Rose Ether, in Xylmos              444-455      xylout
 --    hele     Helegear Sea and the depths        30699-30720  heleout
+--    prosper  Prosper 201, the theater maze      28252-28267  prosperout
 --
 --    mm / mmout  whichever of those you are standing in.  Anywhere in
 --    one of those five areas counts: from elsewhere in Xylmos, mm walks
@@ -322,7 +323,7 @@ local AREAS = {
     sections = {  },
     outlabel = "ways out",
     outs = { { room = 26015, how = "south door", cmds = { "open s", "s" } }, },
-    places = { { room = 26015, how = "south door", cmds = { "open s", "s" } }, },
+    places = { { room = 26015, how = "south door", label = "The Botanical Gardens", cmds = { "open s", "s" } }, },
     late = {  },
     noroute = {  },
     ranged = false,
@@ -463,7 +464,7 @@ local AREAS = {
     sections = {  },
     outlabel = "ways out",
     outs = { { room = 31784, how = "up and out" }, { room = 31818, how = "up and out" }, },
-    places = { { room = 31784, how = "up and out" }, { room = 31818, how = "up and out" }, },
+    places = { { room = 31784, how = "up and out", label = "Edge of the Nenukon" }, { room = 31818, how = "up and out", label = "A Campsite" }, },
     late = {  },
     noroute = { [31802]=true, [31803]=true },
     ranged = true,
@@ -483,14 +484,14 @@ local AREAS = {
       ["fox demon"] = { [31785]=true, [31787]=true, [31788]=true, [31789]=true, [31790]=true, [31806]=true, [31807]=true, [31809]=true, [31811]=true, [31813]=true, [31814]=true, [31815]=true, [31816]=true, [31817]=true, [31818]=true, [31819]=true, [31820]=true, [31821]=true, [31822]=true, [31823]=true, [31824]=true, [31825]=true, [31827]=true, [31828]=true, [31829]=true, [31830]=true },
       ["fox master of battle"] = { [31792]=true, [31794]=true, [31797]=true, [31814]=true, [31816]=true, [31817]=true, [31818]=true, [31819]=true, [31821]=true, [31822]=true, [31823]=true, [31824]=true, [31825]=true, [31827]=true, [31828]=true, [31829]=true },
       ["goblin"] = { [31804]=true },
-      ["greater demon"] = { [31806]=true, [31807]=true, [31808]=true, [31809]=true, [31810]=true, [31811]=true, [31812]=true, [31814]=true, [31818]=true, [31825]=true, [31830]=true },
+      ["greater demon"] = { [31785]=true, [31806]=true, [31807]=true, [31808]=true, [31809]=true, [31810]=true, [31811]=true, [31812]=true, [31814]=true, [31818]=true, [31825]=true, [31830]=true },
       ["hooded exile"] = { [31785]=true },
       ["ice demon"] = { [31785]=true, [31787]=true, [31788]=true, [31789]=true, [31791]=true, [31792]=true, [31796]=true, [31799]=true, [31805]=true, [31806]=true, [31807]=true, [31808]=true, [31814]=true, [31826]=true, [31831]=true, [31832]=true },
       ["lesser demon"] = { [31785]=true, [31786]=true, [31787]=true, [31788]=true, [31789]=true, [31790]=true, [31791]=true, [31792]=true, [31793]=true, [31794]=true, [31795]=true, [31797]=true, [31798]=true, [31799]=true, [31800]=true, [31801]=true, [31805]=true, [31806]=true, [31807]=true, [31808]=true, [31809]=true, [31812]=true, [31826]=true, [31831]=true, [31832]=true, [31833]=true },
       ["lynx master of battle"] = { [31785]=true, [31787]=true, [31790]=true, [31792]=true, [31805]=true, [31810]=true, [31811]=true, [31812]=true, [31813]=true, [31814]=true, [31816]=true, [31817]=true, [31818]=true, [31819]=true, [31821]=true, [31822]=true, [31824]=true, [31826]=true, [31827]=true, [31828]=true, [31829]=true },
       ["monuhi"] = { [31803]=true },
       ["mounted skeletal warrior"] = { [31785]=true, [31787]=true, [31790]=true, [31792]=true, [31795]=true, [31796]=true, [31797]=true, [31798]=true, [31800]=true, [31801]=true, [31804]=true, [31814]=true, [31832]=true, [31833]=true },
-      ["naga champion"] = { [31785]=true, [31786]=true, [31787]=true, [31788]=true, [31789]=true, [31790]=true, [31791]=true, [31797]=true, [31800]=true, [31804]=true, [31806]=true, [31809]=true, [31810]=true, [31812]=true, [31813]=true, [31814]=true, [31817]=true, [31818]=true, [31819]=true, [31820]=true, [31822]=true, [31824]=true, [31828]=true, [31829]=true, [31831]=true },
+      ["naga champion"] = { [31785]=true, [31786]=true, [31787]=true, [31788]=true, [31789]=true, [31790]=true, [31791]=true, [31797]=true, [31800]=true, [31804]=true, [31805]=true, [31806]=true, [31809]=true, [31810]=true, [31812]=true, [31813]=true, [31814]=true, [31817]=true, [31818]=true, [31819]=true, [31820]=true, [31822]=true, [31824]=true, [31828]=true, [31829]=true, [31831]=true },
       ["naga paladin"] = { [31787]=true, [31788]=true, [31791]=true, [31792]=true, [31793]=true, [31796]=true, [31797]=true, [31805]=true, [31807]=true, [31809]=true, [31810]=true, [31814]=true, [31817]=true },
       ["naga warlord"] = { [31785]=true, [31786]=true, [31788]=true, [31789]=true, [31790]=true, [31791]=true, [31795]=true, [31806]=true, [31809]=true, [31810]=true, [31814]=true, [31818]=true },
       ["paladin of the lynx tribe"] = { [31785]=true, [31786]=true, [31787]=true, [31790]=true, [31791]=true, [31793]=true, [31795]=true, [31798]=true, [31799]=true, [31801]=true, [31805]=true, [31806]=true, [31807]=true, [31808]=true, [31809]=true, [31812]=true, [31814]=true, [31818]=true, [31819]=true, [31821]=true, [31822]=true, [31824]=true, [31827]=true, [31828]=true },
@@ -510,8 +511,8 @@ local AREAS = {
       { "skeletal warrior",            false },
       { "hooded exile",                false },
       { "skeletal archer",             false },
-      { "eagle champion",              false },
       { "naga champion",               false },
+      { "eagle champion",              false },
       { "bastion",                     false },
       { "fox demon",                   false },
       { "sashi amanis",                false },
@@ -521,20 +522,20 @@ local AREAS = {
       { "warrior of the mink tribe",   false },
       { "fox master of battle",        false },
       { "warrior of the eagle tribe",  false },
+      { "mounted skeletal warrior",    false },
       { "lynx master of battle",       false },
       { "elk battle mistress",         false },
       { "warrior of the elk tribe",    false },
       { "paladin of the lynx tribe",   false },
-      { "mounted skeletal warrior",    false },
       { "fox champion",                false },
       { "ice demon",                   false },
       { "yota timo",                   false },
       { "goblin",                      false },
-      { "warrior of the fox tribe",    false },
-      { "earth demon",                 false },
       { "greater demon",               false },
-      { "monuhi",                      false },
+      { "earth demon",                 false },
+      { "warrior of the fox tribe",    false },
       { "water demon",                 false },
+      { "monuhi",                      false },
       { "fire demon",                  false },
       { "air demon",                   false },
       { "naga paladin",                false },
@@ -582,7 +583,7 @@ local AREAS = {
     sections = {  },
     outlabel = "ways out",
     outs = { { room = 455, how = "up and out" }, { room = 444, how = "up and out" }, { room = 450, how = "inhale ether", cmds = { "inhale ether" } }, },
-    places = { { room = 455, how = "up and out" }, { room = 444, how = "up and out" }, { room = 450, how = "inhale ether", cmds = { "inhale ether" } }, },
+    places = { { room = 455, how = "up and out", label = "Entering Rose Ether" }, { room = 444, how = "up and out", label = "Rose Ether" }, { room = 450, how = "inhale ether", label = "Rose Ether", cmds = { "inhale ether" } }, },
     late = {  },
     noroute = {  },
     ranged = false,
@@ -600,6 +601,65 @@ local AREAS = {
       { "think pink!",                 false },
       { "gnat king",                   false },
       { "the Gas Rat",                 true },
+    },
+  },
+  {
+    key = "prosper", cmd = "prosper", label = "Prosper 201 (the theater)", zone = "prosper",
+    lo = 28252, hi = 28267,
+    roomname = {
+      [28252] = "On a Tribune",
+      [28253] = "Standing in Line",
+      [28254] = "Intruding upon 'Act I, Scene II'",
+      [28255] = "Behind the Stage",
+      [28256] = "Entering the Theater",
+      [28257] = "The Play is the Thing",
+      [28258] = "A Dressing Room",
+      [28259] = "Behind the Stage",
+      [28260] = "On 'The Bridge'",
+      [28261] = "A Storage Room",
+      [28262] = "Behind the Stage",
+      [28263] = "A Dark Room",
+      [28264] = "In Stalwart's Room",
+      [28265] = "In Brawn's Room",
+      [28266] = "At 'The Bridge'?",
+      [28267] = "In Moriarty's Room",
+    },
+    maze = { [28252]=true, [28253]=true, [28254]=true, [28255]=true, [28257]=true, [28258]=true, [28259]=true, [28260]=true, [28261]=true, [28262]=true, [28263]=true },
+    seed = {  },
+    exitdirs = {
+      [28252] = { "e", "n", "s", "u" },
+      [28253] = { "e", "n", "s" },
+      [28254] = { "e", "n", "s", "u" },
+      [28255] = { "e", "n", "s", "w" },
+      [28256] = { "d", "e", "n", "s" },
+      [28257] = { "e", "n", "s", "w" },
+      [28258] = { "e", "n", "s", "w" },
+      [28259] = { "e", "n", "s", "w" },
+      [28260] = { "e", "n", "s", "w" },
+      [28261] = { "e", "n", "s", "u", "w" },
+      [28262] = { "e", "n", "s", "w" },
+      [28263] = { "e", "n", "s", "u", "w" },
+      [28264] = { "d" },
+      [28265] = { "d" },
+      [28266] = { "d" },
+      [28267] = { "d" },
+    },
+    leaves = { {28256,"d"}, },
+    auto = { [28256]=true },
+    entrance = { goto_room = 2010, run = "up" },
+    bridges = {  },
+    sections = {  },
+    outlabel = "rooms",
+    outs = { { room = 28256, how = "down to The Imaginarium", label = "Entering the Theater", cmds = { "d" } }, },
+    places = { { room = 28264, how = "walk there", label = "In Stalwart's Room" }, { room = 28265, how = "walk there", label = "In Brawn's Room" }, { room = 28267, how = "walk there", label = "In Moriarty's Room" }, { room = 28266, how = "walk there", label = "At 'The Bridge'?" }, { room = 28256, how = "walk there", label = "Entering the Theater" }, { room = 28252, how = "walk there", label = "On a Tribune" }, { room = 28253, how = "walk there", label = "Standing in Line" }, { room = 28254, how = "walk there", label = "Intruding upon 'Act I, Scene II'" }, { room = 28255, how = "walk there", label = "Behind the Stage" }, { room = 28257, how = "walk there", label = "The Play is the Thing" }, { room = 28258, how = "walk there", label = "A Dressing Room" }, { room = 28259, how = "walk there", label = "Behind the Stage" }, { room = 28260, how = "walk there", label = "On 'The Bridge'" }, { room = 28261, how = "walk there", label = "A Storage Room" }, { room = 28262, how = "walk there", label = "Behind the Stage" }, { room = 28263, how = "walk there", label = "A Dark Room" }, },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
     },
   },
   {
@@ -1095,6 +1155,9 @@ local function take_exit ()
     -- Send even returns.
     if journey then awaiting_leg = true end
     for _, c in ipairs (o.cmds) do Send (c) end
+  elseif o.how == "walk there" then
+    note ("Arrived: @x048" .. (o.label or roomname (o.room)) ..
+          "@w  (@x048" .. o.room .. "@w)")
   else
     note ("Here you are - " .. o.how .. ", and you are clear.")
   end
