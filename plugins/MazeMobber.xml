@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="2.5"
+   version="2.6"
    >
 </plugin>
 
@@ -647,6 +647,13 @@ local AREAS = {
     leaves = { {28256,"d"}, },
     auto = { [28256]=true },
     entrance = { goto_room = 2010, run = "up" },
+    -- The theatre shuffles, so a maze exit can dump you clean out into The
+    -- Imaginarium (2010) - Lemdagor, not Prosper.  The mapper only knows the
+    -- 28256 'd' route out (already dead in 'leaves'), so which exit did it on
+    -- the day is not knowable from here; what matters is getting back in.
+    -- Up is the way, and the mapper records that exit as 'op u;u', so there
+    -- is a door.  'op u' on an already-open door is harmless.
+    recover = { [2010] = { label = "The Imaginarium", dir = "u", cmds = { "op u", "u" } }, },
     bridges = {  },
     sections = {  },
     outlabel = "rooms",
@@ -1012,6 +1019,7 @@ local want_range  = nil    -- the rooms this mob is actually seen in
 local wide        = false  -- 'all <mob>' ignores the room range
 local leaving     = nil    -- the way out we are walking to
 local stepping_back = false  -- undoing a move that left the area
+local recovers    = 0      -- times we have climbed back in this run
 local journey     = nil    -- a second leg to run once we cross over
 local awaiting_leg = false -- crossed over, waiting to land
 local menu_on_arrival = false -- walked in from outside; show the list
@@ -1688,6 +1696,38 @@ function OnPluginBroadcast (msg, id, bname, text)
 
   if not running then return end
 
+  -- Landed in a room outside the area that we know the way back from.
+  -- Checked before anything else, because it does not matter how we got
+  -- here - a step that led out, a resync that found us adrift - the answer
+  -- is the same: go back in and carry on.  Skipped during travel (we walk
+  -- through 2010 on the way in) and while deliberately heading out.
+  local back_in = A and A.recover and A.recover[num]
+  if back_in and phase ~= "travel" and not leaving and not journey then
+    recovers = recovers + 1
+    if recovers > 5 then
+      stop ("Kept falling out into " .. (back_in.label or ("room " .. num)) ..
+            " and could not stay in " .. A.label .. " - stopped.", true)
+      return
+    end
+
+    -- The exit that led out is worth crossing off, same as the step-back
+    -- path does, so the sweep stops choosing it.
+    if pending and NAME[pending.from] then
+      record (pending.from, pending.dir, 0)
+    end
+    resyncing     = false
+    stepping_back = true
+
+    warn ("Dropped out into " .. (back_in.label or ("room " .. num)) ..
+          " - going back in with @x048" ..
+          table.concat (back_in.cmds, "@w, @x048") .. "@w.")
+
+    pending = { from = num, dir = back_in.dir }
+    for _, c in ipairs (back_in.cmds) do Send (c) end
+    DoAfterSpecial (move_wait, "mm_timeout (" .. gen .. ")", 12)
+    return
+  end
+
   if phase == "travel" then
     if NAME[num] then
       phase = (target and "goto") or "sweep"
@@ -1730,6 +1770,7 @@ function OnPluginBroadcast (msg, id, bname, text)
   end
 
   stepping_back = false
+  recovers      = 0        -- back inside, so the run is healthy again
   -- coming back in from outside there is no edge worth recording
   if NAME[from] then record (from, dir, num) end
 
@@ -1746,6 +1787,7 @@ end
 
 function begin (kind, tgt, mobname, noscan, wide_search)
   if running then stop () end
+  recovers = 0
   absorb_room ()
 
   steps     = 0
