@@ -15,6 +15,102 @@
    >
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+WHAT IT DOES
+  Times Spectre of the Deep (SKD) fights and reports the haul: trains,
+  gold, TP token, quest points, Repop Token and Sigil of the Catacombs.
+  Keeps a full run history, lifetime totals, and a "today" total.
+
+  This is the ORIGINAL of the report plugin family. MatronReporter,
+  TEDReport and FractalReport all copy its colour machinery and report
+  line format, so if you change something structural here, check them too.
+
+COMMANDS
+  skdreport [chan]       send the last run report
+  skdreportlife [chan]   send lifetime stats
+  skdreportday [chan]    send stats for runs since the most recent 7am
+  skdreport channel <n>  set the default channel
+  skdreport life         show lifetime stats locally
+  skdreport reset        reset the run in progress
+  skdreport resetlife    wipe the lifetime history
+  skdreport help         help
+
+HOW IT WORKS
+  RUN LIFECYCLE, driven by the Spectre's own dialogue:
+    skd_start          "Best to avoid his attention completely..."
+                       starts the timer
+    skd_parting_gift   "A parting gift..." ends the timer and OPENS the
+                       reward recording window
+    the capture triggers (trains and gold, Sigil, TP token, Ocean Death
+                       or Ocean Life for the Repop Token, quest points)
+                       record into the run
+    skd_farewell       "Farewell." finishes the run, builds the report
+                       and saves it
+  Unlike the sibling plugins there is no quiet timeout here: the MUD
+  provides an explicit start, an explicit reward window and an explicit
+  end, so the run boundaries are exact.
+
+  ABORT ON LEAVING THE AREA. OnPluginBroadcast watches room.info while a
+  run is timing or recording, and if the area changes from skd_run_area
+  the run is abandoned with a note. The area is read by calling the GMCP
+  handler plugin with CallPlugin(id, "gmcpdata_as_string", "room.info")
+  and loadstring on the result.
+
+  THE PUPS RATE is SKD specific: TRAINS_PER_PUP is 4, so pups is trains
+  divided by 4 and the rate is elapsed seconds per pup. That is the number
+  the report leads with after the time.
+
+  THE RUN HISTORY is a Lua table literal serialised into ONE plugin
+  variable, run_history, and read back with loadstring. Each normal record
+  is {e, tr, g, tp, qp, rp, si, ts}: elapsed, trains, gold, tp, qp, repop,
+  sigil, timestamp.
+
+  LEGACY MIGRATION. Older versions kept flat life_ variables instead of a
+  history. MigrateOldStats runs once, when run_history does not exist, and
+  wraps all the old aggregate numbers in a SINGLE record marked
+  {legacy=1, lruns=N}. ComputeLifeTotals counts that record as N runs
+  rather than 1. Legacy records carry no real timestamp, which is why both
+  LastRunTS and the daily totals skip them.
+
+  THE DAY LINE uses GetDayCutoff, which is the most recent 7am (today's,
+  or yesterday's if it is currently before 7am). That is the Aardwolf day
+  boundary, not midnight.
+
+  THE COLOUR MACHINERY: BuildLine takes a list of {colour, text} segments
+  and returns MUSHclient ColourNote arguments, plain text and an Aardwolf
+  at code string all at once. The at code string is what is Sent to the
+  channel, so one definition drives both the local echo and the outgoing
+  line.
+
+DATA AND STATE
+  save_state is "y", and there is a durable storage block at the top of
+  the script that replaces SetVariable, GetVariable and DeleteVariable
+  with wrappers that ALSO write a Lua table to SKDReport.dat next to the
+  plugin file. MUSHclient's own plugin variable storage is per world and
+  is lost when a plugin is reinstalled by hand rather than reloaded, which
+  is why settings here kept resetting. The wrappers still call the real
+  functions, so both stores stay in step. The path is found with
+  GetPluginInfo(GetPluginID(), 6), which returns the plugin FILE, so the
+  filename is stripped off first.
+
+  Variables: run_history (the whole history) and channel.
+
+WHEN EDITING
+  * The alias sequence numbers matter. The subcommands (channel, reset,
+    help, life, resetlife) are at sequence 100 and the catch all
+    "skdreport <something>" is at 200, so a subcommand is never eaten by
+    the channel form.
+  * To add a reward you need: a trigger, a skd_ state variable, a reset in
+    ResetSKD, a field in SerializeRuns and ComputeLifeTotals and
+    ComputeDayTotals, and a block in the report builder.
+  * If you change the serialised record format, remember the legacy branch
+    in SerializeRuns has its own format string.
+  * Both trigger wordings for the Repop Token (Ocean Death and Ocean Life)
+    point at the same handler on purpose.
+-->
+
 <!--  Triggers  -->
 
 <triggers>

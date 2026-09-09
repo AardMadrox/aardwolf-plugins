@@ -26,6 +26,124 @@ Type 'dull help' in game for the full command list.
 </description>
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+THIRD PARTY PLUGIN WITH LOCAL PATCHES. This is Nokfah's DullTracker (a
+  rewrite of SharpTracker); author= is still Nokfah and it should stay
+  that way. Eric has added a set of local changes on top, and every one
+  of them is marked in the source with a comment beginning
+  "LOCAL PATCH". If you ever take a fresh copy from upstream, search for
+  that string in this file first and re apply what is listed below.
+
+  Do NOT bump version= here just because the file was edited locally;
+  the version belongs to upstream.
+
+WHAT IT DOES
+  Aardwolf character development tracking: campaigns, quests, global
+  quests, levels, powerups, double exp, epics, exp and gold rates by
+  area, and a session and lifetime summary. Type "dull help" in game for
+  the full command list.
+
+THE LOCAL PATCHES, in the order they appear
+
+  1. TIME CAPS THAT EXCLUDE RATHER THAN CLAMP.
+     A campaign or quest taken and then left sitting while you do
+     something else records as a multi hour run. Anything over the cap is
+     now LEFT OUT of the figures entirely.
+
+     It used to count AS the cap, which was still wrong: a campaign
+     requested two hours before it was actually started is not a six
+     minute campaign either, and folding it in at six minutes pulled the
+     average toward the cap for a run that never happened. At level 201
+     roughly two thirds of campaigns were over the cap, so the average was
+     mostly reporting the cap rather than the play.
+
+     Excluding costs sample size. That is the trade, and it is the right
+     one here: what is left describes campaigns actually played through.
+
+     The caps:
+        TIME_CAP_CP_HIGH_LEVEL 200   campaigns taken at 200 or above...
+        TIME_CAP_CP_HIGH       6 min ...are capped here
+        TIME_CAP_CP            5 min campaigns below that level
+        TIME_CAP_QUEST         3 min all quests, every level (matches
+                                     SnD's own cap)
+        TIME_CAP_GQ           45 min global quests; only catches a broken
+                                     timer
+     NOTHING STORED IS ALTERED. SnD's rows and dull's own history keep
+     their real times, so setting a cap to 0 turns it off and the raw
+     numbers come straight back.
+
+     CapTime() is kept but no longer called, so a cap can be put back to
+     clamping in one place if that is ever wanted.
+
+     Three places implement the exclusion and all three must agree: the
+     SQL capWhere clause over SnD's stored rows, the hand folded current
+     run in TimeStatsString, and the GQ loop. The GQ loop builds its count
+     up alongside the totals ON PURPOSE, because taking the count from
+     table.getn ahead of the loop would divide a FILTERED total by an
+     UNFILTERED count and report an average far too low.
+
+  2. SnDTrueStart: TRUE START, NOT THE RELOAD.
+     Reloading dull part way through a campaign or quest restarts its
+     timer, so the run reports far shorter than it was. A 2m48s campaign
+     came out as 1m36s and took over "best" for the level.
+
+     Search_and_Destroy writes an open row (status 1) the moment you take
+     a campaign or quest, so the real start is already on disk in
+     SnDdb.db. SnDTrueStart reads the newest open row of that type and
+     uses its start time instead, with two guards:
+       it only ever moves the start EARLIER, because a reload can lose
+         time and never gain it, so a later start could not have come from
+         this run,
+       it ignores a start older than SND_OPEN_START_MAX (6 hours),
+         because SnD leaves rows open when one is abandoned rather than
+         finished, and without a bound the newest open row could be an
+         ancient one.
+     It falls through to dull's own timer whenever there is nothing
+     trustworthy: no SnD, no database, or a locked database all behave
+     exactly as before. It is applied where the timer STOPS, not at report
+     time, because .last is what every later reader uses.
+
+  3. "dull forget <cp|gq|quest|lvl|pup|dbl|timed>": drop the newest
+     history entry of one timer.
+     History entries are finished report STRINGS, so a run timed wrong is
+     stuck in the list as text and recomputing best or average will not
+     touch it. This removes the newest entry and echoes what went, so
+     removing the wrong one is immediately obvious.
+
+THE XPR FIGURES, which are easy to get wrong
+  XPR is SECONDS PER 1000 EXP, so LOWER is faster.
+
+  The live info bar XPR is a ROLLING window over recent kills: it changes
+  only when a kill completes, and is computed as
+      rate = 1000 * (sum of gaps) / (sum of xp)
+  across the last xprSmooth kills (default 10). xprTimeout (default 15
+  seconds of quiet) ends a streak for that rolling figure.
+
+  The whole run averages printed on the double exp and timed exp report
+  lines are a DIFFERENT calculation, taken from that run's own totals so
+  they agree with the XP per minute on the same line:
+      1000 / (xp / seconds)
+  Both the double exp and the timed exp lines use that same form.
+  Do not "unify" these two; the rolling one answers "how fast am I going
+  right now", the run one answers "how fast was that run overall".
+
+  Per area rates use the same 1000 / (total / seconds) form.
+
+DATA AND STATE
+  save_state is "y". It reads Search_and_Destroy's SnDdb.db in the world
+  folder for the campaign and quest history, which is where the borrowed
+  best and average times come from.
+
+WHEN EDITING
+  * Search this file for "LOCAL PATCH" before doing anything else.
+  * The plugin builds many of its triggers at runtime with AddTriggerEx
+    and trigger_flag constants, so not every trigger is visible in the XML.
+  * The file includes constants.lua, but trigger_flag and timer_flag are
+    built into MUSHclient, so that include is usually removable.
+-->
+
 <!-- 
 	TODO:
 		- Avg xp per kill

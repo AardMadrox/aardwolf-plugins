@@ -41,6 +41,120 @@
 >
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+NOTE: there is already a design note block at the very top of this file,
+  above the muclient tag. These notes go deeper into the code.
+
+WHAT IT DOES
+  One watch list, two places to buy from: the marketplace (scanned on
+  demand with "marketw") and the live auction channel (watched passively,
+  always on). Matching items get a one click bid link at the maximum price
+  you set per item.
+
+  NOTHING IS EVER BID AUTOMATICALLY. A bid is only sent when you click a
+  link, and market links re verify against a fresh "lbid <num>" read at
+  click time.
+
+COMMANDS (see "marketw help" in game for the full list)
+  market add <name> <max>      add a watch entry
+  marketw                      scan the market now
+  marketw list                 show the watch list
+  marketw bids                 what you already have a bid on
+  marketw del <name>           remove an entry
+  marketw deep                 probe every truncated row, not just likely
+  marketw popup / auc / mkt    subsystem toggles
+  marketw probe <num>          dump the raw lbid box (debug)
+  marketw auc debug            echo every Auction and Market line (debug)
+
+THE TWO HARD PROBLEMS THIS PLUGIN SOLVES
+
+  1. TRUNCATED MARKET NAMES. "market list" cuts the item description to 28
+     characters, and a name cut exactly ON a space shows only 27 and looks
+     complete. So parseListRow flags ANY row of 27 or more characters as
+     suspect (row.truncated), and such a row is re read with a silent
+     "lbid <num>" probe before its name is trusted.
+
+     classifyRow returns one of three answers per row:
+       "sure"   the pattern matched text we can actually see, so it must
+                also match the full name
+       "maybe"  the row is truncated and the pattern could still match the
+                part we cannot see, so a probe is needed
+       nil      no match
+     couldMatchTruncated implements "maybe": if earlier pieces matched,
+     the rest may live in the cut off tail; if only the FIRST piece is in
+     play, straddles() checks whether a prefix of at least 4 characters
+     sits at the very end of the visible text.
+
+     Probes cost a command each, so two cheap checks run first and skip
+     the probe entirely: already bid on this number, or the current bid
+     already exceeds your maximum. Both facts are in the list itself.
+
+     Auction channel lines carry the FULL item name, so those matches are
+     exact and need no probe at all.
+
+  2. MATCHING USER TEXT SAFELY. norm() lowercases and reduces everything
+     to letters, digits and single spaces. splitGlob splits a watch
+     pattern on "*" into normalised literal pieces, and piecesMatch
+     checks those pieces appear in order using plain find with the
+     plain flag. That is exactly glob semantics WITHOUT ever building a
+     Lua pattern out of user typed text, which is the point: a watch entry
+     containing a percent sign or a bracket can never blow up or match
+     wildly.
+
+PARSING
+  parseListRow uses FIXED COLUMN OFFSETS, verified against real output:
+    1 to 6 num, 7 space, 8 to 35 item (28 wide), 36 space, 37 to 39 level,
+    41 to 45 type, 47 to 62 last bid, 64 to 67 bids, 69 onward time left.
+  It sanity checks that columns 7 and 36 really are spaces before
+  accepting a row. If Aardwolf ever changes the market list layout, this
+  is the function that breaks.
+
+  boxValue parses the "| Label : value |" lines of the lbid box. The label
+  for a BUYOUT price is still unknown (the verified sample had none), so
+  any label containing "buyout" is accepted. Unreadable fields stay nil,
+  and a nil name means no bid link is offered for a truncated row, which
+  is the safe failure.
+
+  Both the list and the box are read through the client's capture library,
+  so they can be run silently; styleText flattens a captured style run
+  list back into plain text.
+
+STATE AND LEDGERS
+  Market numbers (five digits, like 64817) and auction numbers (two
+  digits, like 97) are SEPARATE NUMBER SPACES, so the "already bid"
+  ledgers are kept separate too. Do not merge them.
+
+  gRows is not cleared by a scan: an item announced on the market channel
+  lives there too, and a scan should not kill its links. Only entries
+  older than SCAN_TTL (600s) are dropped.
+
+  AUC_BID_TTL (3600) forgets an auction bid after an hour; AUC_TTL (300)
+  makes an auction line's link go stale after five minutes.
+
+  BID_FAIL_WINDOW (20s) is how long a "you are only carrying N gold"
+  failure is still assumed to refer to the bid you just sent. That line
+  helpfully states the gold on hand, so the shortfall is exact.
+
+DATA AND STATE
+  MarketWatch_data.lua in the world folder (GetInfo(66)): the watch list
+  and both bid ledgers.
+
+WHEN EDITING
+  * keep_evaluating is essential on the channel triggers. MUSHclient stops
+    the trigger chain on the first match, and the soundpack and channel
+    plugins want these lines too.
+  * The command templates are constants near the top: CMD_BID
+    ("lbid $num $amt proxy confirm"), CMD_BUY, CMD_PROBE, CMD_AUC,
+    CMD_AUCID. Change them there, not inline.
+  * The meaning of the "*" in the market list type column is NOT yet
+    confirmed; row.star records it but nothing depends on it.
+  * The popup prompt is a miniwindow (WIN_ID "MarketWatch_prompt") with a
+    POPUP_TTL of 60 seconds. It is a convenience layer over the same
+    click to bid actions, not a separate path.
+-->
+
 <!-- ============ TRIGGERS: the live auction channel ============
      keep_evaluating is essential here - MUSHclient stops the trigger chain on
      the first match, and the soundpack / channel plugins want these lines too.

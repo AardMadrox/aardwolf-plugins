@@ -12,6 +12,98 @@
 >
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+WHAT IT DOES
+  Tracks Luminous Fractal turn ins: what they awarded and how long the run
+  took, reports each one to a channel, and keeps lifetime totals.
+
+  One of a family of near identical report plugins: SKDReport,
+  MatronReporter, TEDReport, FractalReport. They share the colour
+  machinery, the file based channel storage and the report line format. If
+  you fix something structural in one, check the others.
+
+COMMANDS
+  fractalreportchan <chan>   set the default report channel
+  fractalreportchan          show which channel reports go to
+  fractalreport [chan]       resend the last run report
+  fractalreportlife [chan]   send lifetime stats
+  fractalreporthelp          help
+
+  There is no fractalstatus command, because unlike SKD, Matron and TED
+  the Fractal has NO lockout, so there is no next run to report.
+
+HOW IT WORKS
+  THE HARD PART HERE IS REWARD ORDERING, and it is why this plugin has
+  machinery the siblings do not.
+
+  The turn in awards trains and gold BEFORE the Fractal specific TP token
+  line arrives. Several of those reward lines are generic wordings that
+  other content also produces, so they cannot be trusted on their own to
+  mean "a Fractal run happened". The solution is two tiered:
+
+    Fractal UNIQUE lines (the turn in line, the TP token line) call
+      ArmFinalize(), which OPENS a collection window if one is not
+      already open.
+    GENERIC lines (quest points, training sessions) call
+      ArmFinalizePassive(), which only EXTENDS a window that is already
+      open and never opens one.
+
+  To catch generic rewards that arrived just BEFORE the window opened,
+  those are stashed in preBuf with a timestamp. When a window opens,
+  ClaimStash() pulls in anything stashed within PRE_WINDOW (5 seconds) and
+  discards the rest.
+
+  Each armed call schedules FractalFinalizeCallback 1.5 seconds out, so
+  the run is finalised once the reward lines go quiet. finalizeGen and
+  pendingGen guard against a stale callback.
+
+  FinalizeRun REFUSES to record a run where nothing was actually awarded,
+  which is what happens if you hand the Fractal an unrelated item. It also
+  leaves the run timer alone in that case.
+
+  TIMING is separate from reward collection. RunStart fires on the
+  spectral flames intro line and sets startTime. If no start line was seen
+  this run, secs is recorded as 0 and the report shows "n/a". Lifetime
+  averages only count TIMED runs (timedRuns and totalSecs), so untimed
+  runs do not distort the average.
+
+  THE OUTLIER GUARD, as in MatronReporter: a death and resume restarts the
+  timer and gives an unrealistic time. If elapsed is more than
+  OUTLIER_UNDER (60s) below or OUTLIER_OVER (120s) above the average of
+  previous TIMED runs, the run is KEPT but recorded at the average, so the
+  run count and reward percentages stay right without the average moving.
+  It only judges once OUTLIER_MIN_RUNS (3) timed runs exist.
+
+  THE COLOUR MACHINERY, shared with the siblings: BuildLine turns a list
+  of {colour, text} segments into MUSHclient ColourNote arguments, plain
+  text and an Aardwolf at code string all at once. The at code string is
+  what is Sent to the channel. ANote parses at codes back into
+  ColourNote arguments for local echo.
+
+DATA AND STATE
+  Two files in the world folder (GetInfo(66)):
+    fractal_runs.txt      run history as a Lua table literal
+    fractal_channel.txt   the report channel, one word
+  save_state is "y" and the channel is also written to a plugin variable,
+  but the FILE is the authority: plugin variables only reach disk on a
+  clean shutdown, so a crash or manual reinstall used to silently reset
+  the channel. LoadChannel tries file, then plugin variable (pre 1.7),
+  then DEFAULT_CHANNEL ("gt").
+
+  Runs recorded before v1.5 have no timestamp, hence LastRunTS walking
+  backwards to find a real one.
+
+WHEN EDITING
+  * Before adding a trigger, decide whether the line is Fractal UNIQUE or
+    GENERIC, and call ArmFinalize or ArmFinalizePassive accordingly. This
+    is the single easiest thing to get wrong here: wiring a generic line
+    to ArmFinalize would make unrelated content record phantom runs.
+  * ParseNum strips commas before tonumber.
+  * BuildReportSegs only prints fields that are non zero.
+-->
+
 <aliases>
   <alias
     match="^fractalreportchan\s+(\S+)$"

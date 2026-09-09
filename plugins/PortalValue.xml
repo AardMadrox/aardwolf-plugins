@@ -45,6 +45,102 @@
 >
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+NOTE: there is already a summary comment at the very top of this file,
+  above the muclient tag. These notes go deeper into the code.
+
+WHAT IT DOES
+  Two tools that were merged into one plugin at v3.0 (PortalDex was folded
+  into PortalValue).
+
+  1. PORTAL PATHING (pv). Stand in a room, type pv, and it finds the
+     saved mapper portal with the shortest walk to where you are, across
+     ALL areas, and prints the speedwalk FROM that portal TO this room
+     with a movement count. It also reports the plain walking distance
+     from recall, and three filtered answers: nearest portal excluding
+     normal chaos, excluding all chaos, and gameload only.
+
+  2. PORTAL CATALOG (portaldex). Builds a saved catalog of your portals by
+     type by reading Aardwolf "id" output.
+
+  MOVEMENT RULE, used consistently: a portal hop is 1, each cardinal step
+  is 1, each cexit is 1, and open or close is 0 because those never appear
+  in mapper paths.
+
+HOW THE CATALOG WORKS
+  Two triggers capture the "id" box: pd_border matches the plus and dash
+  border line, pd_line matches the pipe delimited content lines. Capture
+  starts on a "Keywords :" line and ends at the next border, and an
+  unclosed box is flushed if a new one starts.
+
+  pd_parse rebuilds the label to value fields, handling CONTINUATION
+  lines (a line starting with a colon appends to the previous label with a
+  comma), then requires an Id and a Type containing "portal" before it
+  records anything.
+
+  CLASSIFICATION IS BY FLAGS AND KEYWORDS, deliberately, because both
+  survive restringing while the item NAME does not:
+      nosac AND nosteal        a chaos portal
+        plus precious, or the keyword "golden"   a golden chaos portal
+      keyword "trivia", or Found at "A Bad Trip"  a trivia portal
+      anything else            gameload
+  The restrung flag is tracked separately.
+
+  A record keeps refs (the take or get references seen pointing at it),
+  the landing room and room name once stamped, so re cataloguing the same
+  portal never loses that.
+
+  Portals catalog automatically when you "id" one (pd_auto), or in bulk
+  with "portaldex scan", which walks your portal bag issuing an id per
+  item.
+
+HOW THE PATHING WORKS
+  compute_for_room does everything against the mapper's own sqlite
+  database:
+    it looks up the target room's area and name,
+    builds a REVERSE adjacency list (radj), keyed by destination,
+    collects every portal as an exit whose fromuid is '*' or '**',
+    finds the recall room from the '**' exits, preferring one whose
+      direction text contains "recall",
+    then runs a breadth first search BACKWARDS from the room you are
+      standing in.
+  Searching backwards is the trick: one BFS from your room gives the
+  distance from EVERY portal landing room at once, instead of running a
+  search per portal.
+
+  build_speedwalk compresses runs of the same cardinal direction into
+  Aardwolf run syntax, breaking the run on any non cardinal step.
+
+DATA AND STATE
+  Deliberately split in two:
+    the CATALOG lives in its own file, PortalDex_data.lua, in the world
+      folder (GetInfo(66)). Other plugins read it: AreaWalks uses it to
+      classify portals, and PortalUse uses it for destination areas.
+    the pv HISTORY lives in plugin state.
+  Keeping them separate is intentional, so a state reset does not lose the
+  catalog.
+
+  The mapper database is located at runtime from the mapper plugin's own
+  db_name variable plus the world folder, which is what makes this plugin
+  shareable rather than hardcoded to one install.
+
+WHEN EDITING
+  * q() builds an escaped sqlite string literal (single quotes doubled);
+    esc() doubles at signs so text out of the database cannot be read as a
+    colour code. Use both.
+  * Both triggers use keep_evaluating so "id" output still reaches other
+    plugins.
+  * pd_parse only records when pd_auto is on or a scan is active, so
+    idding a portal with auto off does nothing. That is deliberate.
+  * If you change the catalog record shape, remember AreaWalks and
+    PortalUse both read PortalDex_data.lua and expect catalog entries with
+    name, ptype, level, leads and room.
+  * "pvcheck" is the diagnostic: it reports whether the mapper, the
+    database and sqlite3 were all found.
+-->
+
 <!-- ============ TRIGGERS: capture 'id' boxes for the catalog ============ -->
 <triggers>
   <trigger enabled="y" regexp="y" keep_evaluating="y" match="^\+\-+\+\s*$"     script="pd_border" sequence="100"></trigger>

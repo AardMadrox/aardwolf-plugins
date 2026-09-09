@@ -21,6 +21,92 @@ Commands:
 </description>
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+WHAT IT DOES
+  Three related things in one plugin:
+    1. Counts chaos portals you cast, split normal versus golden, and
+       continent versus area destination.
+    2. bcp: bulk cast N chaos portals, waiting for each to actually land.
+    3. RaviTrack: counts blank chaos portals bought from Ravi, by type.
+  It also looks up, in the mapper database, every room a portal could have
+  led to, and prints them as clickable goto links.
+
+COMMANDS
+  chaoscast            show stats
+  chaoscast help       help
+  chaoscast reset      reset stats
+  chaoscast rooms      list mapper rooms the last portal could lead to
+  chaoscastbc          toggle the group tell broadcast
+  bcp <n>              bulk cast n chaos portals
+  bcpstop              stop a running bcp
+  (plus the ravitrack commands for the Ravi counters)
+
+HOW IT WORKS
+  COUNTING is a two line pair. The golden line
+  ("The chaos portal flares with a golden aura!") only sets pendingGolden;
+  the actual counting happens on the DESTINATION line
+  ("Your chaos portal leads to <Room> in <Area>."), which is what
+  guarantees one count per real portal. The destination handler also
+  classifies the area against the hardcoded CONTINENTS set.
+
+  BCP IS EVENT DRIVEN, NOT TIMED, and that is the point. It casts one
+  "c chaos blank" and then WAITS for the portal to actually be created,
+  which OnPortalDestination reports by calling BcpOnPortalRecorded. Only
+  then does it cast the next. That respects the cast's round time instead
+  of spamming on a blind timer.
+
+  Two timers support it: bcp_watchdog re casts after BCP_WATCHDOG_SEC (6)
+  if a cast silently produced no portal, and bcp_next gives
+  BCP_DELAY_SEC (1) of breathing room after a landed portal. The
+  bcp.active flag lets bcpstop halt everything cleanly.
+
+  DESTINATION ROOM LOOKUP. The portal line gives the destination room NAME
+  and AREA but not a room uid, and a name like "Ghostly Sands" repeats
+  many times inside an area. So the pair is looked up in the mapper's own
+  sqlite database and every candidate is printed as a clickable
+  "mapper goto <uid>" link, styled like the mapper's own find results.
+  That lets you see where a portal goes WITHOUT spending it.
+
+  Note the area matching accepts either form: rooms.area holds the area
+  KEYWORD ("alagh") while areas.name holds the display name the MUD prints
+  ("Alagh, the Blood Lands").
+
+  ROOM_LIST_LIMIT (20) truncates the list by default; ROOM_LIST_CAP (200)
+  is the ceiling even for "chaoscast rooms all".
+
+  RAVITRACK counts purchases off the "You spend five trivia points on X."
+  line, keyed by the four known blank portal type names.
+
+DATA AND STATE
+  Two files next to the plugin: ChaosCast.dat (stats and toggles, key
+  equals value) and RaviTrack.dat (type pipe count).
+
+  BOTH HAD PATH BUGS, and the migration code for them is still here:
+    the stats file used to get the plugin path glued straight onto it,
+      producing "ChaosCast.xmlChaosCast.dat", because
+      GetPluginInfo(id, 6) is the plugin FILE path and not its folder,
+    RaviTrack.dat used a bare relative name, so it landed in whatever
+      directory MUSHclient happened to be started from.
+  LEGACY_STATS and LEGACY_RAVI list those old locations, and
+  MigrateDataFiles moves them across on load. Do not delete that until
+  you are sure no old files remain.
+
+  RAVI_LEGACY_KEYS maps the old capitalised type names to the corrected
+  lowercase keys, so counts saved before the case fix are not silently
+  lost.
+
+WHEN EDITING
+  * timer_flag and bit are used for the bcp timers. Those constant tables
+    are built into MUSHclient; no constants.lua include is needed.
+  * To add a continent, add the lowercase display name to CONTINENTS.
+  * To add a Ravi portal type, add it to RAVI_TYPES and to the
+    ravi_counts table.
+  * The group tell broadcast is built from Aardwolf at codes and sent with
+    Execute, so it goes through the client command processor.
+-->
+
 <!--  Triggers  -->
 <triggers>
 

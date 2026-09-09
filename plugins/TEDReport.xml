@@ -12,6 +12,86 @@
 >
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+WHAT IT DOES
+  Times TED (the Fury City epic) runs, records the reward, and reports the
+  result to a channel automatically. Keeps lifetime statistics and tracks
+  the 23 hour lockout.
+
+  One of a family of three near identical report plugins: SKDReport,
+  MatronReporter, TEDReport, plus FractalReport. They share the colour
+  machinery, the file based channel storage, and the report line format.
+  If you fix something structural in one, check the others.
+
+COMMANDS
+  tedreportchan <chan>   set the default report channel
+  tedreportchan          show which channel reports go to
+  tedreport [chan]       resend the last run report
+  tedreportlife [chan]   send lifetime stats
+  tedstatus [chan]       last run and when the 23h lockout is up
+  tedreporthelp          help
+
+HOW IT WORKS
+  RUN LIFECYCLE.
+    RunStart    the Willie Braggz aggression line, starts the timer
+    RunEnd      "Try again in 23 Hours." snapshots the elapsed time and
+                arms the finalizer; the reward lines arrive AFTER it
+    RunNothing  the "YOU GET NOTHING!" line, which finalizes IMMEDIATELY
+                with zero rewards and a nothing flag, since no reward
+                lines are coming
+    LootTrains / LootGold / LootTP each record their value and re arm the
+                finalizer
+
+  ArmFinalize schedules TEDFinalizeCallback 1.5 seconds out with
+  DoAfterSpecial, and each new reward line re arms it, so the report is
+  built once the reward lines stop. finalizeGen and pendingGen guard
+  against a callback from an earlier run firing.
+
+  TED gives ONE reward per run, so BuildRunSegs only includes the fields
+  that are actually non zero.
+
+  STATISTICS keep both totals and per run presence counts, so the lifetime
+  line shows both an absolute total and the percentage of runs that
+  produced each reward, plus a Nothing percentage.
+
+  THE COLOUR MACHINERY, shared with the sibling plugins: BuildLine takes a
+  list of {colour, text} segments and returns three renderings at once,
+  MUSHclient ColourNote arguments, plain text, and an Aardwolf at code
+  string. The at code string is what is Sent to the channel, so one
+  definition drives both. ANote does the reverse, parsing an at code
+  string back into ColourNote arguments for a local echo.
+
+  COOLDOWN is 23 hours. NextRunLabel adds it to the last run timestamp and
+  reports "available now" or the date plus a countdown.
+
+DATA AND STATE
+  Two files, both in the world folder (GetInfo(66)):
+    ted_runs.txt      the run history as a Lua table literal, read back
+                      with loadstring
+    ted_channel.txt   the report channel, one word
+  save_state is "y" and the channel is also written to a plugin variable,
+  but the FILE is the authority. Plugin variables only reach disk on a
+  clean MUSHclient shutdown, so a crash or a manual reinstall used to
+  silently drop the channel back to the default. LoadChannel tries file,
+  then the old plugin variable (pre 1.4), then DEFAULT_CHANNEL ("gt").
+
+  Runs recorded before v1.2 have no timestamp, which is why LastRunTS
+  walks backwards until it finds a real one.
+
+WHEN EDITING
+  * All the reward triggers tolerate an optional comma after "everything",
+    because the MUD wording varies. Keep that.
+  * ParseNum strips commas out of numbers before tonumber; Comma puts
+    them back for display.
+  * To add a reward type you need: a trigger, a state variable, a reset in
+    RunStart, a field in SaveRuns and CalcTotals, and a block in
+    BuildRunSegs and ShowLifetimeStats.
+  * RunNothing does NOT go through FinalizeRun; it writes its own record
+    and report. If you change the record format, change it in both places.
+-->
+
 <aliases>
   <alias
     match="^tedreportchan\s+(\S+)$"

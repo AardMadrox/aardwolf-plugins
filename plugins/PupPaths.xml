@@ -38,6 +38,113 @@ Optional prefixes force the behaviour if you ever need to (eg on a laggy MUD):
 </description>
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+WHAT IT DOES
+  Walks a named route ONE ROOM AT A TIME. You type the path keyword to
+  take the next step, which is what makes it usable while doing something
+  else (the pup use case). It learns the rooms along a path on the first
+  clean run, and after that it can work out where you are and continue
+  from there instead of resetting.
+
+COMMANDS
+  pp help                show help
+  pp list                list paths, positions and recorded state
+  pp add <name> <dirs>   add a path
+  pp del <name>          delete a path
+  pp reset <name>        reset a path to step 1
+  pp on / pp off         enable or disable
+  ppcharge               toggle charge mode (sends "charge <dir>")
+  pp <name>              take one step on that path
+
+HOW IT WORKS
+  PATH SYNTAX. Segments are separated by semicolons. parseDirs turns each
+  segment into a step token:
+    a run of direction letters and digits (3e2s) expands to individual
+      "move" steps
+    "op n" and friends become "cmd" (a door: does not move you)
+    "do:<command>" forces "cmd", advance immediately
+    "go:<command>" forces "movecmd", wait for the room to change
+    anything else becomes "autocmd", type unknown
+  Example:
+    pp add temple 3n;pull lever;e2e;enter portal;2s;op d;d
+
+  THE AUTOCMD AUTO DETECTION is the clever part. An autocmd is executed,
+  ppMoving is set, and a 0.7 second DoAfterSpecial timer is armed. If a
+  GMCP room.info arrives first, it was a move and the confirm branch
+  advances the step. If the timer fires first, it did not move you and
+  pp._cmdTimeout advances it as a stay put command. ppSeq is a sequence
+  number so a newer step supersedes an older timer.
+
+  MOVES DO NOT ADVANCE OPTIMISTICALLY. A direction step sets ppMoving and
+  waits for room.info to confirm the move actually happened. A failed move
+  therefore does not skip a step.
+
+  ROOM RECORDING. Each time you take a step, the room you are standing in
+  is recorded against that position. Once every position 1 to total has a
+  room, recordingComplete is true and the path is marked recorded on the
+  next completion.
+
+  POSITIONING ON A RECORDED PATH. buildEffectiveRooms maps each step to
+  the room it is executed FROM, with one important normalisation: a stay
+  put command step (a door) inherits the room of the NEXT move, which
+  collapses consecutive same room steps. Without this, a leading "op w"
+  and the move after it would look like two different rooms and could
+  strand you on the wrong step. pp.step then:
+    if the effective room for your current position already matches the
+      room you are in, just carry on,
+    otherwise jump to the EARLIEST step belonging to your room, which is
+      what lets you walk onto the path anywhere,
+    and if you are not on any recorded room of the path, it sends
+      "mapper goto <first room>" and asks you to press the key again.
+  Only RECORDED paths get the mapper assist; an unrecorded path still
+  needs one clean run.
+
+  OFF PATH MOVEMENT (a room change the plugin did not cause) resets only
+  UNRECORDED paths to step 1, because recording needs a clean run.
+  Recorded paths are left alone, since their position is recomputed from
+  your room anyway.
+
+  Combat is tracked from char.status state 8, and pp.step refuses to step
+  while fighting.
+
+  Room number -1 means an unmappable room (clan rooms and similar). The
+  value is kept but is never recorded or matched on.
+
+  A room.info for the room you are ALREADY in (from a look, for instance)
+  is ignored, so it cannot advance or reset a path.
+
+DATA AND STATE
+  Two files next to the plugin: PupPaths.dat (the paths) and
+  PupPathsConfig.dat (enabled and charge flags).
+
+  The data format is one path per line:
+      name|dirs|pos|recorded|idx-room,idx-room,...
+  Old three field lines (name|dirs|pos) still load, with no rooms.
+
+  THE MANGLED FILENAME BUG. GetPluginInfo(id, 6) returns the plugin FILE
+  path, not its folder. Gluing the data filename straight onto it produced
+  "PupPaths.xmlPupPaths.dat". The current code strips the filename off,
+  and OpenForRead still falls back to the old mangled names once if the
+  proper file is missing, so nothing was lost. Do not remove that
+  fallback without checking the old files are gone.
+
+WHEN EDITING
+  * requestRoom() sends a raw telnet subnegotiation packet with SendPkt.
+    "request room" is a GMCP protocol message, NOT a typed command, so it
+    cannot go out with Send.
+  * queryCurrentRoom() reads the GMCP handler's cached room number with
+    CallPlugin, which is how the plugin can position itself immediately
+    after a reload without asking the MUD.
+  * The "pp <name>" alias is at sequence 500 so every specific subcommand
+    (sequence 96) is checked first.
+  * The colour variable names (GREEN, RED, YELLOW) are historical and no
+    longer describe their values: they were remapped to the house theme,
+    so GREEN is the purple x099, RED is the green x048, and YELLOW is
+    also x099. Do not trust the names, read the hex.
+-->
+
 <aliases>
 
   <alias match="^pp on$" enabled="y" regexp="y" send_to="12" sequence="96">

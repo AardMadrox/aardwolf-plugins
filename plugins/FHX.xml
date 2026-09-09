@@ -115,6 +115,121 @@ the lowest person in the room is before each cast.
 
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+NOTE: the description block above this comment is the USER facing manual
+  and is kept complete and current. These notes cover the CODE, so read
+  the description for what the commands do and read this for how it is
+  built.
+
+WHAT IT DOES
+  Repeatedly casts incomplete healing (or regeneration) on yourself, on a
+  named player, or on whoever in the room is lowest on HP, until the
+  target is healed, mana runs out, or a fight starts. Also an auto heal
+  mode that tops the group up after every fight.
+
+ARCHITECTURE, in the order things happen
+
+  1. EVERY ALIAS FUNNELS INTO Request(kind, mode, name, count).
+     kind is "rep" (repeating fhx) or "one" (single hx).
+     mode is "self", "low" or "name".
+     Request validates, expands a count into that many queue items, and
+     calls PumpQueue.
+
+  2. THE QUEUE runs strictly in order, one item at a time. PumpQueue
+     starts the next item only when nothing is running (Busy) and the
+     character is free (FHXReady). If you are in combat, in a note, at a
+     pager prompt or asleep, items simply wait and start on their own
+     later. HOLD_STATES and HOLD_WHY map the GMCP char.status state
+     numbers to those reasons.
+
+  3. "LOW" IS RESOLVED IN RunItem, NOT WHEN THE COMMAND WAS TYPED. That
+     is deliberate: a queue of "hx low" items re picks the lowest player
+     before each cast. Note the contrast with a single repeating run,
+     which locks onto one target and will not jump.
+
+  4. THE HEAL LOOP paces off the MUD, not a blind timer. Cast, wait for
+     the heal tick line ("... healed by your magic touch"), then resend
+     after FHX_CAST_DELAY (1s). A watchdog (FHX_WATCHDOG, 10s) stops
+     everything if no heal tick arrives. Single hx casts use
+     FHX_ONESHOT_TO (8s) instead.
+
+  5. STOP CONDITIONS are all MUD lines: almost fully healed (self or
+     other), already fully healed, "Your magic is wasted", "They aren't
+     here.", out of mana, or cannot concentrate. Entering combat (GMCP
+     char.status state 8) pauses casting and holds the queue.
+
+  GROUP TARGETING. FindLowestGroupMember reads GMCP group data, so you
+  must be grouped with the target. You are a candidate too, and if you are
+  not grouped at all it falls back to your own HP. FHX_LOW_MIN_LOSS (4000,
+  settable) is the bar: someone must be missing more than that to count.
+
+  PETS ARE NEVER TARGETED. They are identified by the GMCP "qs" field
+  being 3, which means the group member is a mob rather than a player.
+  IsGroupPet and GroupPetNamed implement this, and Request refuses a
+  directly named pet too, so a pet golem in the room cannot soak up heals.
+
+  AUTO HEAL. When a fight ends (state leaves 8), AutoQueueLow starts a
+  run. AutoTopUp adds ONE cast at a time and refuses to add anything while
+  the queue is non empty, so auto is never more than one command deep and
+  can never put your own commands behind a pile of its own. The run stops
+  when nobody is past the threshold, when FHX_AUTO_CHAIN casts have been
+  sent for that fight (the "burst", default 3), or when anything abnormal
+  happens (EndAutoChain). FHX_AUTO_COOLDOWN (12s) limits how often a run
+  may start. Commands you type by hand are NOT capped.
+
+  AUTO LEADER mode watches the group leader instead of the lowest, using
+  its own FHX_LEADER_LOSS threshold.
+
+  AUTO IS ANCHORED TO AN AREA. Turning it on records the GMCP room.info
+  zone. CheckAutoZone runs on every room.info, and leaving that area turns
+  auto off, so it never follows you somewhere you did not want it running.
+  ZONE_GROUPS is the exception table: titan and transcend map to the same
+  group, so crossing between The Titans' Keep and Transcendence keeps auto
+  running and just moves the anchor.
+
+  RESERVED is a list of the plugin's OWN command words. If one is passed
+  where a player name is expected, Request says so rather than casting at
+  it, and adds a hint that the plugin may be older than the command you
+  typed.
+
+  SILENT MODE splits output two ways: cnote always prints, qnote is
+  suppressed in silent mode. Anything you typed a command to see still
+  prints, as do spell, threshold and mode changes and auto switching
+  itself on or off.
+
+DATA AND STATE
+  All settings live in FHX.dat next to the plugin, a plain key equals
+  value file: spell, auto, autoleader, autozone, silent, thresh,
+  leaderthresh, cooldown, burst, ignore. A file rather than SetVariable,
+  because MUSHclient's variable storage is lost when a plugin is
+  reinstalled by hand rather than reloaded, which is exactly how these
+  settings kept resetting.
+
+  IMPORTANT: FHX.dat is rewritten on EVERY change to auto. Another plugin
+  (ShadowAuto) relies on that: it reads the "auto=" line out of this file
+  to find out whether auto heal is currently on. Do not stop writing that
+  file promptly.
+
+  LoadSettings returns false when there is no file yet, which is the
+  signal for MigrateOldSettings to read the legacy plugin variables and
+  write a file. The path comes from GetPluginInfo(id, 6) with the
+  filename stripped, since that returns the plugin FILE and not its
+  folder.
+
+WHEN EDITING
+  * "fhx time" (ShowPluginTime) reports MUSHclient's per plugin scripting
+    time from GetPluginInfo(id, 24). It exists to answer "is FHX what is
+    making me lag" with a number instead of a guess. Figures are totals
+    since the client started.
+  * Count syntax is accepted as either "x3" or "3" on every command, hence
+    the (?:\s+x?\s*(\d+))? tail on the alias patterns.
+  * FHX_QUEUE_MAX (20) caps how many items ONE command may queue.
+  * FHX_DEBUG plus dbg() is the troubleshooting path; flip it to true at
+    the top of the script.
+-->
+
 <!-- ============================ TRIGGERS ============================ -->
 
 <triggers>

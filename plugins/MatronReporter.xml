@@ -12,6 +12,90 @@
 >
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+WHAT IT DOES
+  Times each Matron Dragon run, records what it dropped, and reports the
+  result to a channel automatically. Also keeps lifetime statistics and
+  tracks the 23 hour lockout.
+
+COMMANDS
+  matronreportchan <chan>   set the default report channel
+  matronreportchan          show which channel reports go to
+  matronreport [chan]       resend the last run report
+  matronreportlife [chan]   send lifetime stats
+  matronstatus [chan]       last run and when the 23h lockout is up
+  matronreportdump          list the raw stored runs locally
+  matronreportinject <secs> <loot1>|<loot2>|...
+                            add a run by hand
+  matronreporthelp          help
+
+HOW IT WORKS
+  RUN LIFECYCLE. RunStart fires on the lair entry line and starts the
+  timer. RunSnapshot fires on the escape line and freezes elapsed; the
+  reward lines arrive AFTER that, which is why the time is snapshotted
+  separately from the finish.
+
+  Each reward trigger appends to pendingLoots and calls ArmFinalize(),
+  which schedules MatronFinalizeCallback 1.5 seconds later through
+  DoAfterSpecial. Every new reward re arms it, so the report is only built
+  once the rewards stop arriving. finalizeGen and pendingGen guard against
+  a stale callback from an earlier run firing.
+
+  THE OUTLIER GUARD is the subtle part. If you die and resume, the timer
+  restarts on re entry and produces an unrealistically short run.
+  FinalizeRun compares elapsed against the average of previous runs and,
+  if it is more than OUTLIER_UNDER (60s) below or OUTLIER_OVER (120s)
+  above, it KEEPS the run but substitutes the average time. Keeping it
+  matters: dropping the run would skew the loot percentages and the run
+  count. It only judges once there are OUTLIER_MIN_RUNS (3) runs on
+  record.
+
+  STATISTICS are PRESENCE based, not totals. CalcTotals counts, for each
+  reward key, how many RUNS it appeared in at least once, so the lifetime
+  line reads as a percentage of runs rather than a raw count.
+  NormalizeReward folds the raw loot strings into the REWARD_KEYS
+  categories.
+
+  THE COLOUR MACHINERY is shared with SKDReport. BuildLine takes a list of
+  {colour, text} segments and returns three renderings at once: MUSHclient
+  ColourNote arguments, plain text, and an Aardwolf at code string. The at
+  code version is what gets Sent to the channel, so one definition drives
+  both the local echo and the outgoing line. ANote does the reverse: it
+  parses an at code string back into ColourNote arguments for local echo.
+
+  The 23 hour lockout is COOLDOWN. NextRunLabel adds it to the last run
+  timestamp and reports "available now" or the date plus a countdown.
+
+DATA AND STATE
+  Two files, both in the world folder (GetInfo(66)):
+    matron_runs.txt     the run history, written as a Lua table literal
+                        and read back with loadstring
+    matron_channel.txt  the report channel, one word
+  save_state is "y" and the channel is ALSO written to a plugin variable,
+  but the file is the authority. Plugin variables only reach disk when
+  MUSHclient shuts down cleanly, so a crash or a manual reinstall used to
+  silently drop the channel back to the default. LoadChannel falls back
+  file, then plugin variable (pre 1.7), then DEFAULT_CHANNEL ("gt").
+
+  Runs recorded before v1.5 have no timestamp, which is why LastRunTS
+  walks backwards until it finds a real one.
+
+WHEN EDITING
+  * To add a new reward type: add a trigger, append to REWARD_KEYS, and
+    add a rule to NormalizeReward. All three are needed.
+  * The Trivia Point Token trigger deliberately matches ANY words before
+    "Trivia Point Token" (Glass, Crystal, Stone, Golden Dune and any
+    future variant).
+  * SaveRuns writes loot strings with the %q format specifier so quotes
+    and backslashes in an item name cannot corrupt the file.
+  * LoadRuns wraps both the loadstring and its execution, and reports a
+    parse or exec error rather than silently returning nothing.
+  * matronreportinject exists to backfill runs by hand. Loots are pipe
+    separated and trimmed.
+-->
+
 <aliases>
   <alias
     match="^matronreportinject\s+(\d+)\s+(.+)$"

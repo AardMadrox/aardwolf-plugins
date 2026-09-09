@@ -12,6 +12,111 @@
    >
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+WHAT IT DOES
+  re, rw, rn, rs, ru, rd retreat in ONE fixed direction and keep retrying
+  that same direction on every failure, as many times as it takes. You can
+  also stack up to three directions, so an escape route can be typed ahead.
+
+COMMANDS
+  re rw rn rs ru rd   retreat east / west / north / south / up / down
+  reton               auto retry on
+  retoff              auto retry off
+  ret                 toggle auto retry
+  retsilent           toggle the per retry message
+  retdebug            dump what the plugin thinks is going on
+  ret help            help (ret ? works too)
+
+HOW IT WORKS
+  This is by far the most state heavy plugin in the collection. The core
+  is gQueue, a list of directions where gQueue[1] is the leg being
+  attempted right now and up to two more can be stacked behind it
+  (QUEUE_MAX 3). Picking one more than that cancels the lot and says
+  "Conflicting Messages: Make Up Your Mind."
+
+  A leg is either a RETREAT (something is on us) or a WALK (nothing is),
+  tracked by gWalked. gLegSent means a leg is out there waiting to land.
+
+  Eight triggers drive it, each with a reason:
+    You FAIL to retreat!            resend the same direction
+    You are stunned!                same thing, different wording only
+    You retreat from the fight!     the leg LANDED, advance the queue
+    You aren't fighting anyone.     the chain is void, drop it
+    You are entangled in a web.     retrying is pointless, drop it
+    You cannot retreat in that
+      direction!                    every retry would fail the same way,
+                                    drop it
+    Not while you are fighting!     a plain walk was refused, so redo
+                                    that leg as a retreat
+
+  WHY THE LANDING SIGNAL IS THE MUD LINE AND NOT GMCP. A retreat leg lands
+  on "You retreat from the fight!", not on a room change. Inside a maze
+  the room number can repeat, and a nomap room reports no room number at
+  all, so waiting on GMCP would leave the leg stuck at the front of the
+  queue forever, swallowing the next direction you type. Walk legs have no
+  success line of their own, so THOSE still land on the room.info change.
+  Do not "unify" these two paths.
+
+  After a retreat lands, the next leg is held (gWaiting) until the NEXT
+  char.status arrives, which says whether the mob in the new room has us:
+    still fighting  retreat again
+    not fighting    walk the leg instead
+  It waits for a fresh reading rather than trusting the last one, because
+  room.info can arrive BEFORE the status reporting that the fight ended,
+  and acting on the stale "still fighting" would fire a retreat into an
+  empty room. char.status carries enemypct so it is re sent every round;
+  the wait is a prompt, not a pause.
+
+  The timing constants near the top are all guards against a stale
+  direction firing in the wrong fight:
+    STALE_SECS   60  nothing has happened, drop everything
+    RETRY_WINDOW 15  a fail or stun line only belongs to us if we sent a
+                     retreat this recently
+    ARM_SECS     20  armed while nothing was fighting and no fight ever
+                     started
+    VERDICT_SECS  5  no char.status verdict ever arrived
+    GRACE_SECS    2  combat broke, but give the room change for the
+                     retreat that broke it time to arrive
+  sweep() applies all of these and is called before the queue is read, so
+  no timer is needed: char.status arrives with every prompt.
+
+  gFought tracks whether a real fight ever touched this chain. It matters
+  because "not fighting" is the normal state of walking around, so several
+  cleanup rules only apply once a fight has actually happened.
+
+  Arming happens even when GMCP says you are not fighting. That is
+  deliberate: a mob you walk in on engages a moment AFTER the room
+  arrives, so "not fighting" at the instant you press the key is routine,
+  and refusing to arm there was what used to leave a failed retreat with
+  nothing to retry it.
+
+  A change of AREA in room.info clears the queue outright: death dumps you
+  in your home city, and a recall or portal is the same story, so anything
+  stacked up is meaningless there.
+
+DATA AND STATE
+  Plugin variables enabled and silent, written by OnPluginSaveState.
+
+  NOTE, not verified against the MUSHclient source: the plugin element has
+  NO save_state attribute. If the default is "n", OnPluginSaveState is
+  never called and reton / retsilent will not survive a restart. If those
+  settings do not stick, adding save_state="y" is the first thing to try.
+
+WHEN EDITING
+  * Every trigger uses keep_evaluating, so these very common combat lines
+    still reach other plugins.
+  * With the plugin off, the aliases are plain shortcuts: one retreat is
+    sent and nothing is armed.
+  * Entangled and no exit both print even in silent mode, on purpose:
+    they are the reason nothing else is happening.
+  * The direction stack is deliberately left out of ret help.
+  * retdebug is the tool for diagnosing this plugin. Its first line is a
+    count of GMCP messages seen, because almost everything except the
+    retreat landing signal leans on GMCP.
+-->
+
 <!-- ================================================================= -->
 <!--  Aliases                                                          -->
 <!-- ================================================================= -->

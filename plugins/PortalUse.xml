@@ -8,9 +8,96 @@
      language="Lua"
      purpose="Tracks worn portal usage with colour output; can show destination area from PortalDex."
      date_written="2026-06-08"
-     version="2.0"
+     version="2.1"
   >
   </plugin>
+
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+WHAT IT DOES
+  Counts how often you use each worn portal, remembering each portal's own
+  screen COLOURS so the list reads like the game does. Optionally shows
+  each portal's destination area and landing room, read from
+  PortalValue / PortalDex's catalog.
+
+COMMANDS
+  portaluse [mode]         show usage. Modes: high (default), low,
+                           alpha, ralpha
+  portalusetop <channel>   send the top 5 to a channel, in colour
+  portalscan               re read the bag to refresh colours and add
+                           untracked portals at 0 uses
+  portalsetbag <keyword>   set the bag keyword portalscan examines
+  portalarea on|off        show destination area and landing room
+  portalignore <portal>    toggle ignoring a portal
+  portalignore list        show ignored portals
+  portalclean              drop every portal with 0 uses
+  portalreset all          reset all usage
+  portalreset <portal>     reset one portal
+  portalhelp               help
+
+HOW IT WORKS
+  COUNTING is one trigger: "You stop using <name> as a portal" increments
+  usage[name] and saves.
+
+  THE COLOUR CAPTURE is the interesting part. MUSHclient hands a trigger
+  callback a styles table describing the coloured runs that made up the
+  line. extract_name_styles walks those runs, finds the portion that
+  overlaps the portal NAME, and clips each run to that range, producing a
+  list of spans. Each span records the text, an RGB hex value for local
+  ColourNote output, and an xterm index for channel output.
+
+  rgb_to_hex and rgb_to_xterm do the conversion. rgb_to_xterm handles the
+  greyscale ramp (232 to 255) and the 6 by 6 by 6 colour cube separately,
+  the standard xterm 256 mapping.
+
+  spans_to_aard turns the spans into an Aardwolf at code string, which is
+  how portalusetop sends a coloured line to a channel.
+
+  THE SCAN is a trigger sandwich around "exa <bag>", and all three scan
+  triggers ship enabled="n":
+    scan_start  "<something> contains:"
+    scan_item   an item line with a (K) marker, captures the name
+    scan_end    "You have N", "There are no items" or "The X is empty"
+  expecting_header stops a stray container line arming the scan.
+  A DoAfterSpecial 3 second scan_timeout is the fail safe if scan_end
+  never matches, so the catch all item trigger cannot stay armed.
+
+  THE AREA DISPLAY reads PortalDex_data.lua from the world folder, written
+  by PortalValue 3.3 or higher after a "portaldex scan". Several catalog
+  entries can share a name (plain chaos portals), so when building the
+  name to area map it PREFERS an entry that has a landing room over one
+  that only has an area.
+
+DATA AND STATE
+  Everything is in PortalUse.dat: the usage counts, the ignore list, the
+  bag keyword, the area display flag, and the captured colours. The file
+  is sectioned with USAGE, IGNORE, BAG, AREA and COLORS marker lines.
+
+  Portal names and their span texts are HEX ENCODED in the COLORS section.
+  That is deliberate: those strings contain arbitrary punctuation and the
+  format uses pipes, colons and commas as separators, so encoding is what
+  keeps the file parseable.
+
+  save_state is not set, and none of this uses plugin variables.
+
+WHEN EDITING
+  * data_file is the bare string "PortalUse.dat" with NO directory, so it
+    is written relative to MUSHclient's current working directory rather
+    than to the plugin folder or the world folder. That is different from
+    every other plugin in this collection, which build an absolute path
+    from GetInfo(66) or GetPluginInfo(id, 20). If the file ever seems to
+    go missing or reset, this is why.
+  * clean_name strips ANSI escapes and angle bracket tags before a name is
+    used as a table key, so the key always matches between the scan path
+    and the usage path.
+  * The portaluse alias regexp uses negative lookaheads so that
+    "portalusetop" and "portaluse help" are not swallowed by the general
+    "portaluse..." form.
+  * The ignore list is honoured at DISPLAY time as well as at counting
+    time, so ignoring a portal hides existing counts without deleting
+    them.
+-->
 
   <aliases>
     <alias match="portalusetop *"     enabled="y" ignore_case="y" regexp="n" script="OnPortalUseTop" />
@@ -87,7 +174,16 @@ local function load_portaldex_areas ()
   if not ok or type(data) ~= "table" or type(data.catalog) ~= "table" then return {} end
   local map = {}
   for _, e in pairs(data.catalog) do
-    if e.name and e.leads and e.leads ~= "?" then map[e.name:lower()] = e.leads end
+    local area = (e.leads and e.leads ~= "?") and e.leads or nil
+    if e.name and (area or e.room) then
+      local key = e.name:lower()
+      local cur = map[key]
+      -- several catalog entries can share a name (plain chaos portals);
+      -- prefer one that has a landing room over one that only has an area
+      if (not cur) or (e.room and not cur.room) then
+        map[key] = { area = area, room = e.room }
+      end
+    end
   end
   return map
 end
@@ -377,7 +473,10 @@ function OnPortalUsage (name, line, wildcards)
       end
       if areas then
         local a = areas[entry.portal:lower()]
-        if a then ColourTell(TC.val,"", " [" .. a .. "]") end
+        if a then
+          if a.area then ColourTell(TC.val,"", " [" .. a.area .. "]") end
+          if a.room then ColourTell(TC.ok, "", " (" .. a.room .. ")") end
+        end
       end
       ColourTell(TC.hdr, "", " USES: ")
       ColourTell(TC.num, "", tostring(entry.count))
@@ -416,7 +515,11 @@ function OnPortalUseTop (name, line, wildcards)
     local areatag = ""
     if areas then
       local a = areas[entry.portal:lower()]
-      if a then areatag = "@x045 [" .. a .. "]@w" end
+      if a then
+        local inner = a.area or ""
+        if a.room then inner = (inner ~= "" and (inner .. " ") or "") .. a.room end
+        if inner ~= "" then areatag = "@x045 [" .. inner .. "]@w" end
+      end
     end
     parts[i] = aard .. areatag .. "@w(" .. entry.count .. ")"
   end
@@ -536,9 +639,9 @@ function OnPortalArea (name, line, wildcards)
   elseif arg == ""    then show_area = not show_area
   else ColourNote("white","red","Usage: portalarea on|off"); return end
   save_data()
-  ColourNote(TC.val,"","[PortalUse] Destination area display is " .. (show_area and "ON" or "OFF") .. ".")
+  ColourNote(TC.val,"","[PortalUse] Destination area + landing room display is " .. (show_area and "ON" or "OFF") .. ".")
   if show_area and next(load_portaldex_areas()) == nil then
-    ColourNote("white","red","  (No catalog found - this needs PortalValue 3.0 or higher, with a 'portaldex scan' done.)")
+    ColourNote("white","red","  (No catalog found - this needs PortalValue 3.3 or higher, with a 'portaldex scan' done.)")
   end
 end
 
@@ -547,14 +650,15 @@ end
 ---------------------------------------------------------
 
 function OnPortalHelp ()
-  ColourNote(TC.hdr,"","PortalUse 2.0")
+  ColourNote(TC.hdr,"","PortalUse 2.1")
   ColourNote(TC.val,"","Commands:")
   ColourNote(TC.val,"","  portaluse [mode]           -- Show usage (high, low, alpha, ralpha)")
   ColourNote(TC.val,"","  portalusetop <channel>     -- Send top 5 portals to a channel")
   ColourNote(TC.val,"","  portalscan                 -- Refresh colours, add untracked portals with 0 uses")
   ColourNote(TC.val,"","  portalsetbag <keyword>     -- Set the bag keyword for portalscan")
-  ColourNote(TC.val,"","  portalarea on|off          -- Show destination area next to each portal")
-  ColourNote(TC.num, "","       requires PortalValue 3.0 or higher (uses its portal catalog)")
+  ColourNote(TC.val,"","  portalarea on|off          -- Show destination area + landing room per portal")
+  ColourNote(TC.num, "","       requires PortalValue 3.3 or higher (uses its portal catalog)")
+  ColourNote(TC.num, "","       run 'portaldex rooms' there if room numbers are missing")
   ColourNote(TC.val,"","  portalignore <portal>      -- Toggle ignoring a portal")
   ColourNote(TC.val,"","  portalignore list          -- Show ignored portals")
   ColourNote(TC.val,"","  portalclean                -- Remove all portals with 0 uses")

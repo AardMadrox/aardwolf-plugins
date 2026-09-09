@@ -14,6 +14,126 @@
    >
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+WHAT IT DOES
+  One maze solving engine serving six areas. It walks a shuffling maze,
+  learns the links as it goes, and hunts a named mob for you.
+
+    gaunt    The Gauntlet, in Gauntlet             31686 to 31739
+    gard     Botanical Gardens, in Gwillimberry    26015 to 26024
+    nenukon  The Nenukon, in Nenukon               31784 to 31833
+    xyl      Rose Ether, in Xylmos                 444 to 455
+    hele     Helegear Sea and the depths           30699 to 30720
+    prosper  Prosper 201, the theater maze         28252 to 28267
+
+COMMANDS
+  mm [args]    act on whichever of those areas you are standing in
+  <area> ...   the per area name works too (gaunt, gard, nenukon, xyl,
+               hele, prosper)
+  mmout        leave the maze; per area forms exist too (gardout,
+               nenukonout, xylout, heleout, prosperout)
+  Sub commands include a mob name to hunt, "all <mob>" to ignore the room
+  range, "here" to dump the room listing, "wait <secs>" to change the move
+  timeout, and "debug".
+
+ARCHITECTURE
+
+  DATA FIRST. Everything from the AREAS table down to MAPS is DATA: room
+  names, which rooms are maze, the links the mapper already knows, room
+  exit directions, and the mobs. All of it was generated from the mapper
+  database and the Search_and_Destroy history, so it matches rooms you
+  have actually walked.
+
+  MAZE LINKS ARE NEVER HARDCODED. They reshuffle on repop, so they are
+  learned by walking. What IS seeded is the non maze links the mapper
+  already knows, and every room's exit DIRECTIONS. That second part
+  matters: GMCP only describes the room you are standing in, so without
+  seeded exit directions the solver could never aim at a maze room it has
+  not already visited.
+
+  THE LEARNED MAP, per area, in MAPS[area.key]:
+      edges[from][dir] = vnum   a link we have walked
+                       = 0      leads out of the area
+                       = -1     "Alas, you cannot go that way"
+      exits[from][dir] = true   a direction GMCP says the room has
+  use_area() repoints edges and exits at the right area's tables, so one
+  area's learned map never pollutes another.
+
+  RESHUFFLE DETECTION is record(): if a link we already knew now leads
+  somewhere different, the maze has repopped, so the WHOLE map is dropped
+  in place, reseeded, and the sweep starts again. This is the single most
+  important behaviour in the plugin.
+
+  THE WALK LOOP.
+    move(dir) sends the direction and arms a mm_timeout after move_wait
+      seconds (default 25). The timeout is deliberately generous: a
+      spurious timeout is far more damaging than a slow one, because the
+      exit gets written off as dead.
+    begin_room() runs on arrival. For a scannable mob it sends "scan" and
+      schedules a decision 8 seconds out; for the noscan mobs, which never
+      appear in scan, it sends nothing and decides off the room's own
+      character list after 2 seconds.
+    schedule_decision uses an arrival counter so exactly ONE decision is
+      made per arrival: whichever comes first, the scan finishing or the
+      fallback timer, acts and the other is ignored.
+    advance() picks the next direction: finish a queued beeline, else head
+      for a goto target, else take an exit never tried, else BFS to the
+      nearest room that still has one.
+    path_to_unvisited() honours A.late, a per area tier list of rooms to
+      leave until last. The Gauntlet's BATTLE ROOM is a dead end with the
+      Deep Dragon in it, so a sweep has no business going in early.
+
+  FINDING THE MOB, in after_arrival, in priority order:
+    1. it is in the room's own character list (the only thing that ever
+       finds the noscan mobs),
+    2. scan saw it nearby, so queue a beeline of that many steps in that
+       direction,
+    3. nothing, keep sweeping.
+
+  Step 2 checks edges[cur][dir] is not -1 first. Scan sees THROUGH exits
+  we have already found to be dead, and blindly re issuing one turns into
+  a stall every time the same sighting comes back.
+
+  is_target() guards against name containment: "skeletal warrior" is
+  inside "a mounted skeletal warrior", so if a line also matches a LONGER
+  listed mob name that contains ours, it is not ours. It checks the short
+  name first and then the room description phrase, because the two do not
+  always share any words.
+
+  LAP_LIMIT is 4. These mobs move while you are walking, so they can slip
+  into a room already ticked off this lap; one or two passes proves very
+  little. MAXSTEPS (600) is the hard stop.
+
+  RECOVERY. Each area has a "recover" definition for falling out of the
+  maze into a known outside room (for instance Prosper drops you into
+  Imaginarium), so a wrong step outside can be walked back in rather than
+  ending the run.
+
+DATA AND STATE
+  save_state is "n". Two files next to the plugin:
+    Nenukon.dat        the learned maps for ALL areas plus move_wait,
+                       written as a Lua table and read back with
+                       loadstring. The filename is historical, from when
+                       this was the Nenukon only plugin.
+    Nenukon_desc.txt   learned room description phrases
+  The file is safe to delete; the maps are simply relearned.
+
+WHEN EDITING
+  * The scan triggers sit at sequence 50 with keep_evaluating so they run
+    AHEAD of Search_and_Destroy's own scan triggers and leave those
+    working. Aardwolf wraps scan output in {scan} and {/scan} once
+    "tags scan on" is set; without that tag the scan path does nothing.
+  * The blocked trigger matches "Alas, you cannot go that way." exactly,
+    which is verified to be the world file's mapping_failure string.
+  * Prosper 201's theater maze is here, but the OTHER Prosper 201 content
+    (STTNG) is deliberately a separate plugin.
+  * To add an area, add an entry to AREAS with roomname, maze, seed,
+    exitdirs, leaves, late, range, mobs, roomdesc and recover, and add its
+    command word to the two alias patterns.
+-->
+
 <aliases>
   <alias
     match="^(gaunt|gard|nenukon|xyl|hele|prosper|mm)(?:\s+(.*))?$"
