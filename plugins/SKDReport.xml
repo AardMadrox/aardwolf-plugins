@@ -10,7 +10,7 @@
    purpose="Times Spectre of the Deep (SKD) fights and reports trains/gold/TP/Repop Token/Sigil rewards"
    date_written="2026-06-21"
    requires="4.71"
-   version="1.3"
+   version="1.4"
    save_state="y"
    >
 </plugin>
@@ -32,6 +32,7 @@ COMMANDS
   skdreportlife [chan]   send lifetime stats
   skdreportday [chan]    send stats for runs since the most recent 7am
   skdreport channel <n>  set the default channel
+  skdreport pup [n]      show/set trains per pup (default 5.1)
   skdreport life         show lifetime stats locally
   skdreport reset        reset the run in progress
   skdreport resetlife    wipe the lifetime history
@@ -58,9 +59,14 @@ HOW IT WORKS
   handler plugin with CallPlugin(id, "gmcpdata_as_string", "room.info")
   and loadstring on the result.
 
-  THE PUPS RATE is SKD specific: TRAINS_PER_PUP is 4, so pups is trains
-  divided by 4 and the rate is elapsed seconds per pup. That is the number
-  the report leads with after the time.
+  THE PUPS RATE: pups is trains divided by the trains-per-pup figure, and
+  the rate is elapsed seconds per pup. That is the number the report leads
+  with after the time. The divisor is USER SETTABLE with
+  "skdreport pup <n>" and lives in the trains_per_pup variable;
+  DEFAULT_TRAINS_PER_PUP (5.1) is used when it is unset or nonsense.
+  GetTrainsPerPup() is the ONLY place it should be read - the per-run
+  report and the life/day summaries both call it, so changing the number
+  re-scores the whole history (only trains are stored, never pups).
 
   THE RUN HISTORY is a Lua table literal serialised into ONE plugin
   variable, run_history, and read back with loadstring. Each normal record
@@ -95,11 +101,11 @@ DATA AND STATE
   GetPluginInfo(GetPluginID(), 6), which returns the plugin FILE, so the
   filename is stripped off first.
 
-  Variables: run_history (the whole history) and channel.
+  Variables: run_history (the whole history), channel and trains_per_pup.
 
 WHEN EDITING
-  * The alias sequence numbers matter. The subcommands (channel, reset,
-    help, life, resetlife) are at sequence 100 and the catch all
+  * The alias sequence numbers matter. The subcommands (channel, pup,
+    reset, help, life, resetlife) are at sequence 100 and the catch all
     "skdreport <something>" is at 200, so a subcommand is never eaten by
     the channel form.
   * To add a reward you need: a trigger, a skd_ state variable, a reset in
@@ -218,6 +224,16 @@ WHEN EDITING
      match="^skdreport channel\s*(.*)$"
      sequence="100"
      script="SetSKDChannel"
+     >
+  </alias>
+
+  <alias
+     name="skd_pup"
+     enabled="y"
+     regexp="y"
+     match="^skdreport pups?(?:\s+(.*?))?\s*$"
+     sequence="100"
+     script="SetSKDPupRate"
      >
   </alias>
 
@@ -418,6 +434,29 @@ local function FormatNumber(n)
   return formatted
 end
 
+-- ===========================================================
+--  Trains per pup
+--  How many trains count as one pup. Settable with
+--  "skdreport pup <n>"; everything that shows pups or a pup
+--  rate reads it through GetTrainsPerPup so one setting drives
+--  the run report and the life/day summaries alike.
+-- ===========================================================
+local DEFAULT_TRAINS_PER_PUP = 5.1
+
+local function GetTrainsPerPup()
+  local n = tonumber(GetVariable("trains_per_pup") or "")
+  if not n or n <= 0 then return DEFAULT_TRAINS_PER_PUP end
+  return n
+end
+
+-- Trims trailing zeros so 5.10 prints as "5.1" and 4.00 as "4"
+local function FmtPupRate(n)
+  local s = string.format("%.2f", n)
+  s = s:gsub("0+$", "")
+  s = s:gsub("%.$", "")
+  return s
+end
+
 -- Formats an os.time() value as "August 21 2026 3:45pm"
 local MONTH_NAMES = {
   "January", "February", "March", "April", "May", "June",
@@ -605,6 +644,9 @@ function OnPluginInstall()
   if GetVariable("channel") == nil then
     SetVariable("channel", "")
   end
+  if tonumber(GetVariable("trains_per_pup") or "") == nil then
+    SetVariable("trains_per_pup", tostring(DEFAULT_TRAINS_PER_PUP))
+  end
   -- First-time setup or migration from old life_* variables
   if GetVariable("run_history") == nil then
     MigrateOldStats()
@@ -683,7 +725,7 @@ function FinishSKD(name, line, wildcards)
   if not skd_recording then return end
   skd_recording = false
 
-  local TRAINS_PER_PUP = 4
+  local TRAINS_PER_PUP = GetTrainsPerPup()
   local time_str = "N/A"
   local pups_str = nil
   local rate_str = nil
@@ -809,6 +851,36 @@ function SetSKDChannel(name, line, wildcards)
   end
 end
 
+-- skdreport pup [n|default] - show or change how many trains make a pup
+function SetSKDPupRate(name, line, wildcards)
+  local arg = wildcards[1]
+  arg = arg and arg:match("^%s*(.-)%s*$") or ""
+
+  if arg == "" then
+    ColourNote("white", "", "SKDReport: " .. FmtPupRate(GetTrainsPerPup()) ..
+      " trains per pup. Use 'skdreport pup <number>' to change it.")
+    return
+  end
+
+  if arg == "default" or arg == "reset" then
+    SetVariable("trains_per_pup", tostring(DEFAULT_TRAINS_PER_PUP))
+    ColourNote("white", "", "SKDReport: trains per pup back to the default " ..
+      FmtPupRate(DEFAULT_TRAINS_PER_PUP) .. ".")
+    return
+  end
+
+  local n = tonumber(arg)
+  if not n or n <= 0 then
+    ColourNote("white", "", "SKDReport: '" .. arg ..
+      "' is not a positive number - try 'skdreport pup 5.1' or 'skdreport pup default'.")
+    return
+  end
+
+  SetVariable("trains_per_pup", tostring(n))
+  ColourNote("white", "", "SKDReport: trains per pup set to " .. FmtPupRate(n) ..
+    " - past runs are re-scored with it too.")
+end
+
 function ResetSKDCommand(name, line, wildcards)
   ResetSKD()
   ColourNote("white", "", "SKDReport: state reset.")
@@ -857,7 +929,7 @@ local function BuildSummaryLine(label, t)
   local life_pups_str = "N/A"
   local life_rate_str = "N/A"
   if t.trains > 0 and t.elapsed > 0 then
-    local pups = t.trains / 4
+    local pups = t.trains / GetTrainsPerPup()
     life_pups_str = string.format("%.2f", pups)
     life_rate_str = string.format("%.2fs", t.elapsed / pups)
   end
@@ -1032,6 +1104,12 @@ function ShowSKDHelp(name, line, wildcards)
     {"white","  "},{"cyan","skdreport channel"},{"white"," "},{"yellow","<name>"},
     {"white","  - set report channel (e.g. "},{"yellow","gt"},{"white","); blank shows current, "},
     {"yellow","none"},{"white"," clears it"},
+  })
+  P({
+    {"white","  "},{"cyan","skdreport pup"},{"white"," "},{"yellow","<number>"},
+    {"white","  - trains per pup (now "},{"red",FmtPupRate(GetTrainsPerPup())},
+    {"white",", default "},{"yellow",FmtPupRate(DEFAULT_TRAINS_PER_PUP)},
+    {"white","); blank shows current, "},{"yellow","default"},{"white"," restores it"},
   })
   P({
     {"white","  "},{"cyan","skdreport reset"},
