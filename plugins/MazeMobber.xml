@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="3.0"
+   version="3.1"
    >
 </plugin>
 
@@ -35,6 +35,7 @@ WHAT IT DOES
     infamy   The Realm of Infamy, three levels     26642 to 26670
     dark     Darklight, the Skullgore Plains       19644 to 19654
     times    Times of Old, the Cindery Village     28514 to 28527
+    prom     Promises, the ocean off Westport      25825 to 25836
     sahu     Sahuagin, four doors up to the princes 34600 to 34613
 
 COMMANDS
@@ -405,7 +406,7 @@ WHEN EDITING
 
 <aliases>
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|mm)(?:\s+(.*))?$"
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|mm)(?:\s+(.*))?$"
     script="mm_command" name="mm_command"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -416,7 +417,7 @@ WHEN EDITING
        Digits only, which is what keeps this off mmg, mmo, mmout and
        mmexpress. -->
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|mm)(\d+)$"
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|mm)(\d+)$"
     script="mm_command" name="mm_number"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -1607,6 +1608,77 @@ local AREAS = {
     mobs = {
     },
   },
+  {
+    key = "promises", cmd = "prom", label = "Promises", zone = "promises",
+    lo = 25825, hi = 25836,
+    roomname = {
+      [25825] = "On the Deck of the Flying Dutchman",
+      [25826] = "On The Ocean",
+      [25827] = "On The Ocean",
+      [25828] = "On The Ocean",
+      [25829] = "On The Ocean",
+      [25830] = "On The Ocean",
+      [25831] = "On The Ocean",
+      [25832] = "On The Ocean",
+      [25833] = "On The Ocean",
+      [25834] = "On The Ocean",
+      [25835] = "On The Flying Dutchman",
+      [25836] = "On A Ghost Ship",
+    },
+    -- Nine rooms of open ocean, and every one of them offers all six
+    -- directions - so this shuffles harder than the others.  The deck you
+    -- sail from and the two ships at the end are fixed.
+    maze = { [25826]=true, [25827]=true, [25828]=true, [25829]=true,
+             [25830]=true, [25831]=true, [25832]=true, [25833]=true,
+             [25834]=true },
+    -- The way down out of 25833 onto the Flying Dutchman, and her deck
+    -- across to the ghost ship.  Nothing between ocean rooms is seeded:
+    -- that all moves on every repop.
+    seed = { {25833,"d",25835}, {25835,"e",25836}, },
+    exitdirs = {
+      [25825] = { "e", "w" },
+      [25826] = { "d", "e", "n", "s", "u", "w" },
+      [25827] = { "d", "e", "n", "s", "u", "w" },
+      [25828] = { "d", "e", "n", "s", "u", "w" },
+      [25829] = { "d", "e", "n", "s", "u", "w" },
+      [25830] = { "d", "e", "n", "s", "u", "w" },
+      [25831] = { "d", "e", "n", "s", "u", "w" },
+      [25832] = { "d", "e", "n", "s", "u", "w" },
+      [25833] = { "d", "e", "n", "s", "u", "w" },
+      [25834] = { "d", "e", "n", "s", "u", "w" },
+      [25835] = { "e", "w" },
+      [25836] = { "w" },
+    },
+    -- The deck's west door goes back into Westport, and once you are on
+    -- either ship you are done - nothing should sweep back out to sea.
+    leaves = { {25825,"w"}, {25835,"w"}, {25836,"w"}, },
+    auto = { [25825]=true },
+    entrance = { goto_room = 25825 },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way through",
+    -- No mmout: the ghost ship IS where you were going.
+    outs = {  },
+    -- One thing to find.  25833 is the ocean room that drops to the
+    -- Flying Dutchman; from her deck it is one step east to the ghost
+    -- ship.  Both of those links are fixed and seeded above, so once the
+    -- sweep stumbles into 25833 the router walks the last two rooms.
+    places = {
+      { room = 25836, how = "down, then east", label = "On A Ghost Ship" },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
 }
 
 local BYKEY, BYCMD, BYZONE, ROOM2AREA = {}, {}, {}, {}
@@ -1640,8 +1712,12 @@ end
 -- never drift from what is actually in here.  What each one offers is
 -- worked out the same way: a mob list, a room list, a way out or not.
 local function area_lines ()
-  local w = 0
+  -- The word you type comes first: it is the one thing on this line you
+  -- actually have to know, and mm alone only works once you are already
+  -- standing in the area.
+  local cw, w = 0, 0
   for _, a in ipairs (AREAS) do
+    if #a.cmd > cw then cw = #a.cmd end
     if #a.label > w then w = #a.label end
   end
   local t = {}
@@ -1654,7 +1730,8 @@ local function area_lines ()
     if #a.outs == 0 then
       tail = tail .. ", no walk-out - recall or portal"
     end
-    t[#t + 1] = "   @x048" .. a.label .. "@w" ..
+    t[#t + 1] = "   @x048" .. a.cmd .. "@w" ..
+                string.rep (" ", cw - #a.cmd + 2) .. a.label ..
                 string.rep (" ", w - #a.label + 3) .. tail
   end
   return t
@@ -1694,7 +1771,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "3.0"
+local VERSION  = "3.1"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -1967,6 +2044,10 @@ local step_room    = nil     -- the room the pending step was worked out in
 -- whole way.  mmslow puts it back to a room per press.
 local express = true
 local area_express = {}
+-- Areas told to stop putting their list up on arrival (mm list).  Keyed by
+-- area, and only the ones switched OFF are in here, so the table stays
+-- empty for anyone who never touches it.
+local no_auto = {}
 
 -- Declared here, above move (), because that is what asks.
 local function is_express ()
@@ -1982,9 +2063,14 @@ local function save_map ()
   for k, v in pairs (area_express) do
     ax[#ax + 1] = string.format ("[%q]=%s", k, tostring (v))
   end
+  local na = {}
+  for k, v in pairs (no_auto) do
+    if v then na[#na + 1] = string.format ("[%q]=true", k) end
+  end
   f:write ("return {\n  wait = " .. move_wait ..
            ",\n  slow = " .. tostring (not express) ..
            ",\n  area_express = {" .. table.concat (ax, ",") .. "}" ..
+           ",\n  no_auto = {" .. table.concat (na, ",") .. "}" ..
            ",\n  maps = {\n")
   for key, mp in pairs (MAPS) do
     f:write (string.format ("    [%q] = { edges = {\n", key))
@@ -2051,6 +2137,10 @@ local function load_map ()
   area_express = {}
   for k, v in pairs (t.area_express or {}) do
     area_express[k] = v and true or false
+  end
+  no_auto = {}
+  for k, v in pairs (t.no_auto or {}) do
+    if v then no_auto[k] = true end
   end
   for key, mp in pairs (t.maps or {}) do
     if MAPS[key] then
@@ -2150,6 +2240,7 @@ local where_room   = nil   -- the room a 'where' pinned, if any
 local out_walk  = false    -- this walk is "get me out", so ANY way out will do
 local reopened  = false    -- crossed-off exits given a second chance
 local widened   = false    -- a mob's usual rooms gave out, now sweeping wider
+local wipes     = 0        -- maps thrown away this run because they went stale
 local rc_seen   = false    -- a {roomchars} block arrived for THIS room
 local rc_waited = false    -- and we have already given it one extra second
 local rc_warned = false    -- only nag about a missing room listing once
@@ -2456,14 +2547,22 @@ local function take_exit ()
     if journey then awaiting_leg = true end
     if xover then awaiting_cross = true end
     for _, c in ipairs (o.cmds) do SendNoEcho (c) end
-  elseif o.how == "walk there" then
-    note ("Arrived: @x048" .. (o.label or roomname (o.room)) ..
-          "@w  (@x048" .. o.room .. "@w)")
-    remind_out ()
-  else
+  elseif is_way_out (o) then
+    -- A way OUT with no command of its own: the walk is done but you are
+    -- still inside, so say what is left to do.
     note ("At @x048" .. (o.label or roomname (o.room)) .. "@w (@x048" .. o.room ..
           "@w). I do not know the command that leaves from here - " ..
           o.how .. " yourself and you are clear.")
+  else
+    -- A room you asked to be walked to.  Getting there IS the whole job -
+    -- there is nothing left to send.  This used to fall through to the
+    -- message above and tell you it did not know the command that leaves
+    -- from here, which reads as a failure at the exact moment it
+    -- succeeded.  An area with no A.outs leaves under its own steam, so
+    -- remind_out () stays quiet there too.
+    note ("Arrived: @x048" .. (o.label or roomname (o.room)) ..
+          "@w  (@x048" .. o.room .. "@w)")
+    remind_out ()
   end
 end
 
@@ -2677,9 +2776,30 @@ function advance ()
         return advance ()
       end
     end
-    stop ("Explored everything I can reach and never found that room. " ..
-          "Try @x048" .. A.cmd .. " reset@w.", true)
-    return
+    -- "Explored everything I can reach" is only ever true of the map we
+    -- happen to be holding, and in a maze that reshuffles that map is
+    -- exactly what goes stale - the room IS reachable, just not by the
+    -- links we wrote down.  Throwing the map away and walking on is what
+    -- "<area> reset" does by hand, so do it automatically rather than
+    -- stopping and asking.  MAXSTEPS is the real backstop: this cannot
+    -- run forever, it just stops guessing that it is finished.
+    -- Capped, because if a wipe leaves nothing to try we would come
+    -- straight back here and recurse.  Three is plenty: each one is a
+    -- fresh sweep of the whole area, and MAXSTEPS bounds the walking.
+    if wipes >= 3 then
+      stop ("Wiped the map and swept " .. wipes .. " times over and still " ..
+            "no sign of it. Something is wrong - walk out and back in.", true)
+      return
+    end
+    wipes = wipes + 1
+    edges, exits = {}, {}
+    seed ()
+    visited, laps = {}, 0
+    reopened = false
+    note ("Walked everything the map knew and it was not there - the maze " ..
+          "has moved. Forgetting it and carrying on" ..
+          ((wipes > 1) and (" (" .. wipes .. ")") or "") .. ".")
+    return advance ()
   end
 
   -- About to declare failure of some kind, and this room has not sent its
@@ -3638,7 +3758,8 @@ function OnPluginBroadcast (msg, id, bname, text)
   end
 
   local here_area = ROOM2AREA[num]
-  if here_area and here_area.auto[num] and not pending then
+  if here_area and here_area.auto[num] and not no_auto[here_area.key]
+     and not pending then
     -- Show it whenever YOU arrive here, and never while this plugin is
     -- the one doing the walking - a sweep passing back through an auto
     -- room would otherwise reprint the list every lap.
@@ -3814,6 +3935,7 @@ function begin (kind, tgt, mobname, noscan, wide_search)
   wide       = wide_search and true or false
   reopened   = false
   widened    = false
+  wipes      = 0
   want       = mobname and normalise (mobname) or nil
   want_range = (kind == "hunt" and not wide) and RANGE[want] or nil
 
@@ -4059,10 +4181,9 @@ function menu ()
     end
   end
 
-  ColourNote (CLR_TAG, "", "   " .. known_links () .. " links learned here.   " ..
-    A.cmd .. ((#MOBS > 0) and " <mob>" or " <room>") ..
-    " / mmg / stop" .. ((#A.outs > 0) and " / mmout" or "") ..
-    " / seen / map / reset / help")
+  -- No footer.  The link count means nothing to anyone reading it, and
+  -- the command list repeated itself under every list when mm help holds
+  -- the same thing and says it once.
 end
 
 local function pick (n)
@@ -4160,6 +4281,7 @@ local function show_help ()
     "mm <mob name>    hunt a mob by name, whether it is on the list or not",
     "mm all <mob>     search the whole area, not just its usual rooms",
     "mm stop          give up on the current hunt",
+    "mm list          stop this area putting its list up on arrival",
     "mmslow           one room per press instead of the whole walk",
     "mmexpress        back to walking the whole way (the default)",
     "mm resume        pick a run back up after a fight stopped it",
@@ -4240,7 +4362,15 @@ function mm_command (name, line, wildcards)
       area = zone and BYZONE[zone] or nil
     end
     if not area then
-      warn ("You are not standing in any maze I know. Use @x048" ..
+      -- Say what the MUD actually told us.  Without this, "not standing in
+      -- any maze I know" is the same message whether you really are
+      -- somewhere else, or you are standing in the right room and GMCP
+      -- did not name it - and those need completely different fixes.
+      local ri = gmcp ("room.info")
+      local num = (type (ri) == "table") and tostring (ri.num or "?") or "?"
+      local zn  = (type (ri) == "table") and tostring (ri.zone or "?") or "?"
+      warn ("You are not standing in any maze I know - the MUD says room @x048" ..
+            num .. "@w, zone @x048" .. zn .. "@w. Use @x048" ..
             cmd_list ("@w, @x048") .. "@w by name to be taken to one.")
       return
     end
@@ -4248,6 +4378,18 @@ function mm_command (name, line, wildcards)
 
   if running and A and A.key ~= area.key then stop () end
   if not A or A.key ~= area.key then use_area (area) end
+
+  -- Handled after the area is worked out, so it applies to the one you
+  -- are standing in - or to a named one, "sahu list".
+  if arg == "list" then
+    no_auto[A.key] = (not no_auto[A.key]) or nil
+    save_map ()
+    note (no_auto[A.key]
+          and (A.label .. ": the list will stay quiet now - type @x048" ..
+               A.cmd .. "@w or @x048mm@w when you want it.")
+          or (A.label .. ": the list will put itself up when you walk in."))
+    return
+  end
 
   if arg == "" then
     if NAME[cur] then menu () return end
