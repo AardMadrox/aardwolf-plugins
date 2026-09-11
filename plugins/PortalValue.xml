@@ -20,6 +20,16 @@
         'restrung' tracked separately. Portals catalog automatically when you 'id'
         one, or in bulk via 'portaldex scan'.
 
+     3. IS THIS ROOM WORTH A PORTAL? (part of pv, v3.6):
+        The pv output ends with a "Worth it" line: what a portal in this room
+        would do to your travel time to the cp, quest and gq mobs you actually
+        kill in this area. It shows the average walk and the worst walk, before
+        and after, because a room can cut a big total and still leave the far
+        end of the area untouched. Kill weights come from Search_and_Destroy's
+        SnDdb.db if it is installed; without it every mapped room is weighted
+        equally and the line says so. Type pvworth after buying or selling
+        portals to rebuild the model.
+
      Data: the catalog lives in its own file PortalDex_data.lua (in the world
      folder); pv history lives in plugin state. Kept separate on purpose.
 
@@ -41,7 +51,7 @@
    purpose="Find the closest saved portal + speedwalk to your room, and catalog your portals by type."
    date_written="2026-06-27"
    requires="4.73"
-   version="3.4"
+   version="3.6"
 >
 </plugin>
 
@@ -68,6 +78,61 @@ WHAT IT DOES
   MOVEMENT RULE, used consistently: a portal hop is 1, each cardinal step
   is 1, each cexit is 1, and open or close is 0 because those never appear
   in mapper paths.
+
+HOW THE "WORTH IT" LINE WORKS  (added 2026-09-11; reworked in v3.6)
+  Built entirely from the player's own files, so there are no hardcoded step
+  counts and the feature travels to anyone who installs it.
+
+  THE QUESTION IT ANSWERS: how much travel time would a portal in this room
+  save me getting to the mobs I actually kill in this area. SnD's kill_count
+  does not separate campaign, quest and gq kills, so all three are in the
+  weight together, which is what you want here.
+
+  SCOPE: the room's OWN area. An earlier version scored against the whole map
+  and every answer looked the same, because almost nothing moves a map wide
+  total. It also ranked the candidate against the other portals covering the
+  area; that was dropped in v3.6 as noise. The verdict is now purely about
+  time saved.
+
+  pw_build runs ONCE per session and caches into PW:
+    - fadj, the forward exit graph. compute_for_room's own BFS is REVERSE, it
+      walks predecessors back from the target, so it cannot be reused here.
+    - d1, a nearest portal BFS seeded with every portal landing room at once.
+      Unit edge weights, so a plain FIFO queue keeps distances in order and no
+      heap is needed.
+    - kills per room from SnDdb.db (sum of kill_count) when SnD is installed,
+      else every reachable room weighted 1. The 'weighted' flag records which.
+    - bucketed BY AREA: kills_by_area, total_by_area (steps currently walked
+      there), weight_by_area, and worst_by_area, the longest current walk to
+      any killed room in that area.
+
+  pw_evaluate(T, area) does one forward BFS from T and, over that area's
+  killed rooms only, works out what the walk becomes if you could start from
+  either your current nearest portal or T, whichever is closer. It reports the
+  average walk before and after, the worst walk before and after, and the raw
+  steps saved.
+
+  THE SCORE is 0.75 times the percent of walking saved plus 0.25 times the
+  percent knocked off the worst walk. The tail term is the point: total steps
+  saved alone picks the room that shortens the half of the area you were
+  already close to. In testing on Ketu it ranked 35139 (avg 7.4 to 4.8, worst
+  20 to 11) above 35128 (avg 7.4 to 4.1, worst 20 to 9), which is backwards.
+  good at 15 and up, ok at 5, poor below that, none at zero saving, nodata
+  when the area has no recorded kills.
+
+  pv_worth_lines is deliberately a GLOBAL because pv_show_record is defined
+  EARLIER in the file than this block; a local would not be in scope there,
+  whereas a global name resolves at call time.
+
+  Cost: the model build is the expensive part and it is cached; pvworth clears
+  the cache. Each pv after that is one extra full map BFS.
+
+SELF RELOAD  (added 2026-09-11, v3.5)
+  pvreload bounces ReloadPlugin through the world's script space via
+  GetAlphaOption("script_prefix"). Calling ReloadPlugin from inside this
+  plugin's own script space kills the caller before it runs. VERSION is a
+  local kept in step with the version= attribute and is printed in the load
+  banner and the help header, so you can tell which build is live.
 
 HOW THE CATALOG WORKS
   Two triggers capture the "id" box: pd_border matches the plus and dash
@@ -158,6 +223,8 @@ WHEN EDITING
   <alias match="^portalvaluepurge$"  enabled="y" regexp="y" ignore_case="y" script="pv_purge"         sequence="100"></alias>
   <alias match="^pvcheck$"           enabled="y" regexp="y" ignore_case="y" script="pv_check"         sequence="100"></alias>
   <alias match="^pvdebug$"           enabled="y" regexp="y" ignore_case="y" script="pv_toggle_debug"  sequence="100"></alias>
+  <alias match="^pvreload$"          enabled="y" regexp="y" ignore_case="y" script="pv_reload"       sequence="100"></alias>
+  <alias match="^pvworth$"           enabled="y" regexp="y" ignore_case="y" script="pv_worth_refresh" sequence="100"></alias>
   <!-- catalog -->
   <alias match="^portaldex$"         enabled="y" regexp="y" ignore_case="y" script="pd_summary"  sequence="100"></alias>
   <alias match="^pdex$"              enabled="y" regexp="y" ignore_case="y" script="pd_summary"  sequence="100"></alias>
@@ -255,6 +322,8 @@ local MAPPER_ID = "b6eae87ccedd84f510b74714"
 local GMCP_ID   = "3e7dedbe37e44942dd46d264"
 
 -- theme colours
+local VERSION = "3.6"   -- keep in step with the version= attribute above
+
 local C = { hdr="@x099", val="@x045", num="@W", ok="@x048", bad="@R" }
 
 -- colour output (fall back to plain text if the colour lib isn't available)
@@ -914,9 +983,263 @@ local function pv_show_record(r, with_header)
       pv_echo(C.hdr .. "Gameload    : " .. C.val .. "(none reachable)")
    end
    pv_echo(recall_line(r.recall_rooms, r.recall_sw, r.recall_msg))
+   pv_worth_lines(r)
    if r.have_here then
       pv_echo(C.hdr .. "PS          : " .. C.val .. "You already have a portal here!")
    end
+end
+
+-- ===== "is this room worth a portal?" ==================================
+-- Answers, from your OWN data: if you put a portal in this room, how much
+-- walking would it save you across the mobs you actually kill, and how does
+-- that compare with the portals you already carry?
+--
+-- Kill weights come from Search_and_Destroy's SnDdb.db when it is present
+-- (every mob row there carries a kill_count). Without SnD we weight every
+-- mapped room equally, which still answers "how much walking would a portal
+-- here save" -- just spread over the whole map instead of over your targets.
+--
+-- Everything is measured against the portals YOU have and the mobs YOU kill,
+-- so there are no baked-in numbers: the "good portal" bar is the median value
+-- of your own portals.
+
+local PW = { built = false }
+
+local function pw_snd_path()
+   for _, p in ipairs{ GetInfo(66) .. "SnDdb.db", GetInfo(66) .. "/SnDdb.db" } do
+      local f = io.open(p, "rb")
+      if f then f:close(); return p end
+   end
+   return nil
+end
+
+local function pw_comma(n)
+   local s = tostring(math.floor(tonumber(n) or 0))
+   local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+   return (out:gsub("^,", ""))
+end
+
+-- Build the once-per-session model: nearest and second-nearest portal for every
+-- mapped room, plus how much walking each portal you own is uniquely saving.
+local function pw_build(dbpath)
+   local ok_sql, sqlite3 = pcall(require, "sqlite3")
+   if not ok_sql then return nil, "sqlite3 library unavailable" end
+   local db = sqlite3.open(dbpath)
+   if not db then return nil, "could not open the mapper database" end
+
+   local fadj, area_of = {}, {}
+   for row in db:nrows("SELECT uid, area FROM rooms") do
+      area_of[tostring(row.uid)] = row.area or "?"
+   end
+   for row in db:nrows("SELECT fromuid AS f, touid AS t FROM exits WHERE fromuid NOT IN ('*','**')") do
+      local f = tostring(row.f)
+      local b = fadj[f]; if not b then b = {}; fadj[f] = b end
+      b[#b+1] = tostring(row.t)
+   end
+
+   -- every room a portal can drop you into
+   local seeds, seen = {}, {}
+   for row in db:nrows("SELECT touid AS t FROM exits WHERE fromuid IN ('*','**')") do
+      local uid = tostring(row.t)
+      if not seen[uid] then seen[uid] = true; seeds[#seeds+1] = uid end
+   end
+   db:close()
+   if next(seen) == nil then return nil, "no portals saved in the mapper yet" end
+
+   -- nearest-portal BFS from every portal landing at once (unit edges, so a
+   -- plain FIFO queue keeps distances in order; no heap needed)
+   local d1 = {}
+   local q, head = {}, 1
+   for _, s in ipairs(seeds) do
+      if d1[s] == nil then d1[s] = 0; q[#q+1] = s end
+   end
+   while head <= #q do
+      local u = q[head]; head = head + 1
+      local nb, d = fadj[u], d1[u]
+      if nb then
+         for i = 1, #nb do
+            local v = nb[i]
+            if d1[v] == nil then d1[v] = d + 1; q[#q+1] = v end
+         end
+      end
+   end
+
+   -- weights: kills per room if SnD is installed, otherwise every room counts 1
+   local kills, weighted = {}, false
+   local sp = pw_snd_path()
+   if sp then
+      local sdb = sqlite3.open(sp)
+      if sdb then
+         local okq = pcall(function()
+            for row in sdb:nrows("SELECT roomid AS r, SUM(kill_count) AS k FROM mobs WHERE kill_count>0 GROUP BY roomid") do
+               kills[tostring(row.r)] = tonumber(row.k) or 0
+               weighted = true
+            end
+         end)
+         if not okq then kills, weighted = {}, false end
+         sdb:close()
+      end
+   end
+   if not weighted then
+      kills = {}
+      for u in pairs(d1) do kills[u] = 1 end
+   end
+
+   -- Everything below is PER AREA: a portal competes with the other portals
+   -- that cover the same area, not with the whole collection.
+   local kills_by_area = {}   -- area  -> { room = weight }
+   local total_by_area  = {}  -- area  -> steps currently walked there
+   local weight_by_area = {}  -- area  -> total kill weight there
+   local worst_by_area  = {}  -- area  -> longest walk to any killed room there
+   for r, k in pairs(kills) do
+      local a = d1[r]
+      if a then
+         local ar = area_of[r] or "?"
+         local kb = kills_by_area[ar]; if not kb then kb = {}; kills_by_area[ar] = kb end
+         kb[r] = k
+         total_by_area[ar] = (total_by_area[ar] or 0) + k * a
+         weight_by_area[ar] = (weight_by_area[ar] or 0) + k
+         if a > (worst_by_area[ar] or -1) then worst_by_area[ar] = a end
+      end
+   end
+
+   local nport = 0
+   for _ in pairs(seen) do nport = nport + 1 end
+
+   return { built = true, fadj = fadj, d1 = d1, kills = kills, area_of = area_of,
+            kills_by_area = kills_by_area, total_by_area = total_by_area,
+            weight_by_area = weight_by_area, worst_by_area = worst_by_area,
+            nport = nport, weighted = weighted }
+end
+
+local function pw_model(dbpath)
+   if PW.built then return PW end
+   local t0 = os.clock()
+   local m, why = pw_build(dbpath)
+   if not m then return nil, why end
+   PW = m
+   if pv_debug then
+      pv_echo(C.hdr .. "[PortalValue] worth model built in " .. C.num
+              .. string.format("%.2f", os.clock() - t0) .. C.hdr .. "s over " .. C.num
+              .. m.nport .. C.hdr .. " portals.")
+   end
+   return PW
+end
+
+-- How much walking a portal landing in room T would save inside T's OWN area,
+-- and where that puts it among the portals already covering that area.
+local function pw_evaluate(T, area, dbpath)
+   local m, why = pw_model(dbpath)
+   if not m then return nil, why end
+   area = area or m.area_of[T] or "?"
+
+   local targets = m.kills_by_area[area]
+   if not targets then
+      return { area = area, save = 0, pct = 0, weighted = m.weighted, verdict = "nodata" }
+   end
+
+   local dT, q, head = { [T] = 0 }, { T }, 1
+   while head <= #q do
+      local u = q[head]; head = head + 1
+      local nb = m.fadj[u]
+      if nb then
+         for i = 1, #nb do
+            local v = nb[i]
+            if dT[v] == nil then dT[v] = dT[u] + 1; q[#q+1] = v end
+         end
+      end
+   end
+
+   -- Average is not enough on its own: a room can rack up a big total and still
+   -- leave the far end of the area untouched. Track the worst remaining walk too,
+   -- which is what separates a junction serving the whole area from a spot that
+   -- only shortens the half you were already close to.
+   local save, new_sum, new_worst = 0, 0, 0
+   for r, k in pairs(targets) do
+      local a, b = m.d1[r], dT[r]
+      local best = a
+      if a and b and b < a then save = save + k * (a - b); best = b end
+      if best then
+         new_sum = new_sum + k * best
+         if best > new_worst then new_worst = best end
+      end
+   end
+
+   local tot   = m.total_by_area[area] or 0
+   local wsum  = m.weight_by_area[area] or 0
+   local worst = m.worst_by_area[area] or 0
+   local pct      = (tot > 0) and (100 * save / tot) or 0
+   local tailpct  = (worst > 0) and (100 * (worst - new_worst) / worst) or 0
+   local cur_avg  = (wsum > 0) and (tot / wsum) or 0
+   local new_avg  = (wsum > 0) and (new_sum / wsum) or 0
+   -- weighted toward the average, because that is most of the walking, but with
+   -- enough of the tail to prefer a junction that also reaches the far rooms
+   local score = 0.75 * pct + 0.25 * tailpct
+
+   -- Two gates, because neither alone is honest. The percentage is how much of
+   -- your walking IN THIS AREA a portal here would cut, which is the thing you
+   -- actually feel. The pool median stops a well covered area from rewarding
+   -- yet another portal -- but only once the pool is big enough for a median to
+   -- mean anything; with two portals, "beats the median" just means "beats the
+   -- worse of the two", which would wave almost anything through.
+   local verdict
+   if save <= 0     then verdict = "none"
+   elseif score >= 15 then verdict = "good"
+   elseif score >= 5  then verdict = "ok"
+   else                    verdict = "poor" end
+
+   return { area = area, save = save, pct = pct, score = score, tailpct = tailpct,
+            cur_avg = cur_avg, new_avg = new_avg, cur_worst = worst, new_worst = new_worst,
+            weighted = m.weighted, verdict = verdict }
+end
+
+function pv_worth_lines(r)
+   if r.w_msg then
+      pv_echo(C.hdr .. "Worth it    : " .. C.bad .. esc(r.w_msg))
+      return
+   end
+   if not r.w_verdict then return end
+   if r.w_verdict == "nodata" then
+      pv_echo(C.hdr .. "Worth it    : " .. C.val .. "no kills recorded in " .. C.val .. esc(r.w_area or "?")
+              .. C.hdr .. " yet, so there is nothing to weigh a portal against.")
+      return
+   end
+
+   local tag
+   if r.w_verdict == "good" then
+      tag = C.ok .. "This room would make a good portal for you."
+   elseif r.w_verdict == "ok" then
+      tag = C.val .. "Some help, but not a lot; worth a slot only if you come here often."
+   elseif r.w_verdict == "poor" then
+      tag = C.bad .. "Not worth a portal slot."
+   else
+      tag = C.bad .. "Saves you nothing here; you can already get to these mobs as fast."
+   end
+
+   pv_echo(C.hdr .. "Worth it    : " .. C.val .. esc(r.w_area or "?") .. C.hdr .. " mobs: avg walk "
+           .. C.num .. string.format("%.1f", r.w_cur_avg or 0) .. C.hdr .. " -> " .. C.num
+           .. string.format("%.1f", r.w_new_avg or 0) .. C.hdr .. ", worst " .. C.num
+           .. (r.w_cur_worst or 0) .. C.hdr .. " -> " .. C.num .. (r.w_new_worst or 0))
+   pv_echo(C.hdr .. "              " .. C.num .. pw_comma(r.w_save) .. C.hdr .. " steps saved ("
+           .. C.num .. string.format("%.0f", r.w_pct or 0) .. "%" .. C.hdr .. " less walking, "
+           .. C.num .. string.format("%.0f", r.w_tailpct or 0) .. "%" .. C.hdr .. " off the far end)"
+           .. (r.w_weighted and "" or (C.hdr .. "  (no SnD kill data: map-wide estimate)")))
+   pv_echo(C.hdr .. "              " .. tag)
+end
+
+function pv_reload()
+   -- ReloadPlugin tears down this script space, so a timer scheduled here dies
+   -- with it. Bounce the call through the WORLD's script space instead.
+   pv_echo(C.hdr .. "[PortalValue] Reloading v" .. VERSION .. "...")
+   local Q = string.char(39)   -- a single quote, built rather than escaped
+   Execute(GetAlphaOption("script_prefix") ..
+           'DoAfterSpecial(1, "ReloadPlugin(' .. Q .. GetPluginID() .. Q .. ')", sendto.script)')
+end
+
+function pv_worth_refresh()
+   PW = { built = false }
+   pv_echo(C.hdr .. "[PortalValue] Portal-worth model cleared; it rebuilds on your next "
+           .. C.ok .. "pv" .. C.hdr .. ".")
 end
 
 local function compute_for_room(T, channel)
@@ -1080,6 +1403,16 @@ local function compute_for_room(T, channel)
       nc_moves = nc_moves, nc_pname = nc_pname, nc_puid = nc_puid,
       gl_moves = gl_moves, gl_pname = gl_pname, gl_puid = gl_puid,
    }
+   local wv, wwhy = pw_evaluate(T, area, dbpath)
+   if wv then
+      rec.w_save, rec.w_pct, rec.w_tailpct = wv.save, wv.pct, wv.tailpct
+      rec.w_cur_avg, rec.w_new_avg = wv.cur_avg, wv.new_avg
+      rec.w_cur_worst, rec.w_new_worst = wv.cur_worst, wv.new_worst
+      rec.w_verdict, rec.w_weighted, rec.w_area = wv.verdict, wv.weighted, wv.area
+   else
+      rec.w_msg = wwhy
+   end
+
    table.insert(pv_history, rec)
    save_history()
 
@@ -1184,7 +1517,7 @@ end
 
 -- combined help (both "portalvalue help" and "portaldex help" land here)
 function pv_help_all()
-   pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue " .. C.val .. "3.3" .. C.hdr .. " ===================")
+   pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue " .. C.val .. VERSION .. C.hdr .. " ===================")
    pv_echo(C.val .. "Find the nearest portal to walk from, and catalog your portals by type.")
    pv_echo(C.hdr .. "-- pathing --")
    pv_echo(C.hdr .. "  pv                 " .. C.val .. "- nearest portal + speedwalk to your room")
@@ -1192,6 +1525,8 @@ function pv_help_all()
    pv_echo(C.hdr .. "  portalvaluehistory " .. C.val .. "- list past results")
    pv_echo(C.hdr .. "  portalvaluepurge   " .. C.val .. "- clear history")
    pv_echo(C.hdr .. "  pvcheck            " .. C.val .. "- verify mapper / database setup")
+   pv_echo(C.hdr .. "  pvreload           " .. C.val .. "- reload the plugin after an edit")
+   pv_echo(C.hdr .. "  pvworth            " .. C.val .. "- rebuild the \"worth it\" model (after buying/selling portals)")
    pv_echo(C.hdr .. "-- catalog --")
    pv_echo(C.hdr .. "  portaldex          " .. C.val .. "- catalog summary (counts by type)")
    pv_echo(C.hdr .. "  portaldex list [t] " .. C.val .. "- list catalogued portals (optional filter)")
@@ -1228,7 +1563,7 @@ function OnPluginInstall()
       pv_history = {}
    end
    local _, total = count_types()
-   pv_echo(C.hdr .. "[PortalValue] Loaded v3.0. " .. C.num .. #pv_history .. C.hdr .. " result(s), "
+   pv_echo(C.hdr .. "[PortalValue] Loaded v" .. VERSION .. ". " .. C.num .. #pv_history .. C.hdr .. " result(s), "
            .. C.num .. total .. C.hdr .. " portal(s) cataloged ("
            .. (pd_auto and (C.ok .. "auto ON") or (C.bad .. "auto OFF")) .. C.hdr .. "). Type "
            .. C.ok .. "portalvalue help" .. C.hdr .. ".")
