@@ -1,0 +1,4423 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="MazeMobber"
+   author="Eric"
+   id="a7d34e9105c8b26f4a01de73"
+   language="Lua"
+   purpose="mm and mmout solve the mazes in Prosper, Gauntlet, Gwillimberry, Nenukon, Xylmos, Helegear"
+   date_written="2026-09-08"
+   save_state="n"
+   requires="4.00"
+   version="3.0"
+   >
+</plugin>
+
+<!--
+MAINTAINER NOTES (added 2026-09-09, Infamy added same day)
+====================================================================
+WHAT IT DOES
+  One maze solving engine serving seven areas. It walks a shuffling maze,
+  learns the links as it goes, and hunts a named mob for you.
+
+  IT MOVES ONE ROOM AT A TIME. Everything does - hunting a mob, walking to
+  a room, walking out, in every area. Pick something from the list and it
+  walks a single room, checks it, and waits. mmg, or the NEXT link it
+  prints, walks the room after that. Nothing ever runs on by itself.
+
+    gaunt    The Gauntlet, in Gauntlet             31686 to 31739
+    gwill    Botanical Gardens, in Gwillimberry    26015 to 26024
+    nenukon  The Nenukon, in Nenukon               31784 to 31833
+    xyl      Rose Ether, in Xylmos                 444 to 455
+    hele     Helegear Sea and the depths           30699 to 30720
+    prosper  Prosper 201, the theater maze         28252 to 28267
+    infamy   The Realm of Infamy, three levels     26642 to 26670
+    dark     Darklight, the Skullgore Plains       19644 to 19654
+    times    Times of Old, the Cindery Village     28514 to 28527
+    sahu     Sahuagin, four doors up to the princes 34600 to 34613
+
+COMMANDS
+  The help (mm help) teaches THREE and no more - mm, mmg, mmout/mmo.  The
+  per area words and their number and out forms all still work, and are
+  what the clickable links send, but listing them turned the help into a
+  page of synonyms.  Keep it that way when adding an area: the only help
+  change a new area needs is its row in area_lines (), which is generated
+  from AREAS and so writes itself.
+
+  mm [args]    act on whichever of those areas you are standing in
+  <area> ...   the per area name works too (gaunt, gwill, nenukon, xyl,
+               hele, prosper, infamy, sahu)
+  <area><n>    the number glued on works as well as spaced: mm1, prosper3
+  mm version / mm help / mm reload  work anywhere, in or out of an area
+  mmout / mmo  leave the maze; per area forms exist too (gwillout,
+               nenukonout, xylout, heleout, prosperout, sahuout).  Only
+               the areas with an A.outs entry have one - the Gauntlet and
+               Infamy are recalled out of - and those are also the ones
+               remind_out () speaks up in once you have arrived.
+  mmg          walk the next room (this is what the Next link sends)
+  gard/gardout are still accepted, silently, so years of muscle memory
+  keep working; gwill is the name everything PRINTS.
+  Sub commands include a mob name to hunt, "all <mob>" to ignore the room
+  range, "here" to dump the room listing, "wait <secs>" to change the move
+  timeout, and "debug".
+
+AREAS THAT COME IN LEVELS (Infamy, and Helegear's two halves)
+
+  a.sections[vnum] names the level a room is on. a.bridges[section] is the
+  one proper way off it: the room to stand in, the command to send, and
+  the section it leads to. Infamy's three form a ring, 1 -> 2 -> 3 -> 1,
+  so taking the next one repeatedly reaches any level from any other; the
+  code re-checks after each hop rather than planning a route up front.
+
+  WHICH LEVEL YOU ARE ON IS READ FROM THE ROOM NUMBER, never remembered.
+  Infamy has an ability that teleports you to a random level, so anything
+  remembered would be wrong the moment it was used.
+
+  A LINK BETWEEN TWO LEVELS IS NEVER PUT ON THE MAP. This one is subtle
+  and cost a long debugging session. 26669 really does go up to 26645 on
+  level 1, and the mapper knows it, so it arrived in the seed - and then
+  the router used it as a short cut mid sweep and stranded the hunt a
+  level away from the mob. Cross level links are now filtered out of the
+  seed, refused by record(), and skipped by untried(). Take a crossing
+  deliberately or not at all. If a step turns out to have crossed anyway
+  the exit is marked -1 and the sweep crosses back.
+
+  THE HUNT TRAVELS WITH THE CROSSING, in `xover`. Walking to a portal is
+  a goto, and begin() starts a fresh run, so the hunt is saved into xover
+  and restored on the far side. That is order independent, which matters
+  because the move can land before Send returns. stop() only forgets a
+  crossing when it was given a message: begin() calls stop() with none to
+  tidy up, and the walk to a portal is itself a begin().
+
+  LEVELS ARE A RING FOR LAP COUNTING. Going round them all is one lap, so
+  a mob listed on two levels (Thiol) gets the same benefit of the doubt as
+  one that moves between rooms. Crossing does NOT reset `visited`, `laps`
+  or `steps` - they belong to the hunt, and resetting them meant no level
+  ever finished a lap and nothing ever bounded the search.
+
+  'where <keyword>' RUNS FIRST when a.uses_where is set. Only a room name
+  unique in the area is any use (seventeen Infamy rooms are all called
+  "Realm of Infamy"), and UNIQUE[] holds those. A hit pins the room and
+  the level outright. It settles half a second after the first line rather
+  than waiting out the 3s timeout, so starting a hunt is not a three
+  second pause.
+
+STEPPING, and how it is wired
+
+  The gate is in move (): with step_go false it prints the Next line and
+  sends nothing. The click (mm_go) SENDS THE MOVE THAT WAS ALREADY WORKED
+  OUT - offer_step remembers the direction - rather than calling advance ()
+  again. That matters: advance ()'s tail counts a lap and clears the list
+  of rooms already checked, so running it twice for one room counted every
+  lap twice and cut searches short. With the replay, the walk is identical
+  to the old run-on version, move for move.
+
+  take_exit () is gated ONLY for a crossing the plugin chose itself (xover
+  set). When you picked "Dive Room" or typed mmo, arriving and sending the
+  command is the whole request - making you click again to send "surface"
+  while already standing in the room just looks broken. Arriving at the
+  portal room ENDS the walk to it, so `running` is already false while you
+  stand there; only `leaving` says what is left to do, which is why mm_go
+  handles that case before its `running` check.
+
+  EVERY MOVE CARRIES AN ID (move_id) IN ITS STALL TIMER. Without it the
+  timer armed for one move fires while the NEXT one is in flight, blames
+  it, marks a perfectly good exit as a dead wall and starts a resync -
+  which then called begin_room () and produced a stray "scan" in an area
+  that has no mobs. Room to room that mostly went unnoticed; waiting on a
+  click between rooms made it fatal.
+
+  IN COMBAT THE CLICK DOES NOTHING. mm_go checks char.status state 8 and
+  says so. There is no stop-and-resume machinery any more and no `paused`:
+  the sweep never runs on by itself, so a fight cannot interrupt one.
+
+  NO WAIT IN AN EMPTY ROOM. A room with somebody in it closes its
+  {roomchars} block and decides there and then, off the room description
+  overrides. A room with NOBODY sends no block at all, so there is nothing
+  to trigger on - but there is also nothing to wait for, because we never
+  move without a click. So the decision is immediate (0.1s).
+
+  THE ONE EXCEPTION IS GIVING UP. If the decision would end the hunt and
+  this room has not sent its listing yet (rc_seen), it waits one more
+  second first. Deciding instantly there is exactly how a mob standing in
+  front of you gets missed: the listing lands a moment later, but the hunt
+  is already over and mm_rc_end's `not running` check drops it. Walking on
+  is safe to do instantly; declaring "not there" is not.
+
+  COMBAT, IN EACH MODE.  A stepped run needs nothing: it is already
+  stopped between rooms, and step_once () refuses to move you while
+  char.status says 8.  An EXPRESS run walks on its own, so combat_check ()
+  stops it, remembers what it was doing in `paused`, and once you are
+  clear prints a clickable RESUME line.  resume_paused () is shared by
+  that link, "<area> resume" and mmg, and handles all three kinds of run -
+  a hunt, a walk to a room, and a walk out.
+
+  resume_paused is FORWARD DECLARED above mm_go.  mm_go is defined before
+  it and would otherwise pick up a nil global - which is silent until the
+  moment someone actually presses mmg to resume.
+
+  A SEEDED LINK IS A BELIEF, NOT A WALK.  Links put on the map from the
+  long-term record are marked in `hinted`.  untried () still offers them,
+  so they get walked and settled instead of being taken on trust - without
+  that, a well-stocked record filled the map with guesses, left nothing to
+  explore, and the search announced "explored everything I can reach"
+  having barely moved.  That was 5 failures in 20 with a stale record.
+
+  AND A HINT THAT PROVES WRONG IS NOT A RESHUFFLE.  It was never walked,
+  so it says nothing about the rest of the map: record () corrects it in
+  place instead of wiping.  Wiping made a stale record cost MORE than
+  having none (35.7 moves against 17.1).  With both in place:
+      record stale  20/20 reached, 17.1 moves  (same as no record at all)
+      record holds  20/20 reached,  4.0 moves
+  So the record can help and cannot hurt, which is the only shape worth
+  shipping.
+
+  A CROSSED-OFF EXIT IS A BELIEF, NOT A FACT. Dead ends (-1) and ways out
+  of the area (0) are how the maze was arranged when we last tried them;
+  a repop moves them, and a shut door opens. So before ever saying "I
+  explored everything and it is not reachable", reopen_crossed () rubs
+  them all out and the search runs once more (`reopened` guards it to one
+  retry per run). This matters most with a saved map from before a repop:
+  against a map with half its exits wrongly crossed off, v3.5 failed to
+  reach Helegear's dive room in 39 of 40 layouts, and with the retry it
+  reaches it in 40 of 40.
+
+  EVERYTHING THIS PLUGIN SAYS IS HELD BACK A FIFTH OF A SECOND. GMCP lands
+  before the room description, so a line printed the moment we arrive
+  appears ABOVE the description and scrolls straight past. cnote () is the
+  single choke point: it queues, and one timer (mm_flush_notes) lets the
+  queue out in order. The NEXT link waits the same way, on its own token.
+
+  Only the LINES wait. step_waiting is set at once, so typing mmg before
+  the link has appeared still works.
+
+  A function that prints its own body straight to the screen - the list,
+  help, map, seen - must use note_now () for its heading, or the heading
+  sits in the queue while the body prints and ends up underneath it.
+
+  Every mob in Infamy is aggressive, which is what this is for - the
+  normal sweep there is click, get jumped, kill it, click again.
+
+ARCHITECTURE
+
+  DATA FIRST. Everything from the AREAS table down to MAPS is DATA: room
+  names, which rooms are maze, the links the mapper already knows, room
+  exit directions, and the mobs. All of it was generated from the mapper
+  database and the Search_and_Destroy history, so it matches rooms you
+  have actually walked.
+
+  THE MUD GIVES AWAY LINKS FOR FREE, and we take them. room.info's exits
+  are direction -> destination vnum, blanked only "inside a maze" - so
+  every non maze room in an area hands over its links with no move spent
+  finding them. absorb_room () records them. It roughly halves the walk to
+  Helegear's dive room (median 18 moves to 10) and made Prosper's list
+  reliable. Cross level links are skipped here too, same as everywhere.
+
+  TWO THINGS THAT SOUND CLEVER AND MEASURED WORSE, so do not re-add them:
+    * Inferring the reverse link (walk A north to B, assume B south is A).
+      Measured against real saved maps, these mazes are deliberately
+      asymmetric - Helegear 0 of 27 pairs symmetric, Garden 0 of 3,
+      Xyl 4 of 10. It
+      would have poisoned the map.
+    * Choosing where to explore next by how MANY untried exits a room has
+      rather than by distance. Median 10 moves became 12: walking to a
+      room discovers nothing, so distance is what costs.
+
+  EXPRESS IS THE DEFAULT and covers everything - hunting, walking to a
+  room, walking out. is_express () is the one place that decides, and
+  move () is the one place that asks. `express` is the general setting;
+  mmexpress turns it on, mmslow turns it off, and neither is a toggle -
+  the word you type is what you get. area_express[key] overrides it for a
+  single area (mmexpress <area> / mmslow <area>) with three states: on,
+  off, and nil meaning "follow the general one"; naming the mode an area
+  already has clears it back to nil.
+
+  IT IS SAVED AS `slow`, NOT `express`. The default flipped in 3.0, and a
+  dat file written before that carries express=false for everyone who ever
+  ran the old build - which would have left them all stepping with no idea
+  why. Saving the inverse means an old file has neither key, and no key
+  reads as express.
+
+  A LUA FUNCTION GETS 60 UPVALUES, and OnPluginBroadcast had outgrown it -
+  the error is "function at line N has more than 60 upvalues" and it only
+  appears at load. combat_check () and repop_wipe () were pulled out of it
+  to get back under. If it happens again, lift another block out rather
+  than adding another local.
+
+  mmout STEPS TOO, AND EACH PRESS IS THE NEXT ROOM. step_once () is shared
+  by mmg, the NEXT link and mmout, so all three do the same thing. Pressing
+  mmout again used to say "already walking you out" and move nothing, which
+  is indistinguishable from broken - and pressing it again is exactly what
+  someone does when nothing moved.
+
+  Express (the default) makes a single mmout walk the whole way out, and
+  mmslow puts it back to a press per room.
+
+  WALKING OUT IS NOT WALKING TO ONE ROOM. out_walk marks an mmout, and
+  advance () then re-picks the nearest of A.outs every arrival, and stops
+  the moment you are standing in any of them. Committing to the first one
+  is why Nenukon took 65 clicks: it strolled through the OTHER way out on
+  the 17th and carried on. Re-picking makes it a median of 11.
+
+  mmout WHILE ALREADY WALKING OUT does not start over - it says so. Three
+  mmo's in a row each announcing a fresh walk, with nothing moving between
+  them because each was waiting on a click, read exactly like a hang.
+
+  WALKING IN FROM OUTSIDE THROWS THE MAZE MAP AWAY. It was learned on an
+  earlier visit and these mazes are shuffled by then, so routing over it
+  walks links that are not there any more - measurably: a second visit
+  carrying the old map averaged 16.2 moves to Helegear's dive room and
+  13.7 once it starts clean. The ways OUT (0) are kept; they are the
+  building, not the shuffle.
+
+  A CONTRADICTION NEVER CLEARS `visited`. Which rooms you have stood in is
+  a fact; a shuffle moves the links between them, not the rooms. Clearing
+  it threw the search's own progress away on every contradiction, and in a
+  maze whose exits re-roll that is every move - which is what walking in
+  circles looks like from the outside.
+
+  A "STOP MAPPING, JUST WALK" MODE WAS TRIED HERE AND REMOVED. With
+  recording switched off, untried () always returned the first direction
+  the room had, so it walked n, n, n, n... - a three room loop until the
+  move cap. It also measured as no improvement at all. Do not re-add it.
+
+  A LINK THAT NO LONGER GOES WHERE IT DID IS NOT NEWS. reshuffled () says
+  nothing unless debug is on - these mazes shuffle, that is their normal
+  state, and announcing it every time was just noise.
+
+  REPOP IS TOLD TO US
+
+  WHICH EXITS ACTUALLY STAY PUT.  The learned map is thrown away on every
+  entry, because these mazes rearrange on repop.  But "maze" is only the
+  mapper's word for "could not resolve this", and some of those exits may
+  not move at all.  learned[key][from][dir] = { to, n, bad } is the long
+  term record: n counts SEPARATE REPOP CYCLES that agreed (seen_cycle
+  stops one cycle counting ten times), bad counts times it moved.  At
+  n >= FIXED_AFTER (3) with bad == 0 the link is seeded into the fresh
+  map, so the search begins already knowing it.
+
+  Being wrong is cheap and self-correcting: a seeded link that has since
+  moved contradicts on first use, which wipes the map exactly as a repop
+  does, and bad rules it out from then on.  Measured over 40 trials of 10
+  visits, comparing late visits with and without it:
+      no exits fixed     15.7 -> 15.5 moves   (costs nothing)
+      40% fixed          18.0 -> 13.8
+      nothing shuffles   16.5 ->  3.6
+  So it pays exactly in proportion to how much really is fixed, and if
+  the answer is "none" it is free.
+
+  "<area> fixed" prints what it has proved, "<area> forget" clears it.
+  Once a maze's fixed exits are known from real play they can be moved
+  into that area's seed list, so nobody has to walk them in again.
+
+  MAZE LINKS ARE NEVER HARDCODED. They reshuffle on repop, so they are
+  learned by walking. What IS seeded is the non maze links the mapper
+  already knows, and every room's exit DIRECTIONS. That second part
+  matters: GMCP only describes the room you are standing in, so without
+  seeded exit directions the solver could never aim at a maze room it has
+  not already visited.
+
+  THE LEARNED MAP, per area, in MAPS[area.key]:
+      edges[from][dir] = vnum   a link we have walked
+                       = 0      leads out of the area
+                       = -1     "Alas, you cannot go that way"
+      exits[from][dir] = true   a direction GMCP says the room has
+  use_area() repoints edges and exits at the right area's tables, so one
+  area's learned map never pollutes another.
+
+  RESHUFFLE DETECTION is record(): if a link we already knew now leads
+  somewhere different, the maze has repopped, so the WHOLE map is dropped
+  in place, reseeded, and the sweep starts again. This is the single most
+  important behaviour in the plugin.
+
+  THE WALK LOOP.
+    move(dir) sends the direction and arms a mm_timeout after move_wait
+      seconds (default 25). The timeout is deliberately generous: a
+      spurious timeout is far more damaging than a slow one, because the
+      exit gets written off as dead.
+    begin_room() runs on arrival. For a scannable mob it sends "scan" and
+      schedules a decision 8 seconds out; for the noscan mobs, which never
+      appear in scan, it sends nothing and decides off the room's own
+      character list after 2 seconds.
+    schedule_decision uses an arrival counter so exactly ONE decision is
+      made per arrival: whichever comes first, the scan finishing or the
+      fallback timer, acts and the other is ignored.
+    advance() picks the next direction: finish a queued beeline, else head
+      for a goto target, else take an exit never tried, else BFS to the
+      nearest room that still has one.
+    path_to_unvisited() honours A.late, a per area tier list of rooms to
+      leave until last. The Gauntlet's BATTLE ROOM is a dead end with the
+      Deep Dragon in it, so a sweep has no business going in early.
+
+  FINDING THE MOB, in after_arrival, in priority order:
+    1. it is in the room's own character list (the only thing that ever
+       finds the noscan mobs),
+    2. scan saw it nearby, so queue a beeline of that many steps in that
+       direction,
+    3. nothing, keep sweeping.
+
+  Step 2 checks edges[cur][dir] is not -1 first. Scan sees THROUGH exits
+  we have already found to be dead, and blindly re issuing one turns into
+  a stall every time the same sighting comes back.
+
+  is_target() guards against name containment: "skeletal warrior" is
+  inside "a mounted skeletal warrior", so if a line also matches a LONGER
+  listed mob name that contains ours, it is not ours. It checks the short
+  name first and then the room description phrase, because the two do not
+  always share any words.
+
+  LAP_LIMIT is 4. These mobs move while you are walking, so they can slip
+  into a room already ticked off this lap; one or two passes proves very
+  little. MAXSTEPS (600) is the hard stop.
+
+  RECOVERY. Each area has a "recover" definition for falling out of the
+  maze into a known outside room (for instance Prosper drops you into
+  Imaginarium), so a wrong step outside can be walked back in rather than
+  ending the run.
+
+DATA AND STATE
+  save_state is "n". Two files next to the plugin:
+    Nenukon.dat        the learned maps for ALL areas plus move_wait,
+                       written as a Lua table and read back with
+                       loadstring. The filename is historical, from when
+                       this was the Nenukon only plugin.
+    Nenukon_desc.txt   learned room description phrases
+  The file is safe to delete; the maps are simply relearned.
+
+WHEN EDITING
+  * The scan triggers sit at sequence 50 with keep_evaluating so they run
+    AHEAD of Search_and_Destroy's own scan triggers and leave those
+    working. Aardwolf wraps scan output in {scan} and {/scan} once
+    "tags scan on" is set; without that tag the scan path does nothing.
+  * The blocked trigger matches "Alas, you cannot go that way." exactly,
+    which is verified to be the world file's mapping_failure string.
+  * Prosper 201's theater maze is here, but the OTHER Prosper 201 content
+    (STTNG) is deliberately a separate plugin.
+  * To add an area, add an entry to AREAS with roomname, maze, seed,
+    exitdirs, leaves, late, range, mobs, roomdesc and recover, and add its
+    command word to the two alias patterns.
+  * doors = { [room] = { dir = { "open d" } } } sends those commands just
+    before a move out of that room in that direction - for an exit behind
+    a shut door. move () is the only place a direction is sent, so this
+    covers routed steps as well as the sweep.
+-->
+
+<aliases>
+  <alias
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|mm)(?:\s+(.*))?$"
+    script="mm_command" name="mm_command"
+    enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
+  >
+  </alias>
+  <!-- The same thing with the number stuck on: mm1, prosper3, sahu2.  The
+       alias above cannot cover it, because after the command word it wants
+       either the end of the line or a space, so "mm1" falls through it.
+       Digits only, which is what keeps this off mmg, mmo, mmout and
+       mmexpress. -->
+  <alias
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|mm)(\d+)$"
+    script="mm_command" name="mm_number"
+    enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
+  >
+  </alias>
+
+  <alias
+    match="^mmg$" script="mm_go" name="mm_go"
+    enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100">
+  </alias>
+
+  <!-- Deliberately not in the help: one mmout walks the whole way out
+       instead of a room per press. -->
+  <alias
+    match="^mmslow(?:\s+(\w+))?$" script="mm_mode" name="mm_slow"
+    enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100">
+  </alias>
+  <alias
+    match="^mmexpress(?:\s+(\w+))?$" script="mm_mode" name="mm_express"
+    enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100">
+  </alias>
+
+  <alias
+    match="^(gwillout|gardout|nenukonout|xylout|heleout|prosperout|infamyout|sahuout|mmout|mmo)$"
+    script="mm_out" name="mm_out"
+    enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
+  >
+  </alias>
+</aliases>
+
+<triggers>
+  <!-- Movement failure.  Verified: this is the world file's mapping_failure
+       string, so it is exactly what the MUD sends. -->
+  <trigger
+    match="^Alas, you cannot go that way\.$"
+    script="mm_blocked" name="mm_blocked"
+    enabled="y" regexp="y" keep_evaluating="y" sequence="50"
+  >
+  </trigger>
+
+  <!-- A warded door.  Unlike the line above this does NOT mean the exit
+       is a wall - the way is real and the ward is temporary - so the move
+       is abandoned without crossing the exit off, and the next step is
+       handed back to you.  The noun is left open: the wards in Sahuagin
+       say "door", others may not. -->
+  <trigger
+    match="^Magical wards around the .+ bounce you back\.$"
+    script="mm_warded" name="mm_warded"
+    enabled="y" regexp="y" keep_evaluating="y" sequence="50"
+  >
+  </trigger>
+
+  <!-- The room-description markers.  These are for plugins, never for
+       people to read.  aard_ASCII_map turns them ON and hides them with
+       its own omit triggers, but that only works while its trigger is the
+       one that matches - and something about walking under this plugin
+       stops that happening, so the markers leak into the output on every
+       arrival.  Rather than keep chasing why, gag them here as well.
+
+       Sequence 20 puts this ahead of everything else this plugin does, so
+       the line is marked omitted before any of our own output can flush
+       it.  keep_evaluating leaves the map plugin's own triggers to run
+       normally - omitting a line does not stop it being matched - so its
+       room_change bookkeeping is untouched. -->
+  <trigger
+    match="^\s*\{/?rdesc\}\s*$"
+    script="mm_gag" name="mm_rdesc"
+    enabled="y" regexp="y" keep_evaluating="y" omit_from_output="y"
+    sequence="20"
+  >
+  </trigger>
+
+  <!-- Scan.  Aardwolf wraps scan output in {scan}...{/scan} once
+       'tags scan on' is set.  Sequence 50 and keep_evaluating so we run
+       ahead of Search_and_Destroy's own scan triggers and leave them
+       working. -->
+  <trigger match="{scan}" script="mm_scan_start" name="mm_scan_start"
+    enabled="y" regexp="n" keep_evaluating="y" sequence="50">
+  </trigger>
+  <trigger match="{/scan}" script="mm_scan_end" name="mm_scan_end"
+    enabled="y" regexp="n" keep_evaluating="y" sequence="50">
+  </trigger>
+  <trigger match="^Right here you see:$" script="mm_scan_here" name="mm_scan_here"
+    group="mm_scan" enabled="n" regexp="y" keep_evaluating="y" sequence="50">
+  </trigger>
+  <trigger match="^(\d )?(North|East|South|West|Up|Down) from here you see:$"
+    script="mm_scan_dir" name="mm_scan_dir"
+    group="mm_scan" enabled="n" regexp="y" keep_evaluating="y" sequence="50">
+  </trigger>
+  <trigger match="^ {5}-(.+)$" script="mm_scan_mob" name="mm_scan_mob"
+    group="mm_scan" enabled="n" regexp="y" keep_evaluating="y" sequence="50">
+  </trigger>
+
+  <!-- Roomchars.  The MUD tags the character list of every room you walk
+       into.  This is what catches the noscan mobs - they never appear in
+       scan, but they are standing right there in the room listing. -->
+  <trigger match="{roomchars}" script="mm_rc_start" name="mm_rc_start"
+    enabled="y" regexp="n" keep_evaluating="y" sequence="40">
+  </trigger>
+  <trigger match="{/roomchars}" script="mm_rc_end" name="mm_rc_end"
+    enabled="y" regexp="n" keep_evaluating="y" sequence="40">
+  </trigger>
+  <!-- 'where <mob>' - the mob name is padded to 30 columns, then the room
+       name.  Same patterns Search_and_Destroy uses for its quick where. -->
+  <trigger match="^(.{30}) ([^ (0-9].*)$" script="mm_where_hit" name="mm_where_hit"
+    group="mm_where" enabled="n" regexp="y" keep_evaluating="y" sequence="30">
+  </trigger>
+  <trigger match="^There is no \w.+ around here\.$" script="mm_where_miss"
+    name="mm_where_miss" group="mm_where" enabled="n" regexp="y"
+    keep_evaluating="y" sequence="30">
+  </trigger>
+
+  <trigger match="^.+$" script="mm_rc_line" name="mm_rc_line"
+    group="mm_rc" enabled="n" regexp="y" keep_evaluating="y" sequence="40">
+  </trigger>
+</triggers>
+
+<script>
+<![CDATA[
+
+require "aardwolf_colors"
+require "gmcphelper"
+
+local GMCP_ID = "3e7dedbe37e44942dd46d264"
+
+-- ===========================================================
+--  MazeMobber - one engine, four areas
+--
+--    gaunt    The Gauntlet, in Gauntlet          31686-31739
+--    gwill    Botanical Gardens, in Gwillimberry 26015-26024  gwillout
+--    nenukon  The Nenukon, in Nenukon            31784-31833  nenukonout
+--    xyl      Rose Ether, in Xylmos              444-455      xylout
+--    hele     Helegear Sea and the depths        30699-30720  heleout
+--    prosper  Prosper 201, the theater maze      28252-28267  prosperout
+--
+--    mm / mmout  whichever of those you are standing in.  Anywhere in
+--    one of those five areas counts: from elsewhere in Xylmos, mm walks
+--    you to the entrance of Rose Ether and puts the list up.
+--
+--  Every command is gated to its own area's rooms.  Each area keeps a
+--  separate learned map, so one never pollutes another.  The Prosper
+--  201 maze is deliberately not here - that is STTNG, on its own.
+--
+--  Maze links are never hardcoded: they reshuffle on repop, so they are
+--  learned by walking and dropped the moment a known one leads somewhere
+--  new.  Links the mapper already knows for the non-maze rooms, and every
+--  room's exit directions, are seeded so routing is instant.
+-- ===========================================================
+
+-- =====================================================================
+--  Area definitions.  Everything below this point is data: room names,
+--  which rooms are maze, the links the mapper already knows, and the
+--  mobs.  All of it is generated from the mapper database and the
+--  Search_and_Destroy history, so it matches what you have walked.
+-- =====================================================================
+
+local AREAS = {
+  {
+    key = "gauntlet", cmd = "gaunt", label = "The Gauntlet", zone = "gauntlet",
+    lo = 31686, hi = 31739,
+    roomname = {
+      [31686] = "The Gauntlet",
+      [31687] = "The Gauntlet",
+      [31688] = "The Gauntlet",
+      [31689] = "The Gauntlet",
+      [31690] = "The Gauntlet",
+      [31691] = "The Gauntlet",
+      [31692] = "The Gauntlet",
+      [31693] = "The Gauntlet",
+      [31694] = "The Gauntlet",
+      [31695] = "The Gauntlet",
+      [31696] = "The Gauntlet",
+      [31697] = "The Gauntlet",
+      [31698] = "The Gauntlet",
+      [31699] = "The Gauntlet",
+      [31700] = "The Gauntlet",
+      [31701] = "The Gauntlet",
+      [31702] = "The Gauntlet",
+      [31703] = "The Gauntlet",
+      [31704] = "The Gauntlet",
+      [31705] = "The Gauntlet",
+      [31706] = "The Gauntlet",
+      [31707] = "The Gauntlet",
+      [31708] = "The Gauntlet",
+      [31709] = "The Gauntlet",
+      [31710] = "The Gauntlet",
+      [31711] = "The Gauntlet",
+      [31712] = "The Gauntlet",
+      [31713] = "The Gauntlet",
+      [31714] = "The Gauntlet",
+      [31715] = "The Gauntlet",
+      [31716] = "The Gauntlet",
+      [31717] = "The Gauntlet",
+      [31718] = "The Gauntlet",
+      [31719] = "The Gauntlet",
+      [31720] = "The Gauntlet",
+      [31721] = "The Gauntlet",
+      [31722] = "The Gauntlet",
+      [31723] = "The Gauntlet",
+      [31724] = "The Gauntlet",
+      [31725] = "The Gauntlet",
+      [31726] = "The Gauntlet",
+      [31727] = "The Gauntlet",
+      [31728] = "The Gauntlet",
+      [31729] = "The Gauntlet",
+      [31730] = "The Gauntlet",
+      [31731] = "The Gauntlet",
+      [31732] = "The Gauntlet",
+      [31733] = "The Gauntlet",
+      [31734] = "The Gauntlet",
+      [31735] = "The Gauntlet",
+      [31736] = "The Gauntlet",
+      [31737] = "Pre-Battle Room",
+      [31738] = "ROOM BEFORE FIGHT",
+      [31739] = "BATTLE ROOM",
+    },
+    maze = { [31686]=true, [31687]=true, [31688]=true, [31689]=true, [31690]=true, [31691]=true, [31692]=true, [31693]=true, [31694]=true, [31695]=true, [31696]=true, [31697]=true, [31698]=true, [31699]=true, [31700]=true, [31701]=true, [31702]=true, [31703]=true, [31704]=true, [31705]=true, [31706]=true, [31707]=true, [31708]=true, [31709]=true, [31710]=true, [31711]=true, [31712]=true, [31713]=true, [31714]=true, [31715]=true, [31716]=true, [31717]=true, [31718]=true, [31719]=true, [31720]=true, [31721]=true, [31722]=true, [31723]=true, [31724]=true, [31725]=true, [31726]=true, [31727]=true, [31728]=true, [31729]=true, [31730]=true, [31731]=true, [31732]=true, [31733]=true, [31734]=true, [31735]=true },
+    seed = { {31736,"d",31730}, {31736,"e",31737}, {31737,"s",31738}, {31737,"w",31736}, {31738,"n",31737}, {31738,"w",31739}, {31739,"e",31738}, },
+    exitdirs = {
+      [31686] = { "e", "n", "s", "w" },
+      [31687] = { "e", "n", "s", "w" },
+      [31688] = { "e", "n", "s", "w" },
+      [31689] = { "e", "n", "s", "w" },
+      [31690] = { "e", "n", "s", "w" },
+      [31691] = { "e", "n", "s", "w" },
+      [31692] = { "e", "n", "s", "w" },
+      [31693] = { "e", "n", "s", "w" },
+      [31694] = { "e", "n", "s", "w" },
+      [31695] = { "e", "n", "s", "w" },
+      [31696] = { "e", "n", "s", "w" },
+      [31697] = { "e", "n", "s", "w" },
+      [31698] = { "e", "n", "s", "w" },
+      [31699] = { "e", "n", "s", "w" },
+      [31700] = { "e", "n", "s", "w" },
+      [31701] = { "e", "n", "s", "w" },
+      [31702] = { "e", "n", "s", "w" },
+      [31703] = { "e", "n", "s", "w" },
+      [31704] = { "e", "n", "s", "w" },
+      [31705] = { "e", "n", "s", "w" },
+      [31706] = { "e", "n", "s", "w" },
+      [31707] = { "e", "n", "s", "w" },
+      [31708] = { "e", "n", "s", "w" },
+      [31709] = { "e", "n", "s", "w" },
+      [31710] = { "e", "n", "s", "w" },
+      [31711] = { "e", "n", "s", "w" },
+      [31712] = { "e", "n", "s", "w" },
+      [31713] = { "e", "n", "s", "w" },
+      [31714] = { "e", "n", "s", "w" },
+      [31715] = { "e", "n", "s", "w" },
+      [31716] = { "e", "n", "s", "w" },
+      [31717] = { "e", "n", "s", "w" },
+      [31718] = { "e", "n", "s", "w" },
+      [31719] = { "e", "n", "s", "w" },
+      [31720] = { "e", "n", "s", "w" },
+      [31721] = { "e", "n", "s", "w" },
+      [31722] = { "e", "n", "s", "w" },
+      [31723] = { "e", "n", "s", "w" },
+      [31724] = { "e", "n", "s", "w" },
+      [31725] = { "e", "n", "s", "w" },
+      [31726] = { "e", "n", "s", "w" },
+      [31727] = { "e", "n", "s", "w" },
+      [31728] = { "e", "n", "s", "w" },
+      [31729] = { "e", "n", "s", "w" },
+      [31730] = { "e", "n", "s", "u", "w" },
+      [31731] = { "e", "n", "s", "w" },
+      [31732] = { "e", "n", "s", "w" },
+      [31733] = { "e", "n", "s", "w" },
+      [31734] = { "e", "n", "s", "w" },
+      [31735] = { "e", "n", "s", "w" },
+      [31736] = { "d", "e" },
+      [31737] = { "s", "w" },
+      [31738] = { "n", "w" },
+      [31739] = { "e" },
+    },
+    leaves = {  },
+    auto = { [31694]=true, [31696]=true },
+    entrance = { goto_room = 31652, run = "run 4d2n2e5s3w" },
+    bridges = {  },
+    sections = {  },
+    outlabel = "ways out",
+    outs = {  },
+    places = {  },
+    late = { [31737]=1, [31738]=2, [31739]=3 },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+      ["giant skeleton"] = "giant skeleton",
+      ["night hunter bat"] = "large black bat",
+    },
+    range = {
+      ["deep dragon"] = { [31739]=true },
+      ["horgar"] = { [31735]=true },
+      ["mimic"] = { [31702]=true },
+    },
+    mobs = {
+      { "the black pudding",           false },
+      { "the carrion crawler",         false },
+      { "the cloaker",                 false },
+      { "the crawling claw",           false },
+      { "the crypt thing",             false },
+      { "the dream wraith",            false },
+      { "the feyr",                    false },
+      { "the flying snake",            false },
+      { "the gelatinous cube",         false },
+      { "the ghoul",                   false },
+      { "the giant skeleton",          true },
+      { "the giant slug",              false },
+      { "the grell",                   false },
+      { "the hook horror",             false },
+      { "the mummy",                   false },
+      { "the night hunter bat",        true },
+      { "the otyugh",                  false },
+      { "the poltergeist",             false },
+      { "the roper",                   false },
+      { "the rust monster",            false },
+      { "the shadow",                  false },
+      { "the slithering tracker",      false },
+      { "the slithermorph",            false },
+      { "the spectre",                 false },
+      { "the umber hulk",              false },
+      { "the vampiric mist",           false },
+      { "the watch ghost",             false },
+      { "the wight",                   false },
+      { "the wraith",                  false },
+      { "the xorn",                    false },
+      { "the horgar",                  false },
+      { "the mimic",                   false },
+      { "the Deep Dragon",             false },
+    },
+  },
+  {
+    key = "garden", cmd = "gwill", label = "The Botanical Gardens", zone = "gwillim",
+    lo = 26015, hi = 26024,
+    roomname = {
+      [26015] = "The Botanical Gardens",
+      [26016] = "The Botanical Gardens",
+      [26017] = "The Botanical Gardens",
+      [26018] = "The Botanical Gardens",
+      [26019] = "The Botanical Gardens",
+      [26020] = "The Botanical Gardens",
+      [26021] = "The Botanical Gardens",
+      [26022] = "The Botanical Gardens",
+      [26023] = "The Botanical Gardens",
+      [26024] = "The Botanical Gardens",
+    },
+    maze = { [26016]=true, [26017]=true, [26018]=true, [26019]=true, [26020]=true, [26021]=true, [26022]=true, [26023]=true, [26024]=true },
+    seed = { {26015,"n",26016}, },
+    exitdirs = {
+      [26015] = { "n", "s" },
+      [26016] = { "e", "n", "s", "w" },
+      [26017] = { "e", "n", "w" },
+      [26018] = { "e", "n" },
+      [26019] = { "e", "n", "s", "w" },
+      [26020] = { "e", "n", "s", "w" },
+      [26021] = { "e", "n", "s" },
+      [26022] = { "e", "n", "s", "w" },
+      [26023] = { "e", "n", "s" },
+      [26024] = { "s", "w" },
+    },
+    leaves = { {26015,"s"}, },
+    auto = { [26015]=true },
+    entrance = { goto_room = 26015 },
+    bridges = {  },
+    sections = {  },
+    outlabel = "ways out",
+    outs = { { room = 26015, how = "south door", cmds = { "open s", "s" } }, },
+    places = { { room = 26015, how = "south door", label = "The Botanical Gardens", cmds = { "open s", "s" } }, },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+      ["cajoling faerie"] = "an evil grin on her face",
+      ["cavorting faerie"] = "cavorts here with glee",
+      ["drunken faerie"] = "quaffed too much mead",
+      ["gloomy faerie"] = "swirling mist of evil and gloom",
+      ["nibbling rabbit"] = "rabbit is nibbling on flower stems",
+      ["serious faerie"] = "serious looking lady",
+      ["smiling faerie"] = "smiling faerie watches you approach",
+    },
+    range = {
+    },
+    mobs = {
+      { "A cavorting faerie",          true },
+      { "A serious faerie",            true },
+      { "A gloomy faerie",             true },
+      { "A smiling faerie",            true },
+      { "A drunken faerie",            true },
+      { "A cajoling faerie",           true },
+      { "A nibbling rabbit",           false },
+    },
+  },
+  {
+    key = "nenukon", cmd = "nenukon", label = "The Nenukon", zone = "nenukon",
+    lo = 31784, hi = 31833,
+    roomname = {
+      [31784] = "Edge of the Nenukon",
+      [31785] = "Entering the Nenukon",
+      [31786] = "The Nenukon",
+      [31787] = "The Nenukon",
+      [31788] = "The Nenukon",
+      [31789] = "Nearing a Campsite",
+      [31790] = "The Nenukon",
+      [31791] = "The Nenukon",
+      [31792] = "The Nenukon",
+      [31793] = "The Oasis",
+      [31794] = "Demon Nest",
+      [31795] = "The Nenukon",
+      [31796] = "The Nenukon",
+      [31797] = "The Nenukon",
+      [31798] = "Before the Pit of Monuhi",
+      [31799] = "The Pit of Monuhi",
+      [31800] = "The Pit of Monuhi",
+      [31801] = "The Pit of Monuhi",
+      [31802] = "Inside the Tomb of Monuhi",
+      [31803] = "Monuhi's Crypt!",
+      [31804] = "A Goblin Encampment",
+      [31805] = "Deeper into the Nenukon",
+      [31806] = "Deeper into the Nenukon",
+      [31807] = "Deeper into the Nenukon",
+      [31808] = "Deeper into the Nenukon",
+      [31809] = "Deeper into the Nenukon",
+      [31810] = "Demon Spawning Grounds",
+      [31811] = "Demon Spawning Grounds",
+      [31812] = "The Heart of the Nenukon",
+      [31813] = "Far Side of the Nenukon",
+      [31814] = "Nearing the Great Wall",
+      [31815] = "The Great Wall",
+      [31816] = "The Great Wall",
+      [31817] = "Nearing a Campsite",
+      [31818] = "A Campsite",
+      [31819] = "Lynx Tribe Encampment",
+      [31820] = "Eagle Tribe Encampment",
+      [31821] = "A Campsite",
+      [31822] = "A Campsite",
+      [31823] = "Rattlesnake Tribe Encampment",
+      [31824] = "Fox Tribe Encampment",
+      [31825] = "Elk Tribe Encampment",
+      [31826] = "A Campsite",
+      [31827] = "A Campsite",
+      [31828] = "Bear Tribe Encampment",
+      [31829] = "Mink Tribe Encampment",
+      [31830] = "Cougar Tribe Encampment",
+      [31831] = "A Small Cave",
+      [31832] = "Yota Timo's Lair",
+      [31833] = "Yota Timo's Army!",
+    },
+    maze = { [31785]=true, [31786]=true, [31787]=true, [31788]=true, [31790]=true, [31791]=true, [31792]=true, [31795]=true, [31796]=true, [31797]=true, [31805]=true, [31806]=true, [31807]=true, [31808]=true, [31809]=true, [31813]=true },
+    seed = { {31784,"s",31785}, {31789,"n",31787}, {31789,"s",31804}, {31793,"d",31794}, {31793,"s",31792}, {31794,"u",31793}, {31798,"e",31799}, {31798,"w",31797}, {31799,"d",31800}, {31799,"w",31798}, {31800,"d",31801}, {31800,"u",31799}, {31801,"u",31800}, {31802,"n",31803}, {31803,"s",31802}, {31804,"n",31789}, {31810,"e",31811}, {31810,"n",31808}, {31811,"w",31810}, {31812,"n",31809}, {31812,"s",31813}, {31814,"e",31817}, {31814,"n",31813}, {31814,"s",31815}, {31815,"n",31814}, {31815,"s",31816}, {31816,"n",31815}, {31817,"e",31818}, {31817,"w",31814}, {31818,"e",31821}, {31818,"n",31819}, {31818,"s",31820}, {31818,"w",31817}, {31819,"s",31818}, {31820,"n",31818}, {31821,"e",31826}, {31821,"n",31822}, {31821,"s",31825}, {31821,"w",31818}, {31822,"e",31824}, {31822,"n",31823}, {31822,"s",31821}, {31823,"s",31822}, {31824,"w",31822}, {31825,"n",31821}, {31826,"e",31827}, {31826,"s",31829}, {31826,"w",31821}, {31827,"e",31830}, {31827,"n",31828}, {31827,"w",31826}, {31828,"s",31827}, {31829,"n",31826}, {31830,"w",31827}, {31831,"s",31788}, {31831,"w",31832}, {31832,"e",31831}, {31833,"w",31796}, },
+    exitdirs = {
+      [31784] = { "s", "w" },
+      [31785] = { "e", "n", "s", "w" },
+      [31786] = { "s", "w" },
+      [31787] = { "e", "n", "s", "w" },
+      [31788] = { "e", "n", "s" },
+      [31789] = { "n", "s" },
+      [31790] = { "e", "n", "s", "w" },
+      [31791] = { "e", "n", "s", "w" },
+      [31792] = { "e", "n", "s", "w" },
+      [31793] = { "d", "s" },
+      [31794] = { "u" },
+      [31795] = { "e", "n", "s", "w" },
+      [31796] = { "e", "n", "s" },
+      [31797] = { "e", "n" },
+      [31798] = { "e", "w" },
+      [31799] = { "d", "w" },
+      [31800] = { "d", "u" },
+      [31801] = { "u" },
+      [31802] = { "n" },
+      [31803] = { "s" },
+      [31804] = { "n" },
+      [31805] = { "e", "n", "s" },
+      [31806] = { "e", "n", "s" },
+      [31807] = { "e", "n", "s", "w" },
+      [31808] = { "e", "n", "s", "w" },
+      [31809] = { "e", "n", "s" },
+      [31810] = { "e", "n" },
+      [31811] = { "w" },
+      [31812] = { "n", "s" },
+      [31813] = { "e", "n", "s" },
+      [31814] = { "e", "n", "s" },
+      [31815] = { "n", "s" },
+      [31816] = { "n" },
+      [31817] = { "e", "w" },
+      [31818] = { "e", "n", "s", "w" },
+      [31819] = { "s" },
+      [31820] = { "n" },
+      [31821] = { "e", "n", "s", "w" },
+      [31822] = { "e", "n", "s" },
+      [31823] = { "s" },
+      [31824] = { "w" },
+      [31825] = { "n" },
+      [31826] = { "e", "s", "w" },
+      [31827] = { "e", "n", "w" },
+      [31828] = { "s" },
+      [31829] = { "n" },
+      [31830] = { "w" },
+      [31831] = { "s", "w" },
+      [31832] = { "e" },
+      [31833] = { "w" },
+    },
+    leaves = { {31784,"w"}, },
+    auto = { [31784]=true },
+    entrance = { goto_room = 31784 },
+    bridges = {  },
+    sections = {  },
+    outlabel = "ways out",
+    outs = { { room = 31784, how = "up and out" }, { room = 31818, how = "up and out" }, },
+    places = { { room = 31784, how = "up and out", label = "Edge of the Nenukon" }, { room = 31818, how = "up and out", label = "A Campsite" }, },
+    late = {  },
+    noroute = { [31802]=true, [31803]=true },
+    ranged = true,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+      ["air demon"] = { [31808]=true, [31812]=true, [31813]=true, [31814]=true, [31815]=true, [31816]=true, [31817]=true, [31820]=true, [31821]=true },
+      ["bastion"] = { [31785]=true, [31786]=true, [31788]=true, [31792]=true, [31794]=true, [31795]=true, [31797]=true, [31798]=true, [31799]=true, [31800]=true, [31801]=true, [31807]=true, [31808]=true, [31809]=true, [31811]=true, [31812]=true, [31819]=true, [31832]=true, [31833]=true },
+      ["bear master of battle"] = { [31796]=true, [31806]=true, [31807]=true, [31812]=true, [31814]=true, [31817]=true, [31818]=true, [31822]=true, [31826]=true, [31827]=true, [31828]=true, [31829]=true, [31830]=true, [31831]=true },
+      ["cougar master of battle"] = { [31801]=true, [31804]=true, [31805]=true, [31806]=true, [31813]=true, [31814]=true, [31817]=true, [31821]=true, [31822]=true, [31823]=true, [31824]=true, [31825]=true, [31826]=true, [31827]=true, [31828]=true, [31830]=true, [31831]=true },
+      ["eagle champion"] = { [31801]=true },
+      ["eagle mistress of battle"] = { [31786]=true, [31787]=true, [31791]=true, [31804]=true, [31809]=true, [31812]=true, [31813]=true, [31814]=true, [31817]=true, [31818]=true, [31819]=true, [31820]=true, [31821]=true, [31824]=true, [31825]=true, [31826]=true, [31828]=true, [31829]=true, [31830]=true, [31831]=true, [31832]=true },
+      ["earth demon"] = { [31785]=true, [31786]=true, [31787]=true, [31788]=true, [31805]=true, [31807]=true, [31808]=true, [31809]=true, [31810]=true, [31812]=true, [31815]=true, [31832]=true },
+      ["elk battle mistress"] = { [31787]=true, [31788]=true, [31805]=true, [31810]=true, [31814]=true, [31815]=true, [31816]=true, [31817]=true, [31818]=true, [31819]=true, [31820]=true, [31821]=true, [31822]=true, [31823]=true, [31824]=true, [31825]=true, [31826]=true, [31827]=true, [31829]=true, [31830]=true },
+      ["fire demon"] = { [31792]=true, [31793]=true, [31795]=true, [31796]=true, [31797]=true, [31798]=true, [31799]=true, [31800]=true, [31801]=true, [31820]=true, [31833]=true },
+      ["fox champion"] = { [31785]=true, [31788]=true, [31791]=true, [31799]=true, [31812]=true, [31814]=true, [31816]=true, [31817]=true, [31818]=true, [31819]=true, [31821]=true, [31822]=true, [31823]=true, [31824]=true, [31825]=true, [31827]=true, [31828]=true, [31829]=true },
+      ["fox demon"] = { [31785]=true, [31787]=true, [31788]=true, [31789]=true, [31790]=true, [31806]=true, [31807]=true, [31809]=true, [31811]=true, [31813]=true, [31814]=true, [31815]=true, [31816]=true, [31817]=true, [31818]=true, [31819]=true, [31820]=true, [31821]=true, [31822]=true, [31823]=true, [31824]=true, [31825]=true, [31827]=true, [31828]=true, [31829]=true, [31830]=true },
+      ["fox master of battle"] = { [31792]=true, [31794]=true, [31797]=true, [31814]=true, [31816]=true, [31817]=true, [31818]=true, [31819]=true, [31821]=true, [31822]=true, [31823]=true, [31824]=true, [31825]=true, [31827]=true, [31828]=true, [31829]=true },
+      ["goblin"] = { [31804]=true },
+      ["greater demon"] = { [31785]=true, [31806]=true, [31807]=true, [31808]=true, [31809]=true, [31810]=true, [31811]=true, [31812]=true, [31814]=true, [31818]=true, [31825]=true, [31830]=true },
+      ["hooded exile"] = { [31785]=true },
+      ["ice demon"] = { [31785]=true, [31787]=true, [31788]=true, [31789]=true, [31791]=true, [31792]=true, [31796]=true, [31799]=true, [31805]=true, [31806]=true, [31807]=true, [31808]=true, [31814]=true, [31826]=true, [31831]=true, [31832]=true },
+      ["lesser demon"] = { [31785]=true, [31786]=true, [31787]=true, [31788]=true, [31789]=true, [31790]=true, [31791]=true, [31792]=true, [31793]=true, [31794]=true, [31795]=true, [31797]=true, [31798]=true, [31799]=true, [31800]=true, [31801]=true, [31805]=true, [31806]=true, [31807]=true, [31808]=true, [31809]=true, [31812]=true, [31826]=true, [31831]=true, [31832]=true, [31833]=true },
+      ["lynx master of battle"] = { [31785]=true, [31787]=true, [31790]=true, [31792]=true, [31805]=true, [31810]=true, [31811]=true, [31812]=true, [31813]=true, [31814]=true, [31816]=true, [31817]=true, [31818]=true, [31819]=true, [31821]=true, [31822]=true, [31824]=true, [31826]=true, [31827]=true, [31828]=true, [31829]=true },
+      ["mounted skeletal warrior"] = { [31785]=true, [31787]=true, [31790]=true, [31792]=true, [31795]=true, [31796]=true, [31797]=true, [31798]=true, [31800]=true, [31801]=true, [31804]=true, [31814]=true, [31832]=true, [31833]=true },
+      ["naga champion"] = { [31785]=true, [31786]=true, [31787]=true, [31788]=true, [31789]=true, [31790]=true, [31791]=true, [31797]=true, [31800]=true, [31804]=true, [31805]=true, [31806]=true, [31809]=true, [31810]=true, [31812]=true, [31813]=true, [31814]=true, [31817]=true, [31818]=true, [31819]=true, [31820]=true, [31822]=true, [31824]=true, [31828]=true, [31829]=true, [31831]=true },
+      ["naga paladin"] = { [31787]=true, [31788]=true, [31791]=true, [31792]=true, [31793]=true, [31796]=true, [31797]=true, [31805]=true, [31807]=true, [31809]=true, [31810]=true, [31814]=true, [31817]=true },
+      ["naga warlord"] = { [31785]=true, [31786]=true, [31788]=true, [31789]=true, [31790]=true, [31791]=true, [31795]=true, [31806]=true, [31809]=true, [31810]=true, [31814]=true, [31818]=true },
+      ["paladin of the lynx tribe"] = { [31785]=true, [31786]=true, [31787]=true, [31790]=true, [31791]=true, [31793]=true, [31795]=true, [31798]=true, [31799]=true, [31801]=true, [31805]=true, [31806]=true, [31807]=true, [31808]=true, [31809]=true, [31812]=true, [31814]=true, [31818]=true, [31819]=true, [31821]=true, [31822]=true, [31824]=true, [31827]=true, [31828]=true },
+      ["sashi amanis"] = { [31823]=true },
+      ["skeletal archer"] = { [31785]=true, [31786]=true, [31787]=true, [31789]=true, [31790]=true, [31792]=true, [31793]=true, [31795]=true, [31796]=true, [31797]=true, [31798]=true, [31799]=true, [31801]=true, [31805]=true, [31806]=true, [31807]=true, [31808]=true, [31809]=true, [31810]=true, [31813]=true, [31814]=true, [31818]=true, [31822]=true, [31831]=true, [31833]=true },
+      ["skeletal warrior"] = { [31785]=true, [31786]=true, [31787]=true, [31788]=true, [31790]=true, [31791]=true, [31792]=true, [31793]=true, [31795]=true, [31796]=true, [31797]=true, [31798]=true, [31799]=true, [31800]=true, [31801]=true, [31805]=true, [31806]=true, [31808]=true, [31809]=true, [31812]=true, [31813]=true, [31814]=true, [31832]=true, [31833]=true },
+      ["warrior of the cougar tribe"] = { [31830]=true },
+      ["warrior of the eagle tribe"] = { [31785]=true, [31786]=true, [31787]=true, [31789]=true, [31790]=true, [31791]=true, [31795]=true, [31796]=true, [31797]=true, [31801]=true, [31805]=true, [31806]=true, [31807]=true, [31812]=true, [31813]=true, [31814]=true, [31817]=true, [31818]=true, [31819]=true, [31821]=true, [31822]=true },
+      ["warrior of the elk tribe"] = { [31785]=true, [31788]=true, [31790]=true, [31791]=true, [31792]=true, [31795]=true, [31801]=true, [31805]=true, [31806]=true, [31807]=true, [31808]=true, [31809]=true, [31812]=true, [31814]=true, [31817]=true, [31818]=true, [31823]=true, [31831]=true },
+      ["warrior of the fox tribe"] = { [31785]=true, [31786]=true, [31787]=true, [31788]=true, [31789]=true, [31791]=true, [31792]=true, [31804]=true, [31805]=true, [31806]=true, [31807]=true, [31809]=true, [31810]=true, [31812]=true, [31813]=true, [31814]=true, [31817]=true, [31818]=true, [31823]=true, [31826]=true, [31830]=true, [31832]=true },
+      ["warrior of the mink tribe"] = { [31785]=true, [31786]=true, [31787]=true, [31788]=true, [31789]=true, [31790]=true, [31791]=true, [31792]=true, [31796]=true, [31797]=true, [31806]=true, [31809]=true, [31810]=true, [31812]=true, [31813]=true, [31814]=true, [31817]=true, [31818]=true, [31822]=true, [31826]=true },
+      ["water demon"] = { [31793]=true },
+      ["yota timo"] = { [31832]=true },
+    },
+    mobs = {
+      { "lesser demon",                false },
+      { "skeletal warrior",            false },
+      { "hooded exile",                false },
+      { "skeletal archer",             false },
+      { "naga champion",               false },
+      { "eagle champion",              false, nil, "kill to reach Monuhi" },
+      { "bastion",                     false },
+      { "fox demon",                   false },
+      { "sashi amanis",                false },
+      { "eagle mistress of battle",    false },
+      { "bear master of battle",       false },
+      { "cougar master of battle",     false },
+      { "warrior of the mink tribe",   false },
+      { "fox master of battle",        false },
+      { "warrior of the eagle tribe",  false },
+      { "mounted skeletal warrior",    false },
+      { "lynx master of battle",       false },
+      { "elk battle mistress",         false },
+      { "warrior of the elk tribe",    false },
+      { "paladin of the lynx tribe",   false },
+      { "fox champion",                false },
+      { "ice demon",                   false },
+      { "yota timo",                   false },
+      { "goblin",                      false },
+      { "greater demon",               false },
+      { "earth demon",                 false },
+      { "warrior of the fox tribe",    false },
+      { "water demon",                 false },
+      { "fire demon",                  false },
+      { "air demon",                   false },
+      { "naga paladin",                false },
+      { "naga warlord",                false },
+      { "warrior of the cougar tribe", false },
+    },
+  },
+  {
+    key = "xyl", cmd = "xyl", label = "Rose Ether", zone = "xylmos",
+    lo = 444, hi = 455,
+    roomname = {
+      [444] = "Rose Ether",
+      [445] = "Rose Ether",
+      [446] = "Rose Ether",
+      [447] = "Rose Ether",
+      [448] = "Rose Ether",
+      [449] = "Rose Ether",
+      [450] = "Rose Ether",
+      [451] = "Rose Ether",
+      [452] = "Rose Ether",
+      [453] = "Rose Ether",
+      [454] = "Rose Ether",
+      [455] = "Entering Rose Ether",
+    },
+    maze = { [445]=true, [446]=true, [447]=true, [448]=true, [449]=true, [450]=true, [452]=true, [453]=true, [454]=true },
+    seed = { {444,"w",445}, {451,"e",450}, {451,"s",452}, {455,"n",454}, {455,"s",452}, },
+    exitdirs = {
+      [444] = { "u", "w" },
+      [445] = { "d", "e", "n", "s", "u", "w" },
+      [446] = { "d", "e", "n", "s", "u", "w" },
+      [447] = { "e", "n", "s" },
+      [448] = { "e", "n", "s", "w" },
+      [449] = { "d", "e", "n", "s", "u", "w" },
+      [450] = { "d", "e", "n", "s", "u", "w" },
+      [451] = { "e", "s" },
+      [452] = { "d", "e", "n", "s", "u", "w" },
+      [453] = { "d", "e", "n", "s", "u", "w" },
+      [454] = { "d", "e", "n", "s", "u", "w" },
+      [455] = { "n", "s", "u" },
+    },
+    leaves = { {444,"u"}, {455,"u"}, },
+    auto = { [455]=true, [444]=true },
+    entrance = { goto_room = 455 },
+    bridges = {  },
+    sections = {  },
+    outlabel = "ways out",
+    outs = { { room = 455, how = "up and out", cmds = { "u" } }, { room = 444, how = "up and out", cmds = { "u" } }, { room = 450, how = "inhale ether", cmds = { "inhale ether" } }, },
+    places = { { room = 455, how = "up and out", label = "Entering Rose Ether" }, { room = 444, how = "up and out", label = "Rose Ether" }, { room = 450, how = "inhale ether", label = "Rose Ether", cmds = { "inhale ether" } }, },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+      ["gas rat"] = "gnaws on a rubber finger",
+    },
+    range = {
+    },
+    mobs = {
+      { "an ether gnat",               false },
+      { "a cuttlefish",                false },
+      { "a pink shade",                false },
+      { "an axolotl",                  false },
+      { "dhrip",                       false },
+      { "think pink!",                 false },
+      { "gnat king",                   false },
+      { "the Gas Rat",                 true },
+    },
+  },
+  {
+    key = "prosper",
+    cmd = "prosper", label = "Prosper 201 (the theater)", zone = "prosper",
+    lo = 28252, hi = 28267,
+    roomname = {
+      [28252] = "On a Tribune",
+      [28253] = "Standing in Line",
+      [28254] = "Intruding upon 'Act I, Scene II'",
+      [28255] = "Behind the Stage",
+      [28256] = "Entering the Theater",
+      [28257] = "The Play is the Thing",
+      [28258] = "A Dressing Room",
+      [28259] = "Behind the Stage",
+      [28260] = "On 'The Bridge'",
+      [28261] = "A Storage Room",
+      [28262] = "Behind the Stage",
+      [28263] = "A Dark Room",
+      [28264] = "In Stalwart's Room",
+      [28265] = "In Brawn's Room",
+      [28266] = "At 'The Bridge'?",
+      [28267] = "In Moriarty's Room",
+    },
+    maze = { [28252]=true, [28253]=true, [28254]=true, [28255]=true, [28257]=true, [28258]=true, [28259]=true, [28260]=true, [28261]=true, [28262]=true, [28263]=true },
+    seed = {  },
+    exitdirs = {
+      [28252] = { "e", "n", "s", "u" },
+      [28253] = { "e", "n", "s" },
+      [28254] = { "e", "n", "s", "u" },
+      [28255] = { "e", "n", "s", "w" },
+      [28256] = { "d", "e", "n", "s" },
+      [28257] = { "e", "n", "s", "w" },
+      [28258] = { "e", "n", "s", "w" },
+      [28259] = { "e", "n", "s", "w" },
+      [28260] = { "e", "n", "s", "w" },
+      [28261] = { "e", "n", "s", "u", "w" },
+      [28262] = { "e", "n", "s", "w" },
+      [28263] = { "e", "n", "s", "u", "w" },
+      [28264] = { "d" },
+      [28265] = { "d" },
+      [28266] = { "d" },
+      [28267] = { "d" },
+    },
+    leaves = { {28256,"d"}, },
+    auto = { [28256]=true },
+    entrance = { goto_room = 2010, run = "up" },
+    bridges = {  },
+    sections = {  },
+    outlabel = "rooms",
+    outs = { { room = 28256, how = "down to The Imaginarium", label = "Entering the Theater", cmds = { "d" } }, },
+    places = { { room = 28264, how = "walk there", label = "In Stalwart's Room" }, { room = 28265, how = "walk there", label = "In Brawn's Room" }, { room = 28267, how = "walk there", label = "In Moriarty's Room" }, { room = 28266, how = "walk there", label = "At 'The Bridge'?" }, { room = 28256, how = "walk there", label = "Entering the Theater" }, { room = 28252, how = "walk there", label = "On a Tribune" }, { room = 28253, how = "walk there", label = "Standing in Line" }, { room = 28254, how = "walk there", label = "Intruding upon 'Act I, Scene II'" }, { room = 28255, how = "walk there", label = "Behind the Stage" }, { room = 28257, how = "walk there", label = "The Play is the Thing" }, { room = 28258, how = "walk there", label = "A Dressing Room" }, { room = 28259, how = "walk there", label = "Behind the Stage" }, { room = 28260, how = "walk there", label = "On 'The Bridge'" }, { room = 28261, how = "walk there", label = "A Storage Room" }, { room = 28262, how = "walk there", label = "Behind the Stage" }, { room = 28263, how = "walk there", label = "A Dark Room" }, },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
+  {
+    key = "infamy", cmd = "infamy", label = "The Realm of Infamy", zone = "infamy",
+    lo = 26642, hi = 26670,
+    roomname = {
+      [26642] = "Realm of Infamy",
+      [26643] = "Mound of Death",
+      [26644] = "Info Center",
+      [26645] = "Realm of Infamy",
+      [26646] = "Realm of Infamy",
+      [26647] = "Huge Dark Cave",
+      [26648] = "Realm of Infamy",
+      [26649] = "Realm of Infamy",
+      [26650] = "Nimue's Island",
+      [26651] = "Realm of Infamy",
+      [26652] = "Realm of Infamy",
+      [26653] = "Hidden Lair",
+      [26654] = "Realm of Infamy",
+      [26655] = "Shadowy Lair of Morpheus",
+      [26656] = "Gates of Hades",
+      [26657] = "Realm of Infamy",
+      [26658] = "Mirrored Room",
+      [26659] = "Meeting Place of Infamy",
+      [26660] = "Room of Fire",
+      [26661] = "Realm of Infamy",
+      [26662] = "Grendel's Mere",
+      [26663] = "Realm of Infamy",
+      [26664] = "Almost There",
+      [26665] = "Realm of Infamy",
+      [26666] = "Realm of Infamy",
+      [26667] = "Realm of Infamy",
+      [26668] = "Realm of Infamy",
+      [26669] = "Realm of Infamy",
+      [26670] = "Realm of Infamy",
+    },
+    maze = { [26642]=true, [26643]=true, [26644]=true, [26645]=true, [26646]=true, [26647]=true, [26648]=true, [26649]=true, [26650]=true, [26651]=true, [26652]=true, [26653]=true, [26654]=true, [26655]=true, [26656]=true, [26657]=true, [26658]=true, [26659]=true, [26660]=true, [26661]=true, [26662]=true, [26663]=true, [26664]=true, [26665]=true, [26666]=true, [26667]=true, [26668]=true, [26670]=true },
+    seed = { {26669,"d",26664}, {26669,"u",26645}, },
+    exitdirs = {
+      [26642] = { "e", "n", "s", "u", "w" },
+      [26643] = { "e", "n", "s", "u", "w" },
+      [26644] = { "e", "n", "s", "u", "w" },
+      [26645] = { "e", "n", "s", "u", "w" },
+      [26646] = { "e", "n", "s", "u", "w" },
+      [26647] = { "e", "n", "s", "u", "w" },
+      [26648] = { "e", "n", "s", "u", "w" },
+      [26649] = { "e", "n", "s", "u", "w" },
+      [26650] = { "e", "n", "s", "u", "w" },
+      [26651] = { "e", "n", "s", "u", "w" },
+      [26652] = { "e", "n", "s", "u", "w" },
+      [26653] = { "e", "n", "s", "u", "w" },
+      [26654] = { "e", "n", "s", "u", "w" },
+      [26655] = { "e", "n", "s", "u", "w" },
+      [26656] = { "d", "e", "n", "s", "u", "w" },
+      [26657] = { "e", "n", "s", "u", "w" },
+      [26658] = { "e", "n", "s", "u", "w" },
+      [26659] = { "e", "n", "s", "u", "w" },
+      [26660] = { "e", "n", "s", "u", "w" },
+      [26661] = { "e", "n", "s", "u", "w" },
+      [26662] = { "e", "n", "s", "u", "w" },
+      [26663] = { "e", "n", "s", "u", "w" },
+      [26664] = { "d", "e", "n", "s", "u", "w" },
+      [26665] = { "e", "n", "s", "u", "w" },
+      [26666] = { "e", "n", "s", "u", "w" },
+      [26667] = { "e", "n", "s", "u", "w" },
+      [26668] = { "e", "n", "s", "u", "w" },
+      [26669] = { "d", "u" },
+      [26670] = { "d", "e", "n", "s", "u", "w" },
+    },
+    leaves = {  },
+    auto = { [26642]=true },
+    entrance = { goto_room = 26641, run = "enter brain" },
+    bridges = { ["level1"] = { room = 26645, how = "enter corpse", label = "the corpse portal", to = "level2", cmds = { "enter corpse" } }, ["level2"] = { room = 26658, how = "enter corpse", label = "the Mirrored Room portal", to = "level3", cmds = { "enter corpse" } }, ["level3"] = { room = 26669, how = "the way down", label = "the level 1 exit", to = "level1", cmds = { "u" } }, },
+    sections = { [26642]="level1", [26643]="level1", [26644]="level1", [26645]="level1", [26646]="level1", [26647]="level1", [26648]="level1", [26649]="level1", [26650]="level1", [26651]="level2", [26652]="level2", [26653]="level2", [26654]="level2", [26655]="level2", [26656]="level2", [26657]="level2", [26658]="level2", [26659]="level2", [26660]="level3", [26661]="level3", [26662]="level3", [26663]="level3", [26664]="level3", [26665]="level3", [26666]="level3", [26667]="level3", [26668]="level3", [26669]="level3", [26670]="level3", },
+    outlabel = "rooms",
+    outs = {  },
+    places = {  },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = true,
+    levels = {
+      ["evil minion"] = { "level2" },
+      ["evil sidekick"] = { "level1" },
+      ["cerberus the three-headed"] = { "level2" },
+      ["cronus the titan, eater of children"] = { "level1" },
+      ["cyclops"] = { "level2" },
+      ["fufa the champion"] = { "level1" },
+      ["grendel"] = { "level2" },
+      ["grendel's mother"] = { "level3" },
+      ["mordred the evil"] = { "level3" },
+      ["morgan le fey"] = { "level2" },
+      ["morpheus, the sandman"] = { "level2" },
+      ["nimue, lady of the lake"] = { "level1" },
+      ["rok, the psychotic sprite"] = { "level3" },
+      ["thiol the ticked"] = { "level3", "level1" },
+      ["vlad, the impaler"] = { "level1" },
+      ["watfish, the first superhero"] = { "level2" },
+    },
+    keywords = {
+      ["evil minion"] = "minion",
+      ["evil sidekick"] = "sidekick",
+      ["cerberus the three-headed"] = "cerberus",
+      ["cronus the titan, eater of children"] = "cronus",
+      ["cyclops"] = "cyclops",
+      ["fufa the champion"] = "fufa",
+      ["grendel"] = "grendel",
+      ["grendel's mother"] = "mother",
+      ["mordred the evil"] = "mordred",
+      ["morgan le fey"] = "morgan",
+      ["morpheus, the sandman"] = "morpheus",
+      ["nimue, lady of the lake"] = "nimue",
+      ["rok, the psychotic sprite"] = "rok",
+      ["thiol the ticked"] = "thiol",
+      ["vlad, the impaler"] = "vlad",
+      ["watfish, the first superhero"] = "watfsh",
+    },
+    roomdesc = {
+      ["cerberus the three-headed"] = "cerberus stands here",
+      ["cronus the titan, eater of children"] = "cronus the titan",
+      ["fufa the champion"] = "fufa, champion",
+      ["morpheus, the sandman"] = "morpheus brings on dusk",
+      ["nimue, lady of the lake"] = "nimue the enchantress",
+      ["thiol the ticked"] = "thiol stands here",
+      ["vlad, the impaler"] = "vlad stands here",
+      ["watfish, the first superhero"] = "watfish is here",
+    },
+    range = {
+      ["grendel's mother"] = { [26662]=true },   -- Grendel's Mere
+      ["nimue, lady of the lake"] = { [26650]=true },   -- Nimue's Island
+      ["rok, the psychotic sprite"] = { [26664]=true }, -- Almost There
+    },
+    mobs = {
+      { "an evil sidekick",                    true,  "level1",  nil },
+      { "Vlad, the Impaler",                   true,  "level1",  nil },
+      { "Nimue, Lady of the Lake",             true,  "level1",  nil },
+      { "Cronus the Titan, eater of children", true,  "level1",  nil },
+      { "fufa the champion",                   true,  "level1",  nil },
+      { "Thiol the ticked",                    true,  "level1",  "check level 3 first" },
+      { "an evil minion",                      true,  "level2",  nil },
+      { "Grendel",                             true,  "level2",  nil },
+      { "Morpheus, the Sandman",               true,  "level2",  nil },
+      { "Morgan le Fey",                       true,  "level2",  nil },
+      { "Watfish, the First Superhero",        true,  "level2",  nil },
+      { "Cerberus the Three-Headed",           true,  "level2",  nil },
+      { "Cyclops",                             true,  "level2",  nil },
+      { "Grendel's mother",                    true,  "level3",  nil },
+      { "Rok, The Psychotic Sprite",           true,  "level3",  nil },
+      { "Mordred the Evil",                    true,  "level3",  nil },
+      { "Thiol the ticked",                    true,  "level3",  nil },
+    },
+  },
+  {
+    key = "sahuagin", cmd = "sahu", label = "Sahuagin", zone = "sahuagin",
+    lo = 34600, hi = 34613,
+    roomname = {
+      [34600] = "Crudely Carved Passage",
+      [34601] = "Alcove below Stronghold of Tumek",
+      [34602] = "Alcove below Stronghold of Kutrok",
+      [34603] = "Alcove below Stronghold of Vekma",
+      [34604] = "Alcove below Stronghold of Azhirlur",
+      [34605] = "Subaqueous Caverns",
+      [34606] = "Subaqueous Caverns",
+      [34607] = "Subaqueous Caverns",
+      [34608] = "Subaqueous Caverns",
+      [34609] = "Subaqueous Caverns",
+      [34610] = "Subaqueous Caverns",
+      [34611] = "Crudely Carved Passage",
+      [34612] = "Crudely Carved Passage",
+      [34613] = "Crudely Carved Passage",
+    },
+    -- the four alcoves and the six caverns; the passages above the doors
+    -- are fixed and already known
+    maze = { [34601]=true, [34602]=true, [34603]=true, [34604]=true,
+             [34605]=true, [34606]=true, [34607]=true, [34608]=true,
+             [34609]=true, [34610]=true },
+    seed = { {34600,"d",34601}, {34611,"d",34602},
+             {34612,"d",34603}, {34613,"d",34604}, },
+    -- The way down out of each prince's passage is a shut trapdoor, so
+    -- starting up here the first move has to open it.  Same doors as the
+    -- "open u, u" in outs/places, seen from the other side.
+    doors = {
+      [34600] = { d = { "open d" } },
+      [34611] = { d = { "open d" } },
+      [34612] = { d = { "open d" } },
+      [34613] = { d = { "open d" } },
+    },
+    exitdirs = {
+      [34600] = { "d", "s" },
+      [34601] = { "e", "n", "s", "u", "w" },
+      [34602] = { "e", "n", "s", "u", "w" },
+      [34603] = { "e", "n", "s", "u", "w" },
+      [34604] = { "e", "n", "s", "u", "w" },
+      [34605] = { "e", "n", "s", "w" },
+      [34606] = { "e", "n", "s", "w" },
+      [34607] = { "e", "n", "s", "w" },
+      [34608] = { "e", "n", "s", "w" },
+      [34609] = { "e", "n", "s", "w" },
+      [34610] = { "e", "n", "s", "w" },
+      [34611] = { "d", "n" },
+      [34612] = { "d", "n" },
+      [34613] = { "d", "s" },
+    },
+    -- the doors up are how you LEAVE the maze on purpose, so the sweep
+    -- must not wander through them; same for the passages' own way on
+    leaves = { {34601,"u"}, {34602,"u"}, {34603,"u"}, {34604,"u"},
+               {34600,"s"}, {34611,"n"}, {34612,"n"}, {34613,"s"}, },
+    auto = { [34600]=true, [34611]=true, [34612]=true, [34613]=true },
+    entrance = { goto_room = 34600 },
+    bridges = {  },
+    sections = {  },
+    outlabel = "doors up",
+    -- getting out of the maze IS going up one of the four doors, so the
+    -- nearest one serves as the way out
+    outs = {
+      { room = 34604, how = "open u, u", label = "Azhirlur", cmds = { "open u", "u" } },
+      { room = 34603, how = "open u, u", label = "Vekma",    cmds = { "open u", "u" } },
+      { room = 34601, how = "open u, u", label = "Tumek",    cmds = { "open u", "u" } },
+      { room = 34602, how = "open u, u", label = "Kutrok",   cmds = { "open u", "u" } },
+    },
+    places = {
+      { room = 34604, how = "open u, u", label = "Azhirlur", cmds = { "open u", "u" } },
+      { room = 34603, how = "open u, u", label = "Vekma",    cmds = { "open u", "u" } },
+      { room = 34601, how = "open u, u", label = "Tumek",    cmds = { "open u", "u" } },
+      { room = 34602, how = "open u, u", label = "Kutrok",   cmds = { "open u", "u" } },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
+  {
+    key = "helegear",
+    cmd = "hele", label = "Helegear", zone = "helegear",
+    -- No known_fixed here.  Seven exits looked fixed in v5.8, but that
+    -- was before the display told visits apart from repops - they had all
+    -- been checked inside a single repop cycle, which proves nothing.
+    -- Measured properly across real repops: 0 fixed, 54 caught moving,
+    -- spread evenly over n/e/s/w.  Helegear reshuffles completely.
+    lo = 30699, hi = 30720,
+    roomname = {
+      [30699] = "Helegear Sea",
+      [30700] = "Helegear Sea",
+      [30701] = "Helegear Sea",
+      [30702] = "Helegear Sea",
+      [30703] = "Helegear Sea",
+      [30704] = "Helegear Sea",
+      [30705] = "Helegear Sea",
+      [30706] = "Helegear Sea",
+      [30707] = "Helegear Sea",
+      [30708] = "Helegear Sea",
+      [30709] = "Helegear Sea",
+      [30710] = "Helegear Sea",
+      [30711] = "Helegear Sea",
+      [30712] = "Helegear Sea",
+      [30713] = "Helegear Sea",
+      [30714] = "Freezing Depths",
+      [30715] = "Iceberg of the Yeti",
+      [30716] = "Iceberg of the Ice Troll",
+      [30717] = "Freezing Depths",
+      [30718] = "Freezing Depths",
+      [30719] = "Sunken Ship",
+      [30720] = "Freezing Depths",
+    },
+    maze = { [30699]=true, [30700]=true, [30701]=true, [30702]=true, [30703]=true, [30704]=true, [30705]=true, [30706]=true, [30707]=true, [30708]=true, [30709]=true, [30710]=true, [30711]=true, [30712]=true, [30713]=true, [30714]=true, [30717]=true, [30718]=true, [30720]=true },
+    seed = { {30715,"d",30713}, {30716,"d",30711}, {30719,"s",30718}, },
+    exitdirs = {
+      [30699] = { "e", "n", "s", "w" },
+      [30700] = { "e", "n", "s", "w" },
+      [30701] = { "e", "n", "s", "w" },
+      [30702] = { "e", "n", "s", "w" },
+      [30703] = { "e", "n", "s", "w" },
+      [30704] = { "e", "n", "s", "w" },
+      [30705] = { "e", "n", "s", "w" },
+      [30706] = { "e", "n", "s", "w" },
+      [30707] = { "e", "n", "s", "w" },
+      [30708] = { "e", "n", "s", "w" },
+      [30709] = { "e", "n", "s", "w" },
+      [30710] = { "e", "n", "s", "w" },
+      [30711] = { "e", "n", "s", "w" },
+      [30712] = { "e", "n", "s", "w" },
+      [30713] = { "e", "n", "s", "w" },
+      [30714] = { "d", "e", "n", "s", "u", "w" },
+      [30715] = { "d", "n", "s", "w" },
+      [30716] = { "d", "e", "n", "s" },
+      [30717] = { "d", "e", "n", "s", "u", "w" },
+      [30718] = { "d", "e", "n", "s", "u", "w" },
+      [30719] = { "s" },
+      [30720] = { "d", "e", "n", "s", "u", "w" },
+    },
+    leaves = { {30715,"n"}, {30715,"s"}, {30715,"w"}, {30716,"e"}, {30716,"n"}, {30716,"s"}, },
+    auto = { [30699]=true },
+    entrance = { goto_room = 30699 },
+    bridges = { ["depths"] = { room = 30714, how = "surface", label = "Surface", to = "surface", cmds = { "surface" } }, ["surface"] = { room = 30709, how = "dive", label = "Dive Room", to = "depths", cmds = { "dive" } }, },
+    sections = { [30699]="surface", [30700]="surface", [30701]="surface", [30702]="surface", [30703]="surface", [30704]="surface", [30705]="surface", [30706]="surface", [30707]="surface", [30708]="surface", [30709]="surface", [30710]="surface", [30711]="surface", [30712]="surface", [30713]="surface", [30714]="depths", [30715]="surface", [30716]="surface", [30717]="depths", [30718]="depths", [30719]="depths", [30720]="depths", },
+    outlabel = "places",
+    outs = { { room = 30714, how = "surface", label = "Surface", section = "depths", cmds = { "surface" } }, },
+    places = { { room = 30709, how = "dive", label = "Dive Room", section = "surface", cmds = { "dive" } }, { room = 30713, how = "climb iceberg", label = "Yeti Iceberg", section = "surface", cmds = { "climb iceberg" } }, { room = 30711, how = "climb iceberg", label = "Troll Iceberg", section = "surface", cmds = { "climb iceberg" } }, { room = 30718, how = "enter ship", label = "Ship", section = "depths", cmds = { "enter ship" } }, },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
+  {
+    key = "darklight", cmd = "dark", label = "Darklight", zone = "darklight",
+    lo = 19644, hi = 19654,
+    roomname = {
+      [19644] = "An Old Twisted Road",
+      [19645] = "The Skullgore Plains",
+      [19646] = "The Skullgore Plains",
+      [19647] = "The Skullgore Plains",
+      [19648] = "The Skullgore Plains",
+      [19649] = "The Skullgore Plains",
+      [19650] = "The Skullgore Plains",
+      [19651] = "The Skullgore Plains",
+      [19652] = "The Skullgore Plains",
+      [19653] = "The Skullgore Plains",
+      [19654] = "The Dark Path",
+    },
+    -- The nine plains rooms shuffle.  The road in and the Dark Path out
+    -- are fixed, so neither is part of the maze.
+    maze = { [19645]=true, [19646]=true, [19647]=true, [19648]=true,
+             [19649]=true, [19650]=true, [19651]=true, [19652]=true,
+             [19653]=true },
+    -- Nothing seeded on purpose.  Every link the mapper resolved in here
+    -- is a link BETWEEN plains rooms, and those move on every repop -
+    -- Helegear taught us what shipping those is worth.
+    seed = {  },
+    exitdirs = {
+      [19644] = { "n" },
+      [19645] = { "e", "n", "s", "w" },
+      [19646] = { "e", "n", "s", "u", "w" },
+      [19647] = { "e", "n", "s", "w" },
+      [19648] = { "e", "n", "s", "w" },
+      [19649] = { "e", "n", "s", "w" },
+      [19650] = { "e", "n", "s", "w" },
+      [19651] = { "e", "n", "s", "w" },
+      [19652] = { "e", "n", "s", "w" },
+      [19653] = { "e", "n", "s", "w" },
+      [19654] = { "s" },
+    },
+    -- 19646 has a way up into the Sky Tower, which is out of the part we
+    -- sweep, and the Dark Path's south drops back into the plains - once
+    -- you are on it you are done, so nothing should sweep back down.  The
+    -- road's "enter path" and the Dark Path's "enter portal" are commands,
+    -- not directions, so they need no marking.
+    leaves = { {19646,"u"}, {19654,"s"}, },
+    auto = { [19644]=true },
+    entrance = { goto_room = 19644 },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way through",
+    -- No mmout here: you leave through the Dark Path's portal, which is
+    -- where you were going anyway.
+    outs = {  },
+    -- One thing to find.  19652 is the plains room that answers "exit",
+    -- and that lands you on The Dark Path.  The plains SHUFFLE, so which
+    -- way 19652 lies changes every repop - but it is always 19652, and
+    -- GMCP names the room we are standing in, so walking until we are in
+    -- it is the whole job.
+    places = {
+      { room = 19652, how = "exit", label = "The Dark Path", cmds = { "exit" } },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
+  {
+    key = "times", cmd = "times", label = "The Cindery Village", zone = "times",
+    lo = 28514, hi = 28527,
+    roomname = {
+      [28514] = "The Castle's High Chapel",
+      [28515] = "In the Cindery Village",
+      [28516] = "In the Cindery Village",
+      [28517] = "In the Cindery Village",
+      [28518] = "In the Cindery Village",
+      [28519] = "In the Cindery Village",
+      [28520] = "In the Cindery Village",
+      [28521] = "In the Cindery Village",
+      [28522] = "In the Cindery Village",
+      [28523] = "In the Cindery Village",
+      [28524] = "In the Cindery Village",
+      [28525] = "In the Cindery Village",
+      [28526] = "In the Cindery Village",
+      [28527] = "The Still Rotunda",
+    },
+    -- The twelve village rooms shuffle.  The chapel you come in from and
+    -- the Rotunda above are fixed, so neither is part of the maze.
+    maze = { [28515]=true, [28516]=true, [28517]=true, [28518]=true,
+             [28519]=true, [28520]=true, [28521]=true, [28522]=true,
+             [28523]=true, [28524]=true, [28525]=true, [28526]=true },
+    -- The only fixed link in here is the door up out of 28526 into the
+    -- Rotunda.  Everything else the mapper resolved runs between village
+    -- rooms, and those move on every repop, so none of it is seeded.
+    seed = { {28526,"u",28527}, },
+    -- That door is shut.  The place entry below opens it when the walk
+    -- ENDS there, but the router can also just walk the link - so the
+    -- door has to be opened for a plain move through it too.
+    doors = {
+      [28526] = { u = { "open u" } },
+    },
+    exitdirs = {
+      [28514] = { "e" },
+      [28515] = { "e", "n", "s", "w" },
+      [28516] = { "e", "n", "s", "w" },
+      [28517] = { "e", "n", "s", "w" },
+      [28518] = { "e", "n", "s", "w" },
+      [28519] = { "e", "n", "s", "w" },
+      [28520] = { "e", "n", "s", "w" },
+      [28521] = { "e", "n", "s", "w" },
+      [28522] = { "e", "n", "s", "w" },
+      [28523] = { "e", "n", "s", "w" },
+      [28524] = { "e", "n", "s", "w" },
+      [28525] = { "e", "n", "s", "w" },
+      [28526] = { "e", "n", "s", "u", "w" },
+      [28527] = { "n" },
+    },
+    -- The chapel's east door goes back into the castle and the Rotunda's
+    -- north leads on out of the part we sweep.  28518's "enter cave" is a
+    -- command rather than a direction, so it needs no marking.
+    leaves = { {28514,"e"}, {28527,"n"}, },
+    auto = { [28515]=true },
+    entrance = { goto_room = 28514, run = "ent sense" },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way up",
+    -- No mmout: the Rotunda IS the way on, and the village is recallable.
+    outs = {  },
+    -- One thing to find.  28526 is the only village room with a way up,
+    -- and behind it is a shut door - so it is open u then u.  Which way
+    -- 28526 lies changes every repop, but it is always 28526, and GMCP
+    -- names the room we stand in, so walking until we are in it is the job.
+    places = {
+      { room = 28526, how = "open u, u", label = "The Still Rotunda",
+        cmds = { "open u", "u" } },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
+}
+
+local BYKEY, BYCMD, BYZONE, ROOM2AREA = {}, {}, {}, {}
+for _, a in ipairs (AREAS) do
+  BYKEY[a.key]  = a
+  BYCMD[a.cmd]  = a
+  BYZONE[a.zone] = a
+  for v in pairs (a.roomname) do ROOM2AREA[v] = a end
+end
+
+-- One learned map per area, kept apart.
+local MAPS = {}
+for _, a in ipairs (AREAS) do MAPS[a.key] = { edges = {}, exits = {} } end
+
+local A                       -- the area we are working in
+local cur = nil               -- vnum we are standing in, per GMCP.
+                              -- Declared here because the helpers below
+                              -- read it; a later 'local' would leave them
+                              -- looking at a nil global instead.
+local NAME, RANGE, ROOMDESC, MOBS = {}, {}, {}, {}
+
+-- The command words, straight from the area table - never hand-written,
+-- so adding an area can never leave the greeting or the help out of date.
+local function cmd_list (sep)
+  local t = {}
+  for _, a in ipairs (AREAS) do t[#t + 1] = a.cmd end
+  return table.concat (t, sep)
+end
+
+-- The areas this is built for, read straight out of AREAS so the help can
+-- never drift from what is actually in here.  What each one offers is
+-- worked out the same way: a mob list, a room list, a way out or not.
+local function area_lines ()
+  local w = 0
+  for _, a in ipairs (AREAS) do
+    if #a.label > w then w = #a.label end
+  end
+  local t = {}
+  for _, a in ipairs (AREAS) do
+    local what = {}
+    if #a.mobs > 0 then what[#what + 1] = "mobs" end
+    if #a.places > 0 then what[#what + 1] = "rooms" end
+    local tail = table.concat (what, " and ")
+    if tail == "" then tail = "the maze itself" end
+    if #a.outs == 0 then
+      tail = tail .. ", no walk-out - recall or portal"
+    end
+    t[#t + 1] = "   @x048" .. a.label .. "@w" ..
+                string.rep (" ", w - #a.label + 3) .. tail
+  end
+  return t
+end
+
+-- Some areas come in halves joined only by a custom exit - Helegear's
+-- surface and its freezing depths.  An entry tagged with a section is
+-- only offered while you are standing in that half.
+local function in_section (e)
+  if not e.section then return true end
+  return A.sections[cur] == e.section
+end
+
+local function here_list (t)
+  local r = {}
+  for _, e in ipairs (t) do
+    if in_section (e) then r[#r + 1] = e end
+  end
+  return r
+end
+
+-- A readable room name for any room in any of the areas, so
+-- messages still make sense before an area has been picked.
+local function roomname (v)
+  local a = ROOM2AREA[v]
+  return (a and a.roomname[v]) or tostring (v)
+end
+
+local DIRS = { "n", "e", "s", "w", "u", "d" }
+local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
+
+
+
+-- ===========================================================
+--  Output  (x099 brackets / x045 name / white text / x048 values)
+-- ===========================================================
+
+-- Kept in step with the version= attribute at the top of this file.
+-- If you change one, change the other.
+local VERSION  = "3.0"
+
+local CLR_TAG  = "#875FFF"
+local CLR_NAME = "#00D7FF"
+local CLR_MSG  = "#FFFFFF"
+local CLR_HI   = "#00FF87"
+
+-- Everything this plugin says is held back a fifth of a second.  GMCP
+-- arrives before the room description does, so a line printed the moment
+-- we land appears ABOVE the description and scrolls straight past.  One
+-- queue and one timer, so the order of the lines is never disturbed.
+local msg_q, msg_armed = {}, false
+
+local function flush_notes_now ()
+  if #msg_q == 0 then return end
+  local q = msg_q
+  msg_q = {}
+  for _, s in ipairs (q) do
+    AnsiNote (stylesToANSI (ColoursToStyles (s)))
+  end
+end
+
+function mm_flush_notes ()
+  msg_armed = false
+  flush_notes_now ()
+end
+
+local function cnote (s)
+  msg_q[#msg_q + 1] = s
+  if not msg_armed then
+    msg_armed = true
+    DoAfterSpecial (0.2, "mm_flush_notes ()", 12)
+  end
+end
+
+local function note (msg)
+  cnote ("@x099[@x045MazeMobber@x099]@w " .. msg)
+end
+
+-- For the heading of something that prints its own body straight to the
+-- screen: queue it and let the queue straight out, so the heading cannot
+-- end up underneath the lines it introduces.
+local function note_now (msg)
+  cnote ("@x099[@x045MazeMobber@x099]@w " .. msg)
+  flush_notes_now ()
+end
+
+local function warn (msg)
+  cnote ("@x099[@x045MazeMobber@x099]@w @x203" .. msg .. "@w")
+end
+
+-- ===========================================================
+--  Mob name matching
+--
+--  Scan gives the short name ("the cloaker").  Roomchars gives the
+--  long description, which is whatever the builder wrote ("A cloaker
+--  hovers menacingly.").  So we strip the article off the target and
+--  test for containment, which covers both.
+-- ===========================================================
+
+local function normalise (s)
+  s = (s or ""):lower ()
+  s = s:gsub ("^%s+", ""):gsub ("%s+$", "")
+  s = s:gsub ("^the%s+", ""):gsub ("^an%s+", ""):gsub ("^a%s+", "")
+  return s
+end
+
+local function matches (line, w)
+  return w and w ~= "" and normalise (line):find (w, 1, true) ~= nil
+end
+
+-- Every Nenukon mob scans, so none of them need a description override.
+-- One can still be added in game with 'nenukon desc <mob> = <phrase>'.
+local ROOMDESC = {}
+
+local DESC_FILE = GetPluginInfo (GetPluginID (), 20) .. "Nenukon_desc.txt"
+
+local function load_descs ()
+  local f = io.open (DESC_FILE, "r")
+  if not f then return end
+  for line in f:lines () do
+    local mob, phrase = line:match ("^%s*(.-)%s*=%s*(.-)%s*$")
+    if mob and phrase and mob ~= "" and phrase ~= "" and mob:sub (1, 1) ~= "#" then
+      ROOMDESC[mob:lower ()] = phrase:lower ()
+    end
+  end
+  f:close ()
+end
+
+local function save_descs ()
+  local f = io.open (DESC_FILE, "w")
+  if not f then return end
+  f:write ("# Nenukon room-description overrides.  One per line:\n")
+  f:write ("#   <normalised mob name> = <phrase to look for in the room>\n")
+  local keys = {}
+  for k in pairs (ROOMDESC) do keys[#keys + 1] = k end
+  table.sort (keys)
+  for _, k in ipairs (keys) do f:write (k .. " = " .. ROOMDESC[k] .. "\n") end
+  f:close ()
+end
+
+-- ===========================================================
+--  Learned map   (identical scheme to the STTNG plugin)
+--    edges[from][dir] =  vnum   a link we have walked
+--                     =  0      leads out of the Nenukon
+--                     = -1      "Alas, you cannot go that way"
+--    exits[from][dir] = true    directions GMCP says the room has
+-- ===========================================================
+
+local edges, exits = {}, {}     -- point into MAPS[A.key]
+
+-- Declared up here because absorb_room below marks rooms as visited.
+local visited = {}         -- rooms stood in during the current lap
+local laps    = 0
+
+local begin                -- forward: the GMCP handler starts a second
+                           -- leg (dive, then on to the ship) before this
+                           -- is defined further down
+local auto_token = 0       -- guards the delayed automatic list
+local menu                 -- defined down in the commands section; the GMCP
+                           -- handler above it needs to be able to call it
+
+local DATA_FILE = GetPluginInfo (GetPluginID (), 20) .. "Nenukon.dat"
+
+-- ===========================================================
+--  Which exits actually stay put
+-- ===========================================================
+--  The learned map is thrown away every time you walk into an area,
+--  because these mazes rearrange on repop.  But "maze" is the mapper's
+--  word for "I could not resolve this", and some of those exits may not
+--  move at all.  This is the long-term record of which ones.
+--
+--    learned[areakey][from][dir] = { to = vnum, n = agreed, bad = moved }
+--
+--  n counts SEPARATE REPOP CYCLES that agreed.  seen_cycle holds the
+--  exits already counted since the last repop, so walking the same link
+--  ten times - or in and out of the area five times - between two repops
+--  is one piece of evidence, not ten.  That is the whole point: an exit
+--  that keeps going to the same room ACROSS reshuffles is one that does
+--  not move.  At n >= FIXED_AFTER with bad == 0 it is seeded into the
+--  fresh map, so the search starts already knowing it.
+--
+--  Being wrong here is cheap and self-correcting: a seeded link that has
+--  moved contradicts on first use, which wipes the map exactly as a
+--  repop would, and bad goes up so it is not trusted again.
+local FIXED_AFTER = 3
+-- Links put on the map from the long-term record are BELIEFS, not things
+-- we have walked this visit.  They are good enough to route over, but
+-- they must still count as unexplored, or the search fills its map with
+-- guesses, finds nothing left to try and announces it has explored
+-- everything when it has barely moved.  Walking one settles it either
+-- way, which is exactly what we want.
+local hinted = {}
+local learned    = {}
+local seen_cycle = {}   -- (from,dir) already counted this visit
+-- Repops this plugin has actually WATCHED happen, per area.  Each exit
+-- remembers the count when it was first seen, so we can say honestly
+-- whether it survived a real reshuffle or has only ever been checked
+-- inside one repop cycle - far weaker evidence, and it was being reported
+-- as though the two were the same thing.
+local repops     = {}
+
+-- The area's own A.leaves, as a lookup.  An exit listed there is a way
+-- OUT of the part of the area we sweep, and that is a fact about the
+-- area, not a guess about this visit - so nothing may quietly turn it
+-- back into a normal link: not GMCP's free exit list, not a learned
+-- link, not a walk.  Without this, standing in a room whose leaf exit
+-- happens to lead somewhere the plugin knows the name of was enough to
+-- map it, and the sweep would then wander straight out through it.
+local leaves_of = {}
+
+local function is_leaf (from, dir)
+  return leaves_of[from] ~= nil and leaves_of[from][dir] == true
+end
+
+local function link (a, d, b)
+  edges[a] = edges[a] or {}
+  edges[a][d] = b
+end
+
+-- Exits shipped with the plugin as already-proved evidence.  Only used
+-- where we have nothing of our own for that exit, so a player's own
+-- observations always win.
+local function prime_known ()
+  for _, a in ipairs (AREAS) do
+    if a.known_fixed then
+      learned[a.key] = learned[a.key] or {}
+      local rooms = learned[a.key]
+      for _, e in ipairs (a.known_fixed) do
+        local from, d, to = e[1], e[2], e[3]
+        rooms[from] = rooms[from] or {}
+        if not rooms[from][d] then
+          rooms[from][d] = { to = to, n = FIXED_AFTER, bad = 0 }
+        end
+      end
+    end
+  end
+end
+
+local function seed ()
+  if not A then return end
+  -- Links the mapper already knows inside this area.
+  -- A mapper link that crosses between levels is left off the map: it is
+  -- real (26669 up does reach level 1) but taking it in the middle of a
+  -- sweep strands us a level away from the mob.  Crossings are made
+  -- deliberately, through A.bridges, and nowhere else.
+  for _, e in ipairs (A.seed) do
+    if not (A.sections and A.sections[e[1]] and A.sections[e[3]]
+            and A.sections[e[1]] ~= A.sections[e[3]]) then
+      link (e[1], e[2], e[3])
+    end
+  end
+  -- Which directions each room offers.  GMCP only describes the room we
+  -- are standing in, so without this the solver could never aim at a maze
+  -- room it has not already visited.
+  for v, ds in pairs (A.exitdirs) do
+    exits[v] = exits[v] or {}
+    for _, d in ipairs (ds) do exits[v][d] = true end
+  end
+  -- Exits out of the area: mark dead so a sweep never wanders out.
+  leaves_of = {}
+  for _, e in ipairs (A.leaves) do
+    link (e[1], e[2], 0)
+    leaves_of[e[1]] = leaves_of[e[1]] or {}
+    leaves_of[e[1]][e[2]] = true
+  end
+  -- ...and the ones that have proved, over separate visits, not to move.
+  hinted = {}
+  for from, ds in pairs (learned[A.key] or {}) do
+    for d, e in pairs (ds) do
+      if e.n >= FIXED_AFTER and e.bad == 0
+         and not is_leaf (from, d)
+         and not (edges[from] and edges[from][d]) then
+        link (from, d, e.to)
+        hinted[from] = hinted[from] or {}
+        hinted[from][d] = true
+      end
+    end
+  end
+end
+
+-- Switch areas: point edges/exits and the per-area tables at this one.
+local function use_area (a)
+  A = a
+  edges, exits = MAPS[a.key].edges, MAPS[a.key].exits
+  NAME, RANGE, MOBS = a.roomname, a.range, a.mobs
+  ROOMDESC = {}
+  for k, v in pairs (a.roomdesc) do ROOMDESC[k] = v end
+  seed ()
+end
+
+-- Declared above save_map, which writes it out.
+local move_wait = 25
+
+-- STEP MODE.  Everything moves one room at a time: the sweep walks a
+-- single room, checks it, then waits.  mmg, or the Next link, walks the
+-- next one.  Hunting a mob and walking to a room both work this way, in
+-- every area.
+local step_go      = false   -- one movement has been allowed
+local step_waiting = false   -- stopped between rooms, waiting for mmg
+local step_action  = nil     -- what the next click does: "move" or "exit"
+local step_dir     = nil     -- the direction that click will send
+local step_token   = 0       -- so a stale delayed Next line never prints
+local step_room    = nil     -- the room the pending step was worked out in
+
+-- Express: run the whole way instead of a room per press.  Applies to
+-- hunting, walking to a room and walking out alike.  `express` is the
+-- global setting; area_express[key] overrides it for one area (nil means
+-- "follow the global one").  Both are remembered between sessions.
+-- Express is how this normally works: pick something and it walks the
+-- whole way.  mmslow puts it back to a room per press.
+local express = true
+local area_express = {}
+
+-- Declared here, above move (), because that is what asks.
+local function is_express ()
+  if A and area_express[A.key] ~= nil then return area_express[A.key] end
+  return express
+end
+
+local function save_map ()
+  local f = io.open (DATA_FILE, "w")
+  if not f then return end
+  f:write ("-- MazeMobber saved maps.  Written by the plugin; safe to delete.\n")
+  local ax = {}
+  for k, v in pairs (area_express) do
+    ax[#ax + 1] = string.format ("[%q]=%s", k, tostring (v))
+  end
+  f:write ("return {\n  wait = " .. move_wait ..
+           ",\n  slow = " .. tostring (not express) ..
+           ",\n  area_express = {" .. table.concat (ax, ",") .. "}" ..
+           ",\n  maps = {\n")
+  for key, mp in pairs (MAPS) do
+    f:write (string.format ("    [%q] = { edges = {\n", key))
+    for from, t in pairs (mp.edges) do
+      local parts = {}
+      for d, to in pairs (t) do parts[#parts + 1] = string.format ("[%q]=%d", d, to) end
+      f:write (string.format ("      [%d]={%s},\n", from, table.concat (parts, ",")))
+    end
+    f:write ("    }, exits = {\n")
+    for from, t in pairs (mp.exits) do
+      local parts = {}
+      for d in pairs (t) do parts[#parts + 1] = string.format ("[%q]=true", d) end
+      f:write (string.format ("      [%d]={%s},\n", from, table.concat (parts, ",")))
+    end
+    f:write ("    } },\n")
+  end
+  f:write ("  },\n")
+  -- the long-term "which exits stay put" record
+  f:write ("  learned = {\n")
+  for key, rooms in pairs (learned) do
+    f:write (string.format ("    [%q] = {\n", key))
+    for from, ds in pairs (rooms) do
+      local parts = {}
+      for d, e in pairs (ds) do
+        parts[#parts + 1] =
+          string.format ("[%q]={%d,%d,%d}", d, e.to, e.n, e.bad)
+      end
+      if #parts > 0 then
+        f:write (string.format ("      [%d]={%s},\n",
+                                from, table.concat (parts, ",")))
+      end
+    end
+    f:write ("    },\n")
+  end
+  f:write ("  },\n")
+  f:write ("}\n")
+  f:close ()
+end
+
+local function load_map ()
+  local f = io.open (DATA_FILE, "r")
+  if not f then return end
+  local body = f:read ("*a")
+  f:close ()
+  local chunk = loadstring (body or "")
+  if not chunk then return end
+  local ok, t = pcall (chunk)
+  if not ok or type (t) ~= "table" then return end
+  move_wait = tonumber (t.wait) or move_wait
+  -- Saved as `slow` since 3.0, because the default flipped.  A file
+  -- written by an older build has neither key, and no key means express -
+  -- which is what everyone should now get without having to ask.
+  express   = not (t.slow and true or false)
+  learned = {}
+  for key, rooms in pairs (t.learned or {}) do
+    learned[key] = {}
+    for from, ds in pairs (rooms) do
+      learned[key][from] = {}
+      for d, v in pairs (ds) do
+        learned[key][from][d] = { to = v[1], n = v[2], bad = v[3] }
+      end
+    end
+  end
+  area_express = {}
+  for k, v in pairs (t.area_express or {}) do
+    area_express[k] = v and true or false
+  end
+  for key, mp in pairs (t.maps or {}) do
+    if MAPS[key] then
+      MAPS[key].edges = mp.edges or {}
+      MAPS[key].exits = mp.exits or {}
+    end
+  end
+end
+
+local function known_links ()
+  local n = 0
+  for _, t in pairs (edges) do
+    for _, to in pairs (t) do if to > 0 then n = n + 1 end end
+  end
+  return n
+end
+
+local function absorb_room ()
+  local ri = gmcp ("room.info")
+  if type (ri) ~= "table" then return end
+  local num = tonumber (ri.num)
+  if not num then return end
+  cur = num
+  if not A or not NAME[num] then return end
+  visited[num] = true
+  local e = {}
+  if type (ri.exits) == "table" then
+    for d, to in pairs (ri.exits) do
+      e[d] = true
+      -- Outside a maze the MUD tells us where each exit GOES, not just
+      -- that it exists ("Inside a maze, room ids are not shown").  That
+      -- is a link for free, with no move spent finding it.
+      local v = tonumber (to)
+      if v and v > 0 and NAME[v]
+         and not is_leaf (num, d)
+         and not (A.sections and A.sections[num] and A.sections[v]
+                  and A.sections[num] ~= A.sections[v]) then
+        edges[num] = edges[num] or {}
+        edges[num][d] = v
+      end
+    end
+  end
+  if next (e) == nil then
+    for _, d in ipairs (DIRS) do e[d] = true end
+  end
+  exits[num] = e
+end
+
+-- ===========================================================
+--  Run state
+-- ===========================================================
+
+local running   = false
+local phase     = nil      -- "travel" | "sweep" | "goto"
+local target    = nil      -- vnum, for a goto
+local want      = nil      -- normalised mob name, for a hunt
+local want_desc = nil      -- phrase to look for in the room listing
+local want_show = nil      -- how to print it
+local pending   = nil      -- { from = vnum, dir = d }
+local queued    = {}       -- directions still to walk (a scan beeline)
+local gen       = 0
+local steps     = 0
+-- Every move gets its own id, and its stall timer carries it.  Without
+-- that, the timer armed for one move fires while the NEXT one is in
+-- flight and blames it: it marks a perfectly good exit as a dead wall and
+-- starts a resync.  Walking room to room that mostly went unnoticed;
+-- waiting on a click between rooms made it fatal.
+local move_id   = 0
+local scanning  = false
+
+local here_mobs = {}       -- roomchars for the room we are standing in
+local rc_open   = false
+local scan_room = nil      -- room the outstanding scan was asked from
+local arrival   = 0        -- bumped on every arrival, guards the decision
+local decided   = true     -- has this arrival been acted on yet?
+local rc_blocks = 0        -- how many room listings we have actually seen
+local rooms_hit = 0        -- how many rooms we have walked into
+local noscan_mode = false  -- every Nenukon mob scans, so this stays false
+local want_range  = nil    -- the rooms this mob is actually seen in
+local wide        = false  -- 'all <mob>' ignores the room range
+local leaving     = nil    -- the way out we are walking to
+local stepping_back = false  -- undoing a move that left the area
+local recovers    = 0      -- times we have climbed back in this run
+local journey     = nil    -- a second leg to run once we cross over
+local awaiting_leg = false -- crossed over, waiting to land
+local menu_on_arrival = false -- walked in from outside; show the list
+local want_levels  = nil   -- ordered sections to search, most likely first
+local level_i      = 1     -- which of them we are on
+local crossing     = nil
+local xover        = nil   -- the crossing under way, and the hunt it serves
+local cross_from   = nil   -- the section we left
+local awaiting_cross = false
+local where_wait   = false
+local where_settling = false  -- an answer has landed, brief wait for more
+
+local where_room   = nil   -- the room a 'where' pinned, if any
+local out_walk  = false    -- this walk is "get me out", so ANY way out will do
+local reopened  = false    -- crossed-off exits given a second chance
+local widened   = false    -- a mob's usual rooms gave out, now sweeping wider
+local rc_seen   = false    -- a {roomchars} block arrived for THIS room
+local rc_waited = false    -- and we have already given it one extra second
+local rc_warned = false    -- only nag about a missing room listing once
+-- How long to wait for a move to be answered before treating that exit as
+-- dead.  Generous by default: a spurious timeout is far more damaging than
+-- a slow one, because the exit gets written off.  'nenukon wait <secs>'.
+
+local resyncing = false    -- waiting on a GMCP room request after a stall
+local stalls    = 0        -- moves in a row that went unanswered
+local dump_here = false    -- 'nenukon here' waiting on a room listing
+local debug_on  = false    -- 'nenukon debug': show what the plugin is seeing
+local scan_hits = {}       -- { dir = "n", dist = 2, name = "the roper" }
+local scan_dir, scan_dist = nil, nil
+
+local sightings = {}       -- everything seen this sweep: mob -> vnum
+
+local MAXSTEPS = 600
+
+-- How many times to go round a mob's rooms before calling it absent.  These
+-- mobs move while we are walking, so they can slip into a room already
+-- ticked off this lap - one or two passes proves very little.
+local LAP_LIMIT = 4
+
+local function stop (msg, bad)
+  running   = false
+  resyncing = false
+  stepping_back = false
+  if where_wait then
+    where_wait = false
+    EnableTriggerGroup ("mm_where", false)
+  end
+  -- Only a real abort forgets a crossing.  begin() calls stop () with no
+  -- message to tidy up before a fresh run, and the walk to a portal is
+  -- itself a begin (), so wiping it there loses the hunt every time.
+  if msg then xover, crossing, awaiting_cross = nil, nil, false end
+  step_waiting, step_go, step_action = false, false, nil
+  out_walk = false
+  phase    = nil
+  pending  = nil
+  target   = nil
+  want     = nil
+  queued   = {}
+  scanning = false
+  gen      = gen + 1
+  EnableTriggerGroup ("mm_scan", false)
+  save_map ()
+  if msg then
+    if bad then warn (msg) else note (msg) end
+  end
+end
+
+-- ===========================================================
+--  Pathfinding over learned links
+-- ===========================================================
+
+local function bfs (from, goalfn)
+  if goalfn (from) then return {} end
+  local seen, back = { [from] = true }, {}
+  local q, head = { from }, 1
+  while head <= #q do
+    local r = q[head]
+    head = head + 1
+    local t = edges[r]
+    if t then
+      for _, d in ipairs (DIRS) do
+        local to = t[d]
+        if to and to > 0 and not seen[to] then
+          seen[to] = true
+          back[to] = { r, d }
+          if goalfn (to) then
+            local path, n = {}, to
+            while n ~= from do
+              local p = back[n]
+              table.insert (path, 1, p[2])
+              n = p[1]
+            end
+            return path
+          end
+          q[#q + 1] = to
+        end
+      end
+    end
+  end
+  return nil
+end
+
+
+-- Only ever explore inside the mob's own range.  Rooms outside it are
+-- still walked through, but their unknown exits are left alone.
+local function untried (r)
+  local ex = exits[r]
+  if not ex then return nil end
+  local kn = edges[r]
+  -- A level crossing that happens to be a plain direction (Infamy's way
+  -- down from 26669) must not be wandered into while exploring, or the
+  -- sweep drops a level without meaning to and carries on down there.
+  -- Nothing on another level is ours to explore.  Some of these rooms
+  -- are joined by links the mapper already knows, so without this the
+  -- search wanders off the level it is meant to be sweeping.
+  if want_levels and A and A.sections and A.sections[r]
+     and A.sections[r] ~= want_levels[level_i] then
+    return nil
+  end
+  local off
+  if A and A.sections and A.bridges then
+    local b = A.bridges[A.sections[r]]
+    if b and b.room == r then
+      off = {}
+      for _, c in ipairs (b.cmds or {}) do off[c] = true end
+      for _, c in ipairs (b.alts or {}) do off[c] = true end
+    end
+  end
+  local hint = hinted[r]
+  for _, d in ipairs (DIRS) do
+    -- a hinted link still counts as untried: we have not walked it
+    if ex[d] and not (off and off[d])
+       and (not (kn and kn[d]) or (hint and hint[d])) then
+      return d
+    end
+  end
+  return nil
+end
+
+-- ===========================================================
+--  Walking
+-- ===========================================================
+
+local move, advance, after_arrival
+
+-- What this walk is for, so the Next line can say so.
+local function step_subject ()
+  if xover and xover.show then return xover.show end
+  if want_show then return want_show end
+  if leaving then return leaving.label or roomname (leaving.room) end
+  if target then return roomname (target) end
+  return nil
+end
+
+-- The click that walks one more room.  We are ready straight away - type
+-- mmg and it goes - but the LINE waits a fifth of a second, because GMCP lands
+-- before the room description does and printing now would put it above
+-- the description, where it just scrolls away.
+local function offer_step (kind, dir)
+  step_waiting = true
+  step_action  = kind
+  step_dir     = dir
+  step_room    = cur
+  step_token   = step_token + 1
+  DoAfterSpecial (0.2, "mm_step_link (" .. step_token .. ")", 12)
+end
+
+function mm_step_link (tok)
+  if tok ~= step_token or not step_waiting then return end
+  flush_notes_now ()
+  local what = step_subject ()
+  local hunting = want_show or (xover and xover.show)
+  local lead = hunting and "  - still looking for " or "  - on the way to "
+  ColourTell (CLR_TAG, "", "[", CLR_NAME, "", "MazeMobber", CLR_TAG, "", "] ")
+  Hyperlink ("mmg", "NEXT", "Walk one more room", CLR_HI, "black", 0, 1)
+  ColourTell (CLR_MSG, "", " or ", CLR_HI, "", "MMG", CLR_MSG, "", " to continue")
+  if what then
+    ColourNote (CLR_MSG, "", lead, CLR_HI, "", what)
+  else
+    ColourNote (CLR_TAG, "", "")
+  end
+end
+
+function move (dir)
+  -- One room at a time - except walking OUT.  Stepping is a failsafe for
+  -- searching rooms you have not seen; leaving is a known route to a
+  -- known room, and clicking through it while something chews on you is
+  -- no kind of safety.  A fight still stops it.
+  if not step_go and not is_express () then
+    offer_step ("move", dir)
+    return
+  end
+  step_go = false
+
+  steps = steps + 1
+  if steps > MAXSTEPS then
+    stop ("Gave up after " .. MAXSTEPS .. " moves.", true)
+    return
+  end
+  pending = { from = cur, dir = dir }
+  move_id = move_id + 1
+  -- Some exits are behind a door that has to be opened first (Sahuagin's
+  -- four trapdoors down into the maze).  Sending "open" at a door that is
+  -- already open just says so, so there is nothing to track or undo.
+  local door = A and A.doors and A.doors[cur] and A.doors[cur][dir]
+  if door then
+    for _, c in ipairs (door) do SendNoEcho (c) end
+  end
+  -- SendNoEcho, not Send.  Echoing the command writes to the output
+  -- window, and a line the MUD sends straight afterwards can no longer be
+  -- omitted by anything - which is why Aardwolf's {rdesc} marker leaked
+  -- on every arrival while {/rdesc}, arriving mid-description, did not.
+  -- Walking silently also spares you a screen of n/e/s/w echoes.
+  SendNoEcho (dir)
+  DoAfterSpecial (move_wait, "mm_timeout (" .. gen .. "," .. move_id .. ")", 12)
+end
+
+local function start_scan ()
+  scan_hits = {}
+  scan_dir, scan_dist = nil, nil
+  scanning  = true
+  scan_room = cur          -- so late output from a room we have left is dropped
+  EnableTriggerGroup ("mm_scan", true)
+  SendNoEcho ("scan")
+end
+
+-- One decision per arrival.  Whichever comes first - the scan finishing
+-- or this fallback - acts, and the other is ignored.
+local function schedule_decision (seconds)
+  arrival = arrival + 1
+  decided = false
+  DoAfterSpecial (seconds, "mm_decide (" .. gen .. "," .. arrival .. ")", 12)
+end
+
+-- Nearest room we have not stood in yet.  With a range in force this
+-- only ever aims at rooms the mob actually uses.
+-- Every room on one level of an area.
+local function rooms_of (section)
+  local t = {}
+  if not (A and A.sections) then return t end
+  for v, sec in pairs (A.sections) do
+    if sec == section then t[v] = true end
+  end
+  return t
+end
+
+-- Room names that belong to exactly one room, so a 'where' hit on one
+-- pins the room - and with it the level - outright.
+local UNIQUE = {}
+for _, a in ipairs (AREAS) do
+  local count, first = {}, {}
+  for v, nm in pairs (a.roomname) do
+    count[nm] = (count[nm] or 0) + 1
+    first[nm] = first[nm] or v
+  end
+  UNIQUE[a.key] = {}
+  for nm, c in pairs (count) do
+    if c == 1 then UNIQUE[a.key][nm:lower ()] = first[nm] end
+  end
+end
+
+-- Use the way out we walked to: some need a command, some you just
+-- walk up from yourself.
+-- Exits we crossed off - dead ends, and ways out of the area - are only
+-- ever a belief about how the maze was arranged at the time.  A repop can
+-- move them, and a door that was shut can be open.  Rather than declare
+-- somewhere unreachable while still holding those, rub them out and have
+-- another go: being wrong here costs a few moves, and being stubborn
+-- costs the whole search.
+local function reopen_crossed ()
+  local n = 0
+  for from, t in pairs (edges) do
+    for _, d in ipairs (DIRS) do
+      if t[d] == 0 or t[d] == -1 then t[d] = nil; n = n + 1 end
+    end
+  end
+  return n
+end
+
+-- Is this way out one of the area's own ways out?  The entries come
+-- straight from A.outs, so identity is enough.
+local function is_way_out (o)
+  if not (A and A.outs) then return false end
+  for _, e in ipairs (A.outs) do
+    if e == o then return true end
+  end
+  return false
+end
+
+-- Said once you have got where you were going, in the areas you cannot
+-- just recall out of.  A plain note so it queues with everything else and
+-- lands under the room description in the right order.
+local function remind_out ()
+  if not (A and A.outs and #A.outs > 0) then return end
+  note ("Done here? @x048mmout@w or @x048mmo@w walks you back out of " ..
+        A.label .. ".")
+end
+
+local function take_exit ()
+  local o = leaving
+  if not o then return end
+  -- Only a crossing the PLUGIN chose gets its own click.  When you picked
+  -- "Dive Room" or typed mmo, arriving and doing the thing is the whole
+  -- request - making you click again to send "surface" while standing in
+  -- the room just looks broken.  A level crossing mid-hunt is different:
+  -- that is the plugin deciding to move you somewhere new.
+  if o.cmds and xover and not step_go then
+    offer_step ("exit")
+    return
+  end
+  leaving = nil
+  step_go = false
+  if o.cmds then
+    note ("At @x048" .. (o.label or roomname (o.room)) .. "@w - sending @x048" ..
+          table.concat (o.cmds, "@w, @x048") .. "@w.")
+    -- ...unless this IS the way out, in which case you are leaving
+    if not is_way_out (o) then remind_out () end
+    -- Armed before sending, not after: the room change can land before
+    -- Send even returns.
+    if journey then awaiting_leg = true end
+    if xover then awaiting_cross = true end
+    for _, c in ipairs (o.cmds) do SendNoEcho (c) end
+  elseif o.how == "walk there" then
+    note ("Arrived: @x048" .. (o.label or roomname (o.room)) ..
+          "@w  (@x048" .. o.room .. "@w)")
+    remind_out ()
+  else
+    note ("At @x048" .. (o.label or roomname (o.room)) .. "@w (@x048" .. o.room ..
+          "@w). I do not know the command that leaves from here - " ..
+          o.how .. " yourself and you are clear.")
+  end
+end
+
+-- One room, whether it was mmg, a click on NEXT, or another mmout.
+local function step_once ()
+  local st = gmcp ("char.status")
+  if type (st) == "table" and tonumber (st.state) == 8 then
+    warn ("You are in combat - finish the fight first.")
+    return true
+  end
+  if not step_waiting then return false end
+  step_waiting = false
+  local what, dir = step_action, step_dir
+  step_action, step_dir = nil, nil
+
+  -- Arriving at the room a way out is in ends the walk to it, so running
+  -- is already false by then; only `leaving` says what is left to do.
+  if what == "exit" and leaving then
+    step_go = true
+    take_exit ()
+    step_go = false
+    return true
+  end
+  if not running then return false end
+  step_go = true
+  if dir then move (dir) else advance () end
+  step_go = false
+  return true
+end
+
+-- Move to the level we want to be searching.  The crossings form a ring
+-- (1 to 2 to 3 and back to 1), so taking the next one repeatedly reaches
+-- any level from any other; we re-check after each hop rather than
+-- planning the whole route up front.
+local function cross_step ()
+  if not (A and A.sections and want_levels) then return false end
+  local here, target = A.sections[cur], want_levels[level_i]
+  if not target or here == target then return false end
+
+  local b = A.bridges and A.bridges[here]
+  if not b then
+    stop ("I know no way off " .. tostring (here) .. " in " .. A.label ..
+          " - stopped.", true)
+    return true
+  end
+
+  -- Walking to the portal is a goto, and starting one wipes the hunt.
+  -- So the hunt travels with the crossing and is put back on the far
+  -- side, which works whether the move lands now or in a second.
+  -- If the way across is a plain direction it can move about (Infamy's
+  -- way down from 26669 was up last repop and may not be next), so the
+  -- room's other exits are the fallbacks, worked out fresh each time
+  -- rather than crossed off a shared list for good.
+  local alts = {}
+  local one = b.cmds and #b.cmds == 1 and b.cmds[1]
+  local is_dir = false
+  for _, d in ipairs (DIRS) do if d == one then is_dir = true break end end
+  if is_dir then
+    for _, d in ipairs (DIRS) do
+      if d ~= one and exits[b.room] and exits[b.room][d] then
+        alts[#alts + 1] = d
+      end
+    end
+  end
+  for _, d in ipairs (b.alts or {}) do alts[#alts + 1] = d end
+  xover = { b = b, from = here, alts = alts, levels = want_levels,
+            li = level_i, range = want_range, want = want, show = want_show,
+            desc = want_desc, noscan = noscan_mode }
+  crossing, cross_from = b, here
+  leaving = b
+  note ("Heading for @x048" .. target .. "@w via @x048" ..
+        (b.label or b.how) .. "@w.")
+  if cur == b.room then take_exit () else begin ("goto", b.room, nil, false) end
+  return true
+end
+
+-- Nearest room we have not stood in yet.  With a range in force this only
+-- aims at rooms the mob actually uses.  Otherwise rooms an area marks as
+-- "late" are left until last - the Gauntlet's BATTLE ROOM is a dead end
+-- with the Deep Dragon in it, so a sweep has no business going in early.
+local function path_to_unvisited ()
+  if want_range then
+    return bfs (cur, function (v) return want_range[v] and not visited[v] end)
+  end
+  local late = A.late
+  local p = bfs (cur, function (v) return not visited[v] and not late[v] end)
+  if p and p[1] then return p end
+  for tier = 1, 9 do
+    p = bfs (cur, function (v) return not visited[v] and late[v] == tier end)
+    if p and p[1] then return p end
+  end
+  return nil
+end
+
+-- Arrived somewhere: for a scannable mob, scan and decide when it comes
+-- back.  For the noscan pair scanning is pointless - they never appear in
+-- it - so we send nothing and decide off the room's own character list,
+-- with a timer to cover rooms that list nobody at all.
+local function begin_room ()
+  rooms_hit = rooms_hit + 1
+  -- Areas that list rooms rather than mobs have nothing scan could tell
+  -- us, so they never scan.
+  if noscan_mode or #MOBS == 0 then
+    -- No wait at all.  We cannot tell "nobody here" from "the listing has
+    -- not arrived yet" - an empty room sends no {roomchars} block to
+    -- trigger on - but it does not matter, because nothing moves without
+    -- a click.  So offer the next step immediately; if a listing turns up
+    -- afterwards, mm_rc_end checks it for the mob BEFORE it looks at
+    -- whether we already decided, and we are still standing in the room,
+    -- so the find still happens.  Finding it clears step_waiting, which
+    -- stops the delayed link from printing at all.
+    schedule_decision (0.1)
+  else
+    start_scan ()
+    schedule_decision (8)
+  end
+end
+
+-- Pick the next direction: finish a beeline, else head for the target
+-- room, else take an exit we have never tried, else walk to the nearest
+-- room that still has one.
+-- Is there still a room the mob uses that we have not stood in?
+local function range_left ()
+  if not want_range then return true end
+  for v in pairs (want_range) do
+    if not visited[v] then return true end
+  end
+  return false
+end
+
+function advance ()
+  if #queued > 0 then
+    move (table.remove (queued, 1))
+    return
+  end
+
+  -- Walking out is not walking to one particular room: any of the area's
+  -- ways out will do.  Nenukon has two, and committing to the first one
+  -- meant strolling through the other and carrying on - 67 clicks where
+  -- the second was reached on the 17th.
+  if phase == "goto" and out_walk then
+    local ways = here_list (A.outs)
+    local standing
+    for _, o in ipairs (ways) do
+      if o.room == cur then standing = o end
+    end
+    if standing then
+      leaving, target = standing, cur
+    else
+      local best, pick
+      for _, o in ipairs (ways) do
+        local p = bfs (cur, function (x) return x == o.room end)
+        if p and (not best or #p < best) then best, pick = #p, o end
+      end
+      if pick and pick.room ~= target then
+        leaving, target = pick, pick.room
+        note ("@x048" .. (pick.label or roomname (pick.room)) ..
+              "@w is the nearer way out now - heading there instead.")
+      end
+    end
+  end
+
+  if phase == "goto" then
+    if cur == target then
+      if leaving and leaving.room == cur then
+        stop ()
+        take_exit ()
+        return
+      end
+      leaving = nil
+      if menu_on_arrival then
+        menu_on_arrival = false
+        stop ()
+        menu ()
+        return
+      end
+      stop ("Arrived: @x048" .. (NAME[cur] or cur) .. "@w  (@x048" .. cur .. "@w)")
+      remind_out ()
+      return
+    end
+    local path = bfs (cur, function (v) return v == target end)
+    if path and path[1] then move (path[1]) return end
+  end
+
+  -- A hunt goes to the mob's own rooms first; walking the rest of the
+  -- area is only ever a means of reaching them.
+  if phase ~= "goto" then
+    local unseen = path_to_unvisited ()
+    if unseen and unseen[1] then move (unseen[1]) return end
+  end
+
+  -- Explore, but for a hunt only while a room the mob uses is still out
+  -- of reach over the links we know.
+  if phase == "goto" or range_left () then
+    local d = untried (cur)
+    if d then move (d) return end
+    -- Nearest room that still has an untried exit.  Weighting this by how
+    -- MANY untried exits a room has was tried and measured worse: the walk
+    -- discovers nothing, so distance is what actually costs.
+    local path = bfs (cur, function (v) return untried (v) ~= nil end)
+    if path and path[1] then move (path[1]) return end
+  end
+
+  if phase == "goto" then
+    if not reopened then
+      local n = reopen_crossed ()
+      if n > 0 then
+        reopened = true
+        note ("Every way I know is walked and no sign of it - re-trying " ..
+              "the @x048" .. n .. "@w exits I had crossed off.")
+        return advance ()
+      end
+    end
+    stop ("Explored everything I can reach and never found that room. " ..
+          "Try @x048" .. A.cmd .. " reset@w.", true)
+    return
+  end
+
+  -- About to declare failure of some kind, and this room has not sent its
+  -- character list yet.  Deciding now is how a mob standing right in
+  -- front of us gets missed: the listing lands a moment later, but the
+  -- hunt is already over so nothing looks at it.  Walking on is safe to
+  -- do instantly; giving up is worth one more second.
+  if noscan_mode and not rc_seen and not rc_waited then
+    rc_waited = true
+    schedule_decision (1)
+    return
+  end
+
+  -- If we never even got to one of the mob's rooms, this is not "checked
+  -- and not there" - it is "cannot get there from here".  Monuhi's crypt,
+  -- for instance, has no exit the mapper knows about.
+  if want_range then
+    local reached = false
+    for v in pairs (want_range) do
+      if visited[v] then reached = true break end
+    end
+    if not reached and not reopened then
+      local n = reopen_crossed ()
+      if n > 0 then
+        reopened = true
+        note ("Cannot get to any room it uses - re-trying the @x048" .. n ..
+              "@w exits I had crossed off.")
+        return advance ()
+      end
+    end
+    if not reached and not widened then
+      -- In a maze that reshuffles, "have not reached it" is NOT "cannot
+      -- reach it".  The links move, so the only way into a room may be to
+      -- keep walking until one leads there.  Knowing where a mob usually
+      -- stands should make the hunt shorter, never make it give up early -
+      -- so drop back to searching everything and carry on.
+      widened = true
+      want_range = want_levels and rooms_of (want_levels[level_i]) or nil
+      -- Clearing visited lets the wider sweep re-check rooms the mob may
+      -- have moved into since.  The room we are STANDING in has to go
+      -- straight back in, though: the very next thing this does is ask
+      -- whether any room in range has been reached, and on a freshly
+      -- emptied table the answer was no - so it gave up anyway.
+      visited, laps = {}, 0
+      visited[cur] = true
+      note ("Not got to where @x048" .. (want_show or "it") ..
+            "@w usually is yet - searching the rest of @x048" ..
+            ((want_levels and want_levels[level_i]) or A.label) .. "@w.")
+      return advance ()
+    end
+    if not reached then
+      stop ("I could not reach a single room @x048" .. (want_show or "it") ..
+            "@w uses, starting from @x048" .. (NAME[cur] or cur) ..
+            "@w - there is no route I know of out of here. Walk out and " ..
+            "try again.", true)
+      return
+    end
+  end
+
+  -- A full lap done. These mobs wander, so one clean lap is not proof it
+  -- is not here - go round again before giving up.
+  -- This level is done.  If the mob is known on another one, cross over
+  -- and keep going rather than giving up.  The levels are a ring: going
+  -- round them all counts as one lap, so a mob that moves between them
+  -- gets the same benefit of the doubt as one that moves between rooms.
+  if want_levels and #want_levels > 1 then
+    local was_level = want_levels[level_i]
+    local nxt = level_i + 1
+    if nxt > #want_levels then
+      nxt = 1
+      laps = laps + 1
+    end
+    if laps < LAP_LIMIT then
+      level_i = nxt
+      want_range = RANGE[want] or rooms_of (want_levels[level_i])
+      visited = {}
+      note ("Not on " .. was_level .. " - trying @x048" ..
+            want_levels[level_i] .. "@w.")
+      if cross_step () then return end
+      return advance ()
+    end
+  end
+
+  laps = laps + 1
+  if laps >= LAP_LIMIT then
+    if want_range then
+      stop ("Checked every room @x048" .. (want_show or "it") ..
+            "@w is known to use, " .. LAP_LIMIT .. " times over, and it is " ..
+            "not there. " ..
+            "@x048" .. A.cmd .. " all " .. (want_show or "") ..
+            "@w searches the whole area.", true)
+    else
+      stop ("Walked the whole area " .. LAP_LIMIT .. " times - no sign of " ..
+            "@x048" .. (want_show or "it") .. "@w.", true)
+    end
+    return
+  end
+
+  note ("Nothing yet - going round once more in case it has moved.")
+  visited = { [cur] = true }
+  -- Re-enter with a clean lap rather than deciding here: there may still
+  -- be exploring to do before a room the mob uses can even be reached.
+  -- laps is already counted, so the second pass ends it for good.
+  advance ()
+end
+
+-- ===========================================================
+--  Reshuffle handling
+-- ===========================================================
+
+-- Exits that lead clean out of the area are kept when the map is thrown
+-- away.  The maze reshuffles its own links; the door to the outside is
+-- part of the building and stays put.  Without this, every repop earned
+-- another walk out through the same exit before it was relearned.
+local function keep_ways_out ()
+  local out = {}
+  for from, t in pairs (edges) do
+    for d, to in pairs (t) do
+      if to == 0 then
+        out[from] = out[from] or {}
+        out[from][d] = 0
+      end
+    end
+  end
+  return out
+end
+
+local function put_back (out)
+  for from, t in pairs (out) do
+    edges[from] = edges[from] or {}
+    for d in pairs (t) do edges[from][d] = 0 end
+  end
+end
+
+local function reshuffled ()
+  -- A link that no longer goes where it did IS the maze having changed,
+  -- which is a new round of evidence for what stays put.  Without this
+  -- the counting would only ever advance when you happened to be standing
+  -- in the area at the moment it repopped.
+  seen_cycle = {}
+  local ways_out = keep_ways_out ()
+  -- cleared in place: edges/exits point into MAPS[A.key]
+  for k in pairs (edges) do edges[k] = nil end
+  for k in pairs (exits) do exits[k] = nil end
+  seed ()
+  put_back (ways_out)
+  -- `visited` is NOT cleared.  Which rooms you have stood in is a fact;
+  -- a shuffle moves the links between them, not the rooms themselves.
+  -- Clearing it threw away the search's own progress every time, which in
+  -- a maze that reshuffles, that is every single move.
+  laps = 0
+  absorb_room ()
+  queued = {}
+
+
+  -- Not worth saying out loud.  These mazes shuffle; a link that no
+  -- longer goes where it did is the normal state of affairs, not an
+  -- event.  Kept for 'debug'.
+  if debug_on then
+    warn (A.label .. " no longer matches the map - starting it again.")
+  end
+end
+
+-- One observation per exit per visit, kept between sessions.
+local function note_link (from, dir, to)
+  if not A or type (to) ~= "number" or to <= 0 then return end
+  if not NAME[from] or not NAME[to] then return end
+  local tag = from .. dir
+  if seen_cycle[tag] then return end
+  seen_cycle[tag] = true
+  learned[A.key] = learned[A.key] or {}
+  local rooms = learned[A.key]
+  rooms[from] = rooms[from] or {}
+  local e = rooms[from][dir]
+  if not e then
+    rooms[from][dir] = { to = to, n = 1, bad = 0,
+                         r0 = repops[A.key] or 0 }
+  elseif e.to == to then
+    e.n = e.n + 1
+  else
+    -- it went somewhere else this time, so it is one of the shuffling ones
+    e.to, e.n, e.bad = to, 1, e.bad + 1
+    e.r0 = repops[A.key] or 0            -- the clock restarts
+  end
+end
+
+local function record (from, dir, to)
+  -- A way out of the area stays a way out, however we came to walk it.
+  if is_leaf (from, dir) then
+    edges[from] = edges[from] or {}
+    edges[from][dir] = 0
+    return
+  end
+  -- A link between two levels is never put on the map.  Using a crossing
+  -- teaches us one (26669 up lands on level 1), and once it is on the map
+  -- the router will happily take it as a short cut in the middle of a
+  -- sweep and strand us a level away from the mob.
+  if A and A.sections and A.sections[from] and A.sections[to]
+     and A.sections[from] ~= A.sections[to] then
+    -- Not a contradiction and not a reshuffle - just an exit off this
+    -- level.  Marked as a wall so routing leaves it alone from now on.
+    edges[from] = edges[from] or {}
+    edges[from][dir] = -1
+    return
+  end
+  note_link (from, dir, to)
+  -- walked for real now, so it is no longer just a belief
+  local was_hint = hinted[from] and hinted[from][dir]
+  if hinted[from] then hinted[from][dir] = nil end
+  if was_hint then
+    -- A hint that turned out wrong says nothing about the rest of the
+    -- map - it was never walked, just believed.  Correct it in place
+    -- rather than throwing the whole map away, which is what made a
+    -- stale record cost MORE than having no record at all.
+    edges[from] = edges[from] or {}
+    edges[from][dir] = to
+    return
+  end
+  edges[from] = edges[from] or {}
+  local old = edges[from][dir]
+  if old and old ~= to then
+    reshuffled ()
+    edges[from] = edges[from] or {}
+  end
+  edges[from][dir] = to
+end
+
+-- ===========================================================
+--  Did we find it?
+-- ===========================================================
+
+-- A room-listing or scan line that is the mob we are after.  Checks the
+-- short name first, then the room-description phrase, because the two
+-- do not always share any words.
+-- What is left of a mob is not the mob.  The listing for a dead one
+-- still carries its name - "The corpse of Grendel's mother lies here." -
+-- and the name test below is plain containment, so a corpse somebody
+-- else left behind ended the hunt and announced her as standing here.
+local function is_leftovers (line)
+  local l = normalise (line)
+  return l:find ("^corpse of ") ~= nil
+      or l:find ("^remains of ") ~= nil
+      or l:find ("^severed head of ") ~= nil
+end
+
+local function is_target (line)
+  if is_leftovers (line) then return false end
+  if matches (line, want) then
+    -- "skeletal warrior" is inside "a mounted skeletal warrior", so a
+    -- plain containment test would stop on the wrong mob.  If the line
+    -- also matches a longer listed name that contains ours, it is not us.
+    for _, m in ipairs (MOBS) do
+      local other = normalise (m[1])
+      if other ~= want and #other > #want
+         and other:find (want, 1, true)
+         and matches (line, other) then
+        return false
+      end
+    end
+    return true
+  end
+  if matches (line, want_desc) then return true end
+  return false
+end
+
+local function found_here ()
+  stop ()
+  note ("@x048" .. (want_show or "it") .. "@w is @x048right here@w - " ..
+        NAME[cur] .. " (@x048" .. tostring (cur) .. "@w).")
+  remind_out ()
+end
+
+-- Called once the scan for this room has finished, so both the room's
+-- character list and the scan results are in.
+function after_arrival ()
+  if not running then return end
+
+  -- A noscan hunt is blind without the room's character list.  Plenty of
+  -- rooms are simply empty, so this is a warning and not a reason to give
+  -- up - but 30 rooms without a single listing means the tag is not on.
+  if noscan_mode and rc_blocks == 0 and rooms_hit >= 30 and not rc_warned then
+    rc_warned = true
+    warn ("30 rooms and not one room character list from the MUD - that " ..
+          "tag looks off, and without it @x048" .. (want_show or "it") ..
+          "@w cannot be spotted. Check with @x048" .. A.cmd .. " here@w.")
+  end
+
+  -- 1. Standing in the same room as it.  This is the only thing that
+  --    ever finds the noscan pair.
+  for _, line in ipairs (here_mobs) do
+    if is_target (line) then
+      found_here ()
+      return
+    end
+  end
+
+  -- 2. Scan picked it up somewhere nearby - beeline straight to it.
+  for _, hit in ipairs (scan_hits) do
+    sightings[hit.name] = cur
+    if is_target (hit.name) then
+      -- Only beeline if that exit actually works for us.  Scan sees through
+      -- exits we have found to be dead, and blindly re-issuing one turns
+      -- into a stall every time the same sighting comes back.
+      local known = edges[cur] and edges[cur][hit.dir]
+      if known ~= -1 then
+        note ("Scan has @x048" .. want_show .. "@w " .. hit.dist .. " " ..
+              hit.dir .. " - going to it.")
+        queued = {}
+        for _ = 1, hit.dist do queued[#queued + 1] = hit.dir end
+        advance ()
+        return
+      end
+      if debug_on then
+        note ("scan shows it " .. hit.dist .. " " .. hit.dir ..
+              " but that exit is dead from here - going round.")
+      end
+    end
+  end
+
+  -- 3. Nothing here, keep sweeping.
+  advance ()
+end
+
+-- ===========================================================
+--  Trigger handlers
+-- ===========================================================
+
+-- The door opened, we walked into it, and something threw us back.  The
+-- exit is real - it is the ward that is in the way - so this must NOT be
+-- crossed off like a wall, or the room stops being reachable at all.
+-- Hand the next press back instead: deal with the ward, then click.
+function mm_warded ()
+  if not running or not pending then return end
+  local dir = pending.dir
+  pending = nil
+  gen = gen + 1                    -- the stall timer for that move is void
+  queued = {}                      -- and any beeline through it is off
+  warn ("Warded - that door bounced me back.")
+  offer_step ("move", dir)
+end
+
+-- Nothing to do: the trigger's omit_from_output does the work.  It
+-- still needs a script to hang off.
+function mm_gag ()
+end
+
+function mm_blocked ()
+  if not running or not pending then return end
+  local from, dir = pending.from, pending.dir
+  pending = nil
+  gen = gen + 1
+  queued = {}                      -- a beeline that walks into a wall is void
+  edges[from] = edges[from] or {}
+  edges[from][dir] = -1
+  advance ()
+end
+
+function mm_rc_start ()
+  rc_blocks = rc_blocks + 1
+  rc_seen   = true
+  here_mobs = {}
+  rc_open = true
+  EnableTriggerGroup ("mm_rc", true)
+end
+
+-- Check the moment the room listing closes rather than waiting for the
+-- scan to come back.  The two noscan mobs only ever show up here, and
+-- this way it does not matter which of the two arrives first.
+function mm_rc_end ()
+  rc_open = false
+  EnableTriggerGroup ("mm_rc", false)
+  flush_notes_now ()
+  if debug_on then
+    note ("@x048roomchars@w: " .. #here_mobs .. " line(s) in room " ..
+          tostring (cur))
+    for _, l in ipairs (here_mobs) do
+      ColourNote (CLR_TAG, "", "     |", CLR_MSG, "", l)
+    end
+    if want or want_desc then
+      ColourNote (CLR_TAG, "", "     looking for name '",
+                  CLR_HI, "", tostring (want),
+                  CLR_TAG, "", "'  or description '",
+                  CLR_HI, "", tostring (want_desc), CLR_TAG, "", "'")
+    end
+  end
+
+  flush_notes_now ()
+  if dump_here then
+    dump_here = false
+    note ("This room's character list:")
+    if #here_mobs == 0 then
+      ColourNote (CLR_TAG, "", "   (nothing listed)")
+    end
+    for _, l in ipairs (here_mobs) do
+      ColourNote (CLR_MSG, "", "   " .. l)
+    end
+  end
+  if not running or not (want or want_desc) then return end
+  for _, line in ipairs (here_mobs) do
+    if is_target (line) then
+      found_here ()
+      return
+    end
+  end
+  -- Not here.  For a noscan hunt the listing is all we were waiting on,
+  -- so move on now rather than sitting out the fallback timer.
+  if noscan_mode and not decided then
+    decided = true
+    after_arrival ()
+  end
+end
+
+function mm_rc_line (name, line)
+  if not rc_open then return end
+  -- This trigger matches every line while the listing is open, so any
+  -- OTHER tagged output the MUD interleaves - {rdesc}, {scan} and the
+  -- like - would be stored as though it were somebody standing here, and
+  -- a mob name inside one would read as a hit.  Tags are never people.
+  if line:match ("^%s*{/?%a+}%s*$") then return end
+  -- room listings are prefixed with flag groups like "(H) "
+  line = line:gsub ("^%s*", "")
+  while true do
+    local rest = line:match ("^%b()%s*(.*)$") or line:match ("^%[[^%]]*%]%s*(.*)$")
+    if not rest then break end
+    line = rest
+  end
+  here_mobs[#here_mobs + 1] = line
+end
+
+function mm_scan_start ()
+  scan_hits = {}
+  scan_dir, scan_dist = nil, nil
+  EnableTriggerGroup ("mm_scan", true)
+end
+
+function mm_scan_here ()
+  scan_dir, scan_dist = nil, nil
+end
+
+function mm_scan_dir (name, line, wc)
+  scan_dist = tonumber ((wc[1] or ""):match ("%d")) or 1
+  scan_dir  = (wc[2] or ""):sub (1, 1):lower ()
+end
+
+function mm_scan_mob (name, line, wc)
+  local mob = wc[1] or ""
+  -- strip the leading flag groups scan puts before the name
+  mob = mob:gsub ("^%s*", "")
+  while true do
+    local rest = mob:match ("^%b()%s*(.*)$") or mob:match ("^%[[^%]]*%]%s*(.*)$")
+    if not rest then break end
+    mob = rest
+  end
+  if scan_dir and scan_dist then
+    scan_hits[#scan_hits + 1] = { dir = scan_dir, dist = scan_dist, name = mob }
+  else
+    here_mobs[#here_mobs + 1] = mob          -- "Right here you see:"
+  end
+end
+
+function mm_scan_end ()
+  EnableTriggerGroup ("mm_scan", false)
+  if debug_on then
+    note ("@x048scan@w: " .. #scan_hits .. " hit(s) from room " .. tostring (cur))
+    for _, h in ipairs (scan_hits) do
+      ColourNote (CLR_TAG, "", "     |", CLR_MSG, "",
+                  h.dist .. " " .. h.dir .. "  " .. h.name)
+    end
+  end
+  if not running or not scanning then return end
+  scanning = false
+  if scan_room ~= cur then return end   -- output from a room we have left
+  if decided then return end
+  decided = true
+  after_arrival ()
+end
+
+-- If no {roomchars} block ever arrives, the tag is not on - and that
+-- would mean the noscan mobs can never be spotted.  Say so plainly.
+function mm_here_timeout ()
+  if not dump_here then return end
+  dump_here = false
+  warn ("No room listing came back. The MUD is not sending {roomchars}, " ..
+        "so nothing can spot the noscan mobs. Try @x048tags roomchars on@w " ..
+        "by hand and run @x048" .. A.cmd .. " here@w again.")
+end
+
+-- A move went unanswered.  Deliberately does NOT re-send it - that walked
+-- us an extra room and desynchronised the whole sweep.  Instead ask the
+-- MUD where we actually are and carry on from there.  One dead exit is
+-- not a reason to abandon the sweep: an exit that loops straight back
+-- into the room you left produces no room change at all, and there is no
+-- point ever trying it again either way.
+function mm_timeout (g, id)
+  -- id ~= move_id means this timer belongs to a move that has long since
+  -- landed; the pending move is a different one and is not stalled.
+  if not running or g ~= gen or id ~= move_id or not pending then return end
+
+  if phase == "travel" then
+    stop ("Could not get into the Nenukon. Walk in yourself and try again.", true)
+    return
+  end
+
+  local from, dir = pending.from, pending.dir
+  pending = nil
+  queued  = {}             -- a beeline whose step failed is meaningless
+  stalls  = stalls + 1
+
+  if stalls > 8 then
+    stop ("Eight moves running went unanswered - stopping. The MUD is " ..
+          "probably badly lagged; try again in a moment.", true)
+    return
+  end
+
+  edges[from] = edges[from] or {}
+  if not edges[from][dir] then edges[from][dir] = -1 end
+
+  if debug_on then
+    note ("stall on '@x048" .. dir .. "@w' from room @x048" .. tostring (from) ..
+          "@w after " .. move_wait .. "s - marking it dead and resyncing.")
+  end
+
+  resyncing = true
+  Send_GMCP_Packet ("request room")
+  DoAfterSpecial (6, "mm_resync_timeout (" .. gen .. ")", 12)
+end
+
+function mm_resync_timeout (g)
+  if not running or g ~= gen or not resyncing then return end
+  resyncing = false
+  stop ("The MUD did not answer a room request either - stopping. Run it " ..
+        "again once things are moving.", true)
+end
+
+function mm_decide (g, seq)
+  if not running or g ~= gen or seq ~= arrival or decided then return end
+  decided = true
+  after_arrival ()
+end
+
+-- ===========================================================
+--  GMCP
+-- ===========================================================
+
+-- Printed once the fight is over, in the room the sweep stopped in.
+-- One more room.  Recomputed from where we are actually standing, not
+-- replayed, so it still does the right thing if you moved yourself while
+-- it was waiting.
+-- Off by default and absent from the help.  On, a single mmout walks the
+-- whole way out instead of one room per press; everything else steps.
+-- Shared by mmexpress and mmslow.  What the typed word means is what you
+-- get, whatever the current setting is: a toggle meant you had to already
+-- know the state to know what you were about to switch to.
+function mm_mode (name, line, wildcards)
+  local on = (name ~= "mm_slow")
+  local which = ((wildcards and wildcards[1]) or ""):lower ()
+  if which ~= "" then
+    local a = BYCMD[which] or BYKEY[which]
+    if not a then
+      warn ("No area called @x048" .. which .. "@w. Try " .. cmd_list ("@w, @x048") .. ".")
+      return
+    end
+    -- Three states: on, off, and "follow the general setting".  Asking
+    -- for the mode it is already set to clears it back to following,
+    -- which is the only way back to the default.
+    if area_express[a.key] == on then area_express[a.key] = nil
+    else area_express[a.key] = on end
+    save_map ()
+    local st = area_express[a.key]
+    note (a.label .. ": " .. ((st == nil)
+          and ("following the general setting (" ..
+               (express and "express" or "one room at a time") .. ")")
+          or (st and "express - it runs the whole way"
+                 or "one room at a time")) .. ".")
+    return
+  end
+
+  express = on
+  save_map ()
+  note (express
+        and "Express everywhere: hunts and walks run the whole way."
+        or "One room at a time everywhere: press @x048mmg@w or click @x048NEXT@w.")
+  local named = {}
+  for k, v in pairs (area_express) do
+    named[#named + 1] = (BYKEY[k] and BYKEY[k].cmd or k) ..
+                        " (" .. (v and "express" or "stepped") .. ")"
+  end
+  if #named > 0 then
+    note ("Set on their own, and unaffected: @x048" ..
+          table.concat (named, "@w, @x048") .. "@w.")
+  end
+end
+
+-- Defined further down, with the combat handling; declared here because
+-- mm_go is above it and would otherwise pick up a nil global.
+local resume_paused
+
+function mm_go ()
+  if step_once () then return end
+  -- an express run that a fight interrupted resumes on mmg as well as on
+  -- the RESUME link
+  if not running and resume_paused () then return end
+  if running then note ("Already on the move.")
+  else note ("Nothing to continue - pick something from the list first.") end
+end
+
+-- The delayed automatic list.  Only prints if nothing has moved on: same
+-- token, same room, and no sweep started in the meantime.
+-- 'where' answered with a room name.  Only a name unique to one room is
+-- any use: seventeen of Infamy's rooms are all called "Realm of Infamy".
+function mm_where_hit (name, line, wildcards)
+  if not where_wait then return end
+  local room = (wildcards[2] or ""):gsub ("%s+$", "")
+  local v = A and UNIQUE[A.key] and UNIQUE[A.key][room:lower ()]
+  if v then where_room = v end
+  -- The answer has started arriving, so stop waiting on the long timeout
+  -- and just allow a moment for any further lines.  In Infamy every mob
+  -- is aggressive, so a hunt is stopped and resumed in almost every room -
+  -- three seconds of waiting per resume would be most of the sweep.
+  if not where_settling then
+    where_settling = true
+    DoAfterSpecial (0.5, "mm_where_done (" .. gen .. ")", 12)
+  end
+end
+
+function mm_where_miss ()
+  if not where_wait then return end
+  where_wait = false
+  EnableTriggerGroup ("mm_where", false)
+  -- The keyword is named on purpose: if it is wrong, "where" finds
+  -- nothing and this is the only place that would show why.
+  stop ("@x048" .. (want_show or "it") .. "@w is not in " .. A.label ..
+        " at the moment - @x048where " ..
+        ((A.keywords and want and A.keywords[want]) or "?") ..
+        "@w found nothing.", true)
+end
+
+-- Whatever 'where' said, this decides what to do with it.
+function mm_where_done (g)
+  if not where_wait or g ~= gen or not running then return end
+  where_wait, where_settling = false, false
+  EnableTriggerGroup ("mm_where", false)
+
+  if where_room then
+    local lv = A.sections and A.sections[where_room]
+    note ("@x048where@w puts @x048" .. (want_show or "it") .. "@w in @x048" ..
+          roomname (where_room) .. "@w (@x048" .. where_room .. "@w)" ..
+          (lv and (" on @x048" .. lv .. "@w") or "") .. ".")
+    if lv then
+      want_levels, level_i = { lv }, 1
+      want_range = { [where_room] = true }
+    end
+  else
+    note ("@x048where@w could not pin it to one room - sweeping " ..
+          ((want_levels and want_levels[level_i]) or A.label) .. ".")
+  end
+
+  if want_levels and A.sections[cur] ~= want_levels[level_i]
+     and cross_step () then
+    return
+  end
+  SendNoEcho ("look")
+  begin_room ()
+end
+
+function mm_automenu (tok, room)
+  if tok ~= auto_token then return end
+  if running and pending then return end
+  if cur ~= room then return end
+  menu ()
+end
+
+-- Held out of OnPluginBroadcast: Lua gives a function 60 upvalues and it
+-- had outgrown that.  Both of these want a lot of state, so they live on
+-- their own rather than inside it.
+
+-- A run that walks on its own has to be stopped by a fight.  A stepped
+-- one does not: it is already stopped, and mmg simply will not move you
+-- (see step_once).
+-- What an express run was doing when a fight interrupted it, so it can be
+-- picked back up with a click instead of being retyped.  A stepped run
+-- needs none of this: it is already stopped between rooms, and mmg simply
+-- refuses to move you while you are fighting.
+local paused = nil
+
+local function offer_resume ()
+  if not paused then return end
+  flush_notes_now ()
+  local a = BYKEY[paused.area]
+  ColourTell (CLR_TAG, "", "[", CLR_NAME, "", "MazeMobber", CLR_TAG, "", "] ")
+  Hyperlink ((a and a.cmd or "mm") .. " resume",
+             "RESUME to " .. paused.show,
+             "Pick up where the fight interrupted it", CLR_HI, "black", 0, 1)
+  ColourNote (CLR_MSG, "", "  or type ", CLR_HI, "", "mmg")
+end
+
+local function combat_check ()
+  local st = gmcp ("char.status")
+  if type (st) ~= "table" then return end
+  local fighting = tonumber (st.state) == 8
+
+  if fighting then
+    if not running then return end
+    if not (out_walk or is_express ()) then return end
+    -- remember it before stop () clears everything
+    if out_walk then
+      paused = { kind = "out", show = "the way out", area = A.key }
+    elseif want_show then
+      paused = { kind = "hunt", show = want_show, noscan = noscan_mode,
+                 extra = wide, area = A.key }
+    elseif target then
+      paused = { kind = "goto", show = (leaving and (leaving.label or
+                 roomname (leaving.room))) or roomname (target),
+                 target = target, leg = leaving, area = A.key }
+    else
+      paused = nil
+    end
+    stop ("In combat - stopped" ..
+          (paused and (" - " .. paused.show) or "") ..
+          ". Finish the fight, then resume.", true)
+    return
+  end
+
+  -- out of it again: offer to pick up, once
+  if paused and not running and not paused.offered
+     and A and A.key == paused.area then
+    paused.offered = true
+    offer_resume ()
+  end
+end
+
+-- Shared by "<area> resume", the RESUME link and mmg.
+resume_paused = function ()
+  if not paused then return false end
+  local p = paused
+  paused = nil
+  if p.area and BYKEY[p.area] then use_area (BYKEY[p.area]) end
+  note ("Picking @x048" .. p.show .. "@w back up.")
+  if p.kind == "out" then
+    mm_out ("mm_out", "mmout", { [1] = "mmout" })
+  elseif p.kind == "goto" then
+    leaving = p.leg
+    if cur == p.target then take_exit ()
+    else begin ("goto", p.target, nil, false) end
+  else
+    begin ("hunt", nil, p.show, p.noscan, p.extra)
+  end
+  return true
+end
+
+local function repop_wipe ()
+    local z = gmcp ("comm.repop.zone")
+    if type (z) ~= "string" then
+      local t = gmcp ("comm.repop")
+      z = (type (t) == "table") and t.zone or nil
+    end
+    local ra = z and BYZONE[z]
+    if not ra then return end
+    local mp = MAPS[ra.key]
+    if mp then
+      local ways_out = {}
+      for from, t in pairs (mp.edges) do
+        for d, to in pairs (t) do
+          if to == 0 then
+            ways_out[from] = ways_out[from] or {}
+            ways_out[from][d] = 0
+          end
+        end
+      end
+      for k in pairs (mp.edges) do mp.edges[k] = nil end
+      for k in pairs (mp.exits) do mp.exits[k] = nil end
+      -- the ways out are the building, not the shuffle
+      for from, t in pairs (ways_out) do
+        mp.edges[from] = mp.edges[from] or {}
+        for d in pairs (t) do mp.edges[from][d] = 0 end
+      end
+    end
+    -- a fresh round of evidence: everything may now be counted again
+    seen_cycle = {}
+    repops[ra.key] = (repops[ra.key] or 0) + 1
+    if A and A.key == ra.key then
+      seed ()
+      visited, laps = {}, 0
+      queued = {}
+      absorb_room ()
+      -- Whatever the next click was going to do was worked out from the
+      -- old map, so make it work the move out again.
+      if step_waiting and step_action == "move" then step_dir = nil end
+      warn (ra.label .. " has repopped - the maze will have shuffled, so " ..
+            "the map goes and the exits get read again as we walk.")
+    end
+    save_map ()
+    return
+end
+
+function OnPluginBroadcast (msg, id, bname, text)
+  if id ~= GMCP_ID then return end
+
+  if text == "char.status" then combat_check () return end
+
+  -- The MUD says the area has repopped.  That is the moment the maze
+  -- reshuffles, so we are told rather than having to find out by walking
+  -- into a link that no longer goes where it did.  Exit directions can
+  -- move too, so those are dropped as well and read again room by room.
+  if text == "comm.repop" then repop_wipe () return end
+
+  if text ~= "room.info" then return end
+  local ri = gmcp ("room.info")
+  if type (ri) ~= "table" then return end
+  local num = tonumber (ri.num)
+  if not num then return end
+
+  local was = cur
+  absorb_room ()
+
+  -- Just come in: show the list without being asked.  Only when we have
+  -- arrived from outside, so sweeping through these rooms stays quiet.
+  -- Landed after using a level crossing.
+  if awaiting_cross and xover and A and A.roomname[num] then
+    awaiting_cross = false
+    local x = xover
+    local here = A.sections[num]
+    if here == x.from then
+      -- The crossing did not move us a level.  These exits can shuffle, so
+      -- try the next direction it lists before giving up on it.
+      if #x.alts > 0 then
+        local alt = table.remove (x.alts, 1)
+        warn ("That did not change level - trying @x048" .. alt .. "@w instead.")
+        -- Go back to the room the way out is in first: the direction we
+        -- tried may well have moved us somewhere else on this level.
+        local b2 = { room = x.b.room, cmds = { alt }, to = x.b.to,
+                     label = x.b.label, how = x.b.how }
+        x.b, xover = b2, x
+        crossing, cross_from, leaving = b2, x.from, b2
+        if num == b2.room then take_exit ()
+        else begin ("goto", b2.room, nil, false) end
+        return
+      end
+      -- Out of directions.  Stop rather than walk back to the same exit
+      -- and try it again for ever.
+      xover, crossing, leaving = nil, nil, nil
+      stop ("I could not get off @x048" .. tostring (here) .. "@w - the way " ..
+            "out of @x048" .. roomname (x.b.room) .. "@w did not work. " ..
+            "Take a portal yourself and run this again.", true)
+      return
+    end
+
+    -- Landed.  Pick the hunt back up exactly as it was.
+    xover, crossing, leaving = nil, nil, nil
+    target, journey, pending = nil, nil, nil
+    want_levels, level_i, want_range = x.levels, x.li, x.range
+    want, want_show, want_desc, noscan_mode = x.want, x.show, x.desc, x.noscan
+    running = true
+    if want_levels and here ~= want_levels[level_i] and cross_step () then
+      return
+    end
+    -- Neither the rooms already checked nor the lap count is reset here.
+    -- They belong to the hunt, not to one level, and clearing them every
+    -- time we cross means no level ever finishes a lap - so a mob listed
+    -- on two levels could bounce between them for ever.
+    note ("On @x048" .. tostring (here) .. "@w now.")
+    begin_room ()
+    return
+  end
+
+  -- On the wrong level - stepped through a crossing by accident, or
+  -- teleported.  Get back to the one we are searching before carrying on.
+  if running and not awaiting_cross and not xover and not leaving
+     and want_levels and A and A.sections and A.roomname[num]
+     and A.sections[num] and A.sections[num] ~= want_levels[level_i] then
+    warn ("That dropped me onto @x048" .. A.sections[num] ..
+          "@w - heading back.")
+    -- Shut that exit for routing, or the sweep walks straight back into
+    -- it.  This runs before the normal arrival handling, which is what
+    -- would otherwise have put the step on the map.
+    if pending and pending.from and pending.dir then
+      edges[pending.from] = edges[pending.from] or {}
+      edges[pending.from][pending.dir] = -1
+      -- It is also the level's way out right now.  Infamy's shuffles it,
+      -- so what we just fell through beats what the area data guessed.
+      local b = A.bridges and A.bridges[A.sections[pending.from]]
+      if b and b.room == pending.from and b.to == A.sections[num] then
+        b.cmds = { pending.dir }
+      end
+    end
+    pending = nil
+    if cross_step () then return end
+  end
+
+  -- Just crossed over (dived or surfaced): start the second leg.
+  if awaiting_leg and journey and A and A.roomname[num] then
+    if not journey.section or A.sections[num] == journey.section then
+      awaiting_leg = false
+      local leg = journey
+      journey = nil
+      leaving = leg
+      note ("Across - now for @x048" .. (leg.label or roomname (leg.room)) .. "@w.")
+      if num == leg.room then take_exit () else begin ("goto", leg.room, nil, false) end
+      return
+    end
+  end
+
+  -- Walked into one of the entrances from outside: switch to that area
+  -- and put its list up, without being asked.
+  -- Moved by hand while we were waiting on a click, so the direction we
+  -- had worked out is for a room we are no longer in.  Drop it and let
+  -- the next click work one out from here.
+  if step_waiting and not pending and step_action == "move"
+     and step_room and num ~= step_room then
+    step_dir  = nil
+    step_room = num
+  end
+
+  -- Waiting for a click counts as idle: a stepped hunt stays "running"
+  -- until it finds something, so testing `running` alone meant the list
+  -- never came up again once you had started one.  What should suppress
+  -- it is the sweep walking us in, and that always has a move in flight.
+  -- Walked in from outside: throw the old maze map away.  It was learned
+  -- on a previous visit and these mazes are shuffled by then, so routing
+  -- over it just walks links that are not there any more.  The ways OUT
+  -- are kept - those are the building, not the shuffle.
+  local into = ROOM2AREA[num]
+  if into and not pending and not running then
+    local was_area = ROOM2AREA[was]
+    if not was_area or was_area.key ~= into.key then
+      local mp = MAPS[into.key]
+      if mp then
+        local keep = {}
+        for from, t in pairs (mp.edges) do
+          for d, to in pairs (t) do
+            if to == 0 then
+              keep[from] = keep[from] or {}; keep[from][d] = 0
+            end
+          end
+        end
+        for k in pairs (mp.edges) do mp.edges[k] = nil end
+        for k in pairs (mp.exits) do mp.exits[k] = nil end
+        for from, t in pairs (keep) do
+          mp.edges[from] = mp.edges[from] or {}
+          for d in pairs (t) do mp.edges[from][d] = 0 end
+        end
+      end
+      -- A fresh visit is a fresh round of evidence about which exits
+      -- stay put.  In practice an area has repopped by the time anyone
+      -- goes back, so one visit is one cycle - and if it has NOT repopped
+      -- and the same exit agrees again, that is still evidence, just
+      -- weaker.  An exit that really moves gets caught the moment it
+      -- disagrees, which disqualifies it for good.
+      seen_cycle = {}
+      if A and A.key == into.key then
+        seed ()
+        visited, laps = {}, 0
+        absorb_room ()
+      end
+    end
+  end
+
+  local here_area = ROOM2AREA[num]
+  if here_area and here_area.auto[num] and not pending then
+    -- Show it whenever YOU arrive here, and never while this plugin is
+    -- the one doing the walking - a sweep passing back through an auto
+    -- room would otherwise reprint the list every lap.
+    --
+    -- The old test was "did you come from another area", which was wrong
+    -- both ways: the Cindery Village is entered from the High Chapel,
+    -- which is in the same area, so it never fired there at all; and
+    -- Sahuagin's four passages are only reachable from the alcoves below
+    -- them, so it never fired there either.
+    if not running then
+      use_area (here_area)
+      -- Half a second's grace: GMCP arrives before the room description, so
+      -- printing straight away puts the list above the desc and it just
+      -- scrolls away.  The token means a later room wins if you keep going.
+      auto_token = auto_token + 1
+      DoAfterSpecial (0.5, "mm_automenu (" .. auto_token .. ", " .. num .. ")", 12)
+    end
+  end
+
+  if not running then return end
+
+  -- Landed in a room outside the area that we know the way back from.
+  -- Checked before anything else, because it does not matter how we got
+  -- here - a step that led out, a resync that found us adrift - the answer
+  -- is the same: go back in and carry on.  Skipped during travel (we walk
+  -- through 2010 on the way in), and skipped if this room IS the exit we
+  -- were deliberately walking to.  Note it is not enough to ask whether
+  -- 'leaving' is set: every room on Prosper's list is a "place", so it is
+  -- set for any walk there, and testing it alone disabled recovery for the
+  -- whole area.
+  local back_in = A and A.recover and A.recover[num]
+  if back_in and phase ~= "travel"
+     and not (leaving and leaving.room == num)
+     and not (journey and journey.room == num) then
+    recovers = recovers + 1
+    if recovers > 5 then
+      stop ("Kept falling out into " .. (back_in.label or ("room " .. num)) ..
+            " and could not stay in " .. A.label .. " - stopped.", true)
+      return
+    end
+
+    -- The exit that led out is worth crossing off, same as the step-back
+    -- path does, so the sweep stops choosing it.
+    if pending and NAME[pending.from] then
+      record (pending.from, pending.dir, 0)
+    end
+    resyncing     = false
+    stepping_back = true
+
+    warn ("Dropped out into " .. (back_in.label or ("room " .. num)) ..
+          " - going back in with @x048" ..
+          table.concat (back_in.cmds, "@w, @x048") .. "@w.")
+
+    pending = { from = num, dir = back_in.dir }
+    for _, c in ipairs (back_in.cmds) do SendNoEcho (c) end
+    move_id = move_id + 1
+    DoAfterSpecial (move_wait, "mm_timeout (" .. gen .. "," ..
+                    move_id .. ")", 12)
+    return
+  end
+
+  if phase == "travel" then
+    if NAME[num] then
+      phase = (target and "goto") or "sweep"
+      pending = nil
+      if phase == "goto" then advance () else begin_room () end
+    end
+    return
+  end
+
+  if resyncing then
+    resyncing = false
+    pending   = nil
+    -- Carry on as whatever we were doing.  Calling begin_room () here
+    -- regardless turned a walk to a room into a sweep, which is where the
+    -- stray "scan" in Helegear came from.
+    if phase == "goto" then advance ()
+    else begin_room () end -- note: stalls is NOT cleared here; only a real
+    return                 -- move arriving counts as recovery
+  end
+
+  if not pending then return end
+  local from, dir = pending.from, pending.dir
+  pending = nil
+  stalls  = 0
+
+  if not NAME[num] then
+    -- A maze exit can lead clean out of the area; only the mapped ones
+    -- are known in advance.  Cross it off for good, then step back the
+    -- way we came and carry on rather than abandoning the sweep.
+    if NAME[from] then record (from, dir, 0) end
+
+    -- If we fell out into the room the area is entered FROM, the way back
+    -- is the way in, not the way we came.  Prosper drops you into The
+    -- Imaginarium, where the reverse of the step is a corridor deeper
+    -- into Lemdagor and "up" is the theatre.
+    local ent = A.entrance
+    if ent and ent.goto_room == num and ent.run and not stepping_back then
+      stepping_back = true
+      warn ("That exit leaves " .. A.label .. " (room " .. num ..
+            ") - crossing it off and going back in with @x048" ..
+            ent.run .. "@w.")
+      pending = { from = num, dir = ent.run }
+      SendNoEcho (ent.run)
+      move_id = move_id + 1
+      DoAfterSpecial (move_wait, "mm_timeout (" .. gen .. "," ..
+                      move_id .. ")", 12)
+      return
+    end
+
+    local back = OPPOSITE[dir]
+    if back and not stepping_back then
+      stepping_back = true
+      warn ("That exit leaves " .. A.label .. " (room " .. num ..
+            ") - crossing it off and stepping " .. back .. " to get back in.")
+      pending = { from = num, dir = back }
+      SendNoEcho (back)
+      move_id = move_id + 1
+      DoAfterSpecial (move_wait, "mm_timeout (" .. gen .. "," ..
+                      move_id .. ")", 12)
+      return
+    end
+    stop ("Left " .. A.label .. " (now in room " .. num ..
+          ") and could not step back - stopped.", true)
+    return
+  end
+
+  stepping_back = false
+  recovers      = 0        -- back inside, so the run is healthy again
+  -- coming back in from outside there is no edge worth recording
+  if NAME[from] then record (from, dir, num) end
+
+  -- Forget the last room's listing here, not when the next one starts.
+  -- A room with nobody in it prints no {roomchars} block at all, so
+  -- clearing it there left the previous room's list standing - and the
+  -- next check matched it and announced a mob two rooms back.
+  here_mobs = {}
+  rc_seen, rc_waited = false, false
+
+  if phase == "goto" then
+    advance ()
+  else
+    begin_room ()
+  end
+end
+
+-- ===========================================================
+--  Commands
+-- ===========================================================
+
+function begin (kind, tgt, mobname, noscan, wide_search)
+  if running then stop () end
+  recovers = 0
+  absorb_room ()
+
+  -- A crossing walks to the portal with begin (), so the budget has to
+  -- survive it or a hunt that keeps crossing never runs out of steps.
+  if not xover then steps = 0 end
+  queued    = {}
+  sightings = {}
+  visited   = {}
+  laps      = 0
+  gen       = gen + 1
+  running   = true
+  pending   = nil
+  target    = (kind == "goto") and tgt or nil
+  noscan_mode = noscan and true or false
+  resyncing   = false
+  stalls      = 0
+  rc_warned   = false
+  rc_blocks   = 0
+  rooms_hit   = 0
+  wide       = wide_search and true or false
+  reopened   = false
+  widened    = false
+  want       = mobname and normalise (mobname) or nil
+  want_range = (kind == "hunt" and not wide) and RANGE[want] or nil
+
+  -- Areas that come in levels say which one each mob lives on, most
+  -- likely first.  The level we are on is read from the room number, so a
+  -- random teleport between levels changes nothing.
+  want_levels, level_i = nil, 1
+  if kind == "hunt" then
+    xover, crossing, awaiting_cross = nil, nil, false
+  end
+  if kind == "hunt" and not wide and A.levels and want and A.levels[want] then
+    want_levels = A.levels[want]
+    -- A mob with rooms of its own keeps them.  The level says which part
+    -- of the area to be standing in, not which rooms to search once we
+    -- are there - and overwriting the range here threw away exactly the
+    -- knowledge that turns a hunt into one walk instead of a whole lap.
+    want_range = RANGE[want] or rooms_of (want_levels[1])
+  end
+  want_desc = want and ROOMDESC[want] or nil
+  want_show = mobname
+
+  -- Make sure the two tagged outputs we depend on are actually on, so
+  -- this works whether or not Search_and_Destroy is loaded.
+  SendNoEcho ("tags scan on")
+  SendNoEcho ("tags roomchars on")
+
+  if kind == "goto" then
+    note ("Heading for @x048" .. (NAME[tgt] or tgt) .. "@w (@x048" .. tgt .. "@w).")
+  elseif noscan then
+    note ("Hunting @x048" .. mobname .. "@w. It is @x048noscan@w - no " ..
+          "scanning at all, just walking every room and reading it.")
+  else
+    local rn = 0
+    if want_range then for _ in pairs (want_range) do rn = rn + 1 end end
+    if rn == 1 then
+      local only
+      for v in pairs (want_range) do only = v end
+      note ("Hunting @x048" .. mobname .. "@w - only ever seen in @x048" ..
+            (NAME[only] or only) .. "@w (@x048" .. only .. "@w), going straight there.")
+    elseif rn > 0 then
+      note ("Hunting @x048" .. mobname .. "@w - checking the @x048" .. rn ..
+            "@w rooms it actually uses.")
+    else
+      note ("Hunting @x048" .. mobname .. "@w across the whole area.")
+    end
+    -- Some rooms have no route the mapper knows about - Monuhi's crypt in
+    -- the Nenukon is the one that matters.  Say so before walking.
+    if want_range and not A.noroute[cur] then
+      local all_walled = true
+      for v in pairs (want_range) do
+        if not A.noroute[v] then all_walled = false break end
+      end
+      if all_walled then
+        warn ("Heads up: the mapper knows no way into " ..
+              roomname (next (want_range)) .. ", so I cannot walk there. " ..
+              "Get inside yourself and run this again - from in there it " ..
+              "will find it fine.")
+      end
+    end
+  end
+
+  if NAME[cur] then
+    phase = (kind == "goto") and "goto" or "sweep"
+    if phase == "goto" then
+      advance ()
+    else
+      -- One 'where' can pin the room outright when the area supports it.
+      if kind == "hunt" and A.uses_where and want
+         and A.keywords and A.keywords[want] then
+        where_wait, where_room, where_settling = true, nil, false
+        EnableTriggerGroup ("mm_where", true)
+        SendNoEcho ("where " .. A.keywords[want])
+        DoAfterSpecial (3, "mm_where_done (" .. gen .. ")", 12)
+        return
+      end
+      if want_levels and A.sections[cur] ~= want_levels[level_i]
+         and cross_step () then
+        return
+      end
+      -- Nothing has printed this room for us, so ask for it once.  Without
+      -- this, a noscan mob standing in the room you start in gets missed.
+      SendNoEcho ("look")
+      begin_room ()
+    end
+  else
+    phase = "travel"
+    note ("Not in " .. A.label .. " - taking you to the way in first.")
+    Execute ("mapper goto " .. A.entrance.goto_room)
+    DoAfterSpecial (30, "mm_entry (" .. gen .. ")", 12)
+  end
+end
+
+-- Head for whichever of this area's ways out is nearest.  Some of them
+-- need a command once you get there (the Gardens' south door, Rose
+-- Ether's "inhale ether"); the rest you just walk up from.
+function mm_out (name, line, wildcards)
+  local word = (wildcards[1] or ""):lower ()
+  absorb_room ()
+  -- Same way round as mm: the named forms mean their own area, mmout
+  -- means wherever you are standing - and that falls back to the GMCP
+  -- zone, because most of Gwillimberry is not a Gardens maze room and
+  -- mmout used to just give up there.
+  if word == "mmo" then word = "mmout" end
+  local area = BYCMD[word:gsub ("out$", "")]
+  if not area then
+    area = ROOM2AREA[cur]
+    if not area then
+      local ri = gmcp ("room.info")
+      local zone = (type (ri) == "table") and ri.zone or nil
+      area = zone and BYZONE[zone] or nil
+    end
+  end
+  if not area then
+    note ("You are not in any maze I know - nothing to walk out of.")
+    return
+  end
+  -- Already walking out?  Then this press IS the next room - the same as
+  -- clicking NEXT.  Pressing mmout again and being told "already walking"
+  -- while nothing moved is no use to anybody.
+  if running and out_walk and A and A.key == area.key then
+    if step_once () then return end
+  end
+  if running then stop () end
+  use_area (area)
+  absorb_room ()
+
+  local ways = here_list (A.outs)
+  if #A.outs == 0 then
+    note (A.label .. " is recallable - just recall.")
+    return
+  end
+  if #ways == 0 then
+    note ("Nothing to leave by from this part of " .. A.label .. ".")
+    return
+  end
+  if not NAME[cur] then
+    note ("You are already outside " .. A.label .. " - nothing to walk " ..
+          "out of.")
+    return
+  end
+
+  local best, pick
+  for _, o in ipairs (ways) do
+    local p = bfs (cur, function (x) return x == o.room end)
+    if p and (not best or #p < best) then best, pick = #p, o end
+  end
+  if not pick then
+    local names = {}
+    for _, o in ipairs (ways) do
+      names[#names + 1] = (o.label or roomname (o.room)) .. " (" .. o.room .. ")"
+    end
+    note ("Searching for a way out of " .. A.label .. " - " ..
+          table.concat (names, " or ") .. ", whichever turns up first.")
+    leaving = ways[1]
+    out_walk = true
+    begin ("goto", ways[1].room, nil, false)
+    return
+  end
+
+  leaving = pick
+  if best == 0 then
+    take_exit ()
+    return
+  end
+  note ("Nearest way out is @x048" .. (pick.label or roomname (pick.room)) ..
+        "@w, @x048" .. best .. "@w rooms away - " .. pick.how .. ".")
+  out_walk = true
+  begin ("goto", pick.room, nil, false)
+end
+
+function mm_entry (g)
+  if not running or g ~= gen or phase ~= "travel" then return end
+  if NAME[cur] then return end   -- the room.info handler has taken over
+  -- Some areas need a stored walk after the mapper drops us off.
+  if A.entrance.run and cur == A.entrance.goto_room then
+    note ("Running the entrance walk in.")
+    SendNoEcho (A.entrance.run)
+    DoAfterSpecial (30, "mm_entry (" .. gen .. ")", 12)
+    return
+  end
+  stop ("The mapper did not get me into " .. A.label .. ". Walk in " ..
+        "yourself and try again.", true)
+end
+
+function menu ()
+  note_now (A.label .. ((#MOBS > 0) and " - click a mob to hunt it:"
+                                 or " - click a room to walk to it:"))
+  local shown_level
+  for i, m in ipairs (MOBS) do
+    local nm = m[1]
+    if m[3] and m[3] ~= shown_level then
+      shown_level = m[3]
+      ColourNote (CLR_TAG, "", "   -- " .. m[3] .. " --")
+    end
+    ColourTell (CLR_TAG, "", "   ")
+    Hyperlink (A.cmd .. " " .. i, string.format ("%2d", i), "Hunt " .. nm,
+               CLR_HI, "black", 0, 1)
+    ColourTell (CLR_TAG, "", "  ")
+    Hyperlink (A.cmd .. " " .. i, nm, "Hunt " .. nm, CLR_MSG, "black", 0, 1)
+    -- what we know about where it lives, and whether it scans
+    local rg, cnt, only = RANGE[normalise (nm)], 0, nil
+    if rg then for v in pairs (rg) do cnt = cnt + 1; only = v end end
+    local tail = ""
+    if cnt == 1 then tail = "always in " .. roomname (only)
+    elseif cnt > 0 then tail = cnt .. " rooms" end
+    if m[2] then
+      tail = (tail ~= "" and (tail .. ", ") or "") .. "noscan"
+    end
+    if m[4] then
+      tail = (tail ~= "" and (tail .. " - ") or "") .. m[4]
+    end
+    ColourNote (CLR_TAG, "", string.rep (" ", math.max (1, 30 - #nm)) .. tail)
+  end
+
+  local shown = A.places
+  if #shown > 0 then
+    ColourNote (CLR_TAG, "", "   -- " .. A.outlabel .. " --")
+    for i, p in ipairs (shown) do
+      local k = #MOBS + i
+      local label = p.label or roomname (p.room)
+      -- The rooms off the maze - Prosper's four up rooms - are the ones
+      -- worth picking out, the way STTNG did it: they are the places you
+      -- actually go, the rest are just maze rooms you can aim at.
+      local side = not A.maze[p.room]
+      ColourTell (CLR_TAG, "", "   ")
+      Hyperlink (A.cmd .. " " .. k, string.format ("%2d", k), "Go and " .. p.how,
+                 CLR_HI, "black", 0, 1)
+      ColourTell (CLR_TAG, "", "  ")
+      Hyperlink (A.cmd .. " " .. k, label, "Go and " .. p.how,
+                 side and CLR_NAME or CLR_MSG, "black", 0, 1)
+      local extra = ""
+      if p.section and A.sections[cur] and A.sections[cur] ~= p.section then
+        local b = A.bridges[A.sections[cur]]
+        if b then extra = "  via " .. b.how end
+      end
+      -- "walk there" on every line is noise; only say how when there is
+      -- something to do beyond walking.
+      local how = (p.how == "walk there") and "" or (p.how .. extra)
+      if how ~= "" then how = how .. "  " end
+      ColourNote (CLR_TAG, "", string.rep (" ", math.max (1, 32 - #label)) ..
+                  how .. "(" .. p.room .. ")" ..
+                  ((cur == p.room) and "  <- you are here" or ""))
+    end
+  end
+
+  ColourNote (CLR_TAG, "", "   " .. known_links () .. " links learned here.   " ..
+    A.cmd .. ((#MOBS > 0) and " <mob>" or " <room>") ..
+    " / mmg / stop" .. ((#A.outs > 0) and " / mmout" or "") ..
+    " / seen / map / reset / help")
+end
+
+local function pick (n)
+  local m = MOBS[n]
+  if m then
+    begin ("hunt", nil, m[1], m[2])
+    return
+  end
+  local p = A.places[n - #MOBS]
+  if p then
+    journey, awaiting_leg = nil, false
+    -- In the other half of the area?  Cross over first, then carry on.
+    if p.section and A.sections[cur] and A.sections[cur] ~= p.section then
+      local b = A.bridges[A.sections[cur]]
+      if not b then
+        warn ("I know no way across to " .. (p.label or roomname (p.room)) ..
+              " from here.")
+        return
+      end
+      journey = p
+      leaving = b
+      note ("@x048" .. (p.label or roomname (p.room)) .. "@w is past the " ..
+            b.how .. " - going to @x048" .. (b.label or roomname (b.room)) ..
+            "@w first.")
+      if cur == b.room then take_exit () return end
+      begin ("goto", b.room, nil, false)
+      return
+    end
+    leaving = p
+    if cur == p.room then take_exit () return end
+    note ("Heading for @x048" .. (p.label or roomname (p.room)) ..
+          "@w - " .. p.how .. ".")
+    begin ("goto", p.room, nil, false)
+    return
+  end
+  warn ("There is no entry " .. tostring (n) .. ". Type @x048" .. A.cmd .. "@w.")
+end
+
+local function show_seen ()
+  local any = false
+  note_now ("Mobs scanned during the last sweep:")
+  for mob, room in pairs (sightings) do
+    any = true
+    ColourNote (CLR_MSG, "", "   " .. mob, CLR_TAG, "", "  seen from room " .. room)
+  end
+  if not any then
+    ColourNote (CLR_TAG, "", "   (nothing yet - run a hunt first)")
+  end
+end
+
+local function show_map ()
+  note_now ("Learned links (" .. known_links () .. "):")
+  local vnums = {}
+  for v in pairs (edges) do vnums[#vnums + 1] = v end
+  table.sort (vnums)
+  for _, from in ipairs (vnums) do
+    local parts = {}
+    for _, d in ipairs (DIRS) do
+      local to = edges[from][d]
+      if to == 0 then parts[#parts + 1] = d .. "->out"
+      elseif to == -1 then parts[#parts + 1] = d .. "->wall"
+      elseif to then parts[#parts + 1] = d .. "->" .. to end
+    end
+    if #parts > 0 then
+      ColourNote (CLR_TAG, "", "   " .. from .. "  ",
+                  CLR_HI, "", table.concat (parts, "  "))
+    end
+  end
+end
+
+local function show_help ()
+  -- Deliberately written around mm / mmg / mmout only.  Every area also
+  -- answers to its own word and its own number and out forms, but naming
+  -- them all turned the help into a list of synonyms - three commands
+  -- cover everything, so those are what this teaches.
+  local lines = {
+    "@x048mm@w            the clickable list for the area you are standing in",
+    "@x048mmg@w           walk one more room - or click @x048NEXT@w",
+    "@x048mmout@w or @x048mmo@w  walk back out, one room per press",
+    "",
+    "Pick a mob or a room off the list and it walks @x048one room@w and reads",
+    "it, then stops and waits for you. Click @x048NEXT@w or type @x048mmg@w for the",
+    "room after that. While you are in combat it will not move you at all -",
+    "finish the fight, then carry on. It tells you when you have arrived.",
+    "",
+    "@x048WHERE IT WORKS@w",
+  }
+  for _, l in ipairs (area_lines ()) do lines[#lines + 1] = l end
+  local more = {
+    "",
+    "Standing anywhere in one of those, @x048mm@w puts its list up - it will walk",
+    "you to the maze entrance first if you are not in the maze yet.",
+    "",
+    "@x048THE REST@w",
+    "mm <mob name>    hunt a mob by name, whether it is on the list or not",
+    "mm all <mob>     search the whole area, not just its usual rooms",
+    "mm stop          give up on the current hunt",
+    "mmslow           one room per press instead of the whole walk",
+    "mmexpress        back to walking the whole way (the default)",
+    "mm resume        pick a run back up after a fight stopped it",
+    "mm map           the links learned here so far",
+    "mm seen          what the last sweep scanned, and where",
+    "mm here          what this room lists, flags stripped off",
+    "mm reset         forget this area's map and start again",
+    "mm fixed         exits here that have not moved between visits",
+    "mm forget        clear that and start watching again",
+    "mm wait <secs>   how long to wait on a move (default 25)",
+    "mm desc          the room-description overrides, and how to add one",
+    "mm reload        load this plugin again after an update",
+    "mm version       which build is running",
+    "mm debug         echo every room listing and scan as it arrives",
+    "",
+    "Mobs that show up in a scan are found by scanning as it goes; the ones",
+    "that do not are found by walking in and reading the room. Where a mob",
+    "has only ever been seen in certain rooms, only those get searched.",
+    "",
+    "These mazes reshuffle on repop. The MUD says when that happens, so the",
+    "map is dropped and learned again as you walk.",
+  }
+  for _, l in ipairs (more) do lines[#lines + 1] = l end
+  note_now ("MazeMobber @x048v" .. VERSION .. "@w" ..
+            (A and (" - " .. A.label) or ""))
+  -- through cnote, not ColourNote: these lines carry @x colour codes
+  -- and ColourNote prints those as literal text
+  for _, l in ipairs (lines) do cnote ("   @w" .. l) end
+end
+
+function mm_command (name, line, wildcards)
+  out_walk = false
+  local word = (wildcards[1] or ""):lower ()
+  local arg  = (wildcards[2] or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
+
+  absorb_room ()
+
+  -- These do not need you to be standing in a maze, so they are handled
+  -- before the area is worked out.  They used to sit after it, which meant
+  -- "mm help" and "mm reload" answered "you are not standing in any maze I
+  -- know" from anywhere else in the world - and mm reload silently did
+  -- nothing at all.
+  if arg == "version" then
+    note ("MazeMobber @x048v" .. VERSION .. "@w.")
+    return
+  end
+
+  if arg == "reload" then
+    if running then stop () end
+    save_map ()
+    note ("Reloading MazeMobber (now @x048v" .. VERSION .. "@w) from disk...")
+    -- from the WORLD's script space: ReloadPlugin tears this one down, so
+    -- a timer set here would die with it
+    Execute (GetAlphaOption ("script_prefix") ..
+             'DoAfterSpecial(1, "ReloadPlugin(\'' .. GetPluginID () .. '\')", sendto.script)')
+    return
+  end
+
+  if arg == "help" then show_help () return end
+
+  if arg == "resume" then
+    if not resume_paused () then
+      note ("Nothing to resume.")
+    end
+    return
+  end
+
+  -- Which area does this command belong to?  A named command is gated to
+  -- its own area; "mm" means whichever one you are standing in.
+  local area = BYCMD[word]
+  if not area then
+    area = ROOM2AREA[cur]
+    if not area then
+      -- Not in a maze, but standing somewhere else in one of these areas
+      -- counts: Xylmos means Rose Ether, Gwillimberry means the Gardens.
+      local ri = gmcp ("room.info")
+      local zone = (type (ri) == "table") and ri.zone or nil
+      area = zone and BYZONE[zone] or nil
+    end
+    if not area then
+      warn ("You are not standing in any maze I know. Use @x048" ..
+            cmd_list ("@w, @x048") .. "@w by name to be taken to one.")
+      return
+    end
+  end
+
+  if running and A and A.key ~= area.key then stop () end
+  if not A or A.key ~= area.key then use_area (area) end
+
+  if arg == "" then
+    if NAME[cur] then menu () return end
+    -- Outside the maze itself: go to the way in, then show the list.
+    menu_on_arrival = true
+    note ("Not in " .. A.label .. " yet - taking you to @x048" ..
+          roomname (A.entrance.goto_room) .. "@w first.")
+    begin ("goto", A.entrance.goto_room, nil, false)
+    return
+  end
+
+  local n = tonumber (arg:match ("^(%d+)$"))
+  if n then pick (n) return end
+
+  if arg == "fixed" or arg == "forget" then
+    local rooms = learned[A.key] or {}
+    if arg == "forget" then
+      learned[A.key] = nil
+      save_map ()
+      note ("Forgotten what I had worked out about " .. A.label ..
+            "'s exits - it starts watching again from scratch.")
+      return
+    end
+    local proven, watching, moved = {}, 0, {}
+    for from, ds in pairs (rooms) do
+      for d, e in pairs (ds) do
+        if e.bad == 0 and e.n >= FIXED_AFTER then
+          proven[#proven + 1] = { from = from, d = d, e = e }
+        elseif e.bad > 0 then
+          moved[d] = (moved[d] or 0) + 1        -- proved to shuffle
+        else
+          watching = watching + 1
+        end
+      end
+    end
+    table.sort (proven, function (x, y)
+      if x.from ~= y.from then return x.from < y.from end
+      return x.d < y.d
+    end)
+    note_now (A.label .. " - exits that have not moved between visits:")
+    if #proven == 0 then
+      ColourNote (CLR_TAG, "", "   (none proved yet - an exit counts once per " ..
+                  "REPOP and needs " .. FIXED_AFTER .. " repops agreeing)")
+    end
+    for _, p in ipairs (proven) do
+      ColourNote (CLR_HI, "", string.format ("   %d %-2s", p.from, p.d),
+                  CLR_MSG, "", " -> ",
+                  CLR_HI, "", tostring (p.e.to),
+                  CLR_TAG, "", string.format ("   (%d visits agreed", p.e.n) ..
+                  (((repops[A.key] or 0) - (p.e.r0 or 0) > 0)
+                    and string.format (", across %d repop(s))",
+                                       (repops[A.key] or 0) - (p.e.r0 or 0))
+                    or ", no repop seen yet)"))
+    end
+    -- by direction, so a rule like "west never moves" would show up
+    local byd = {}
+    for _, p in ipairs (proven) do byd[p.d] = (byd[p.d] or 0) + 1 end
+    local bits = {}
+    for _, d in ipairs (DIRS) do
+      if byd[d] or moved[d] then
+        bits[#bits + 1] = d .. ": " .. (byd[d] or 0) .. " fixed, " ..
+                          (moved[d] or 0) .. " shuffle"
+      end
+    end
+    if #bits > 0 then
+      ColourNote (CLR_TAG, "", "   by direction - " .. table.concat (bits, ";  "))
+    end
+    ColourNote (CLR_TAG, "", "   " .. #proven .. " proved, " ..
+                watching .. " still being watched, " ..
+                (function () local n = 0
+                   for _, v in pairs (moved) do n = n + v end return n end) () ..
+                " proved to shuffle.   " .. A.cmd ..
+                " forget clears them for this area.")
+    return
+  end
+
+  if arg == "debug" then
+    debug_on = not debug_on
+    note ("Debug is now @x048" .. (debug_on and "on" or "off") .. "@w.")
+    return
+  end
+
+  if arg == "here" then
+    -- Ask the MUD to print this room again and show what it lists, so a
+    -- mob whose description does not match its name can be pinned down.
+    dump_here = true
+    here_mobs = {}
+    SendNoEcho ("tags roomchars on")
+    SendNoEcho ("look")
+    DoAfterSpecial (3, "mm_here_timeout ()", 12)
+    return
+  end
+
+  local w = arg:match ("^wait%s+(%d+)$")
+  if w then
+    move_wait = math.max (5, math.min (120, tonumber (w)))
+    save_map ()
+    note ("Will wait @x048" .. move_wait .. "@w seconds for a move to be " ..
+          "answered before writing that exit off.")
+    return
+  end
+  if arg == "wait" then
+    note ("Currently waiting @x048" .. move_wait .. "@w seconds per move. " ..
+          "Change it with @x048" .. A.cmd .. " wait <seconds>@w.")
+    return
+  end
+
+  local dmob, dphrase = arg:match ("^desc%s+(.-)%s*=%s*(.+)$")
+  if dmob then
+    ROOMDESC[normalise (dmob)] = dphrase:lower ()
+    save_descs ()
+    note ("Noted: @x048" .. dmob .. "@w is recognised in a room by \"@x048" ..
+          dphrase .. "@w\".")
+    return
+  end
+  if arg == "desc" then
+    note ("Room-description overrides:")
+    for k, v in pairs (ROOMDESC) do
+      ColourNote (CLR_MSG, "", "   " .. k, CLR_TAG, "", "  ->  ", CLR_HI, "", v)
+    end
+    ColourNote (CLR_TAG, "", "   set one with:  nenukon desc <mob> = <phrase>")
+    return
+  end
+
+  if arg == "stop" then
+    if running then stop ("Stopped.") else note ("Not sweeping.") end
+  elseif arg == "seen" then
+    show_seen ()
+  elseif arg == "map" then
+    show_map ()
+  elseif arg == "reset" then
+    stop ()
+    edges, exits = {}, {}
+    seed ()
+    save_map ()
+    note ("Map forgotten. The next sweep starts from scratch.")
+  else
+    -- anything else is a mob name - hunt it whether it is on the list or
+    -- not.  "all <mob>" ignores the room range and sweeps everything.
+    local wide_search = false
+    local rest = arg:match ("^all%s+(.+)$")
+    if rest then wide_search, arg = true, rest end
+    local noscan = false
+    for _, m in ipairs (MOBS) do
+      if normalise (m[1]) == normalise (arg) then noscan = m[2] end
+    end
+    begin ("hunt", nil, arg, noscan, wide_search)
+  end
+end
+
+-- ===========================================================
+
+function OnPluginInstall ()
+  load_map ()
+  prime_known ()   -- after loading, so real observations win
+  load_descs ()
+  local ri = gmcp ("room.info")
+  if type (ri) == "table" then cur = tonumber (ri.num) end
+  if cur and ROOM2AREA[cur] then use_area (ROOM2AREA[cur]) end
+  absorb_room ()
+  -- One short line.  Listing every area word and the learned-link count
+  -- made the longest message this plugin prints the least useful one -
+  -- mm help has the area list, and keeps itself current.
+  note ("@x048v" .. VERSION .. "@w loaded - Type @x048mm@w in a qualified " ..
+        "area. See @x048mm help@w for a list.")
+end
+
+function OnPluginClose () save_map () end
+function OnPluginDisable () stop () end
+
+]]>
+</script>
+</muclient>
