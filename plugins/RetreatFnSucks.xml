@@ -8,7 +8,7 @@
    language="Lua"
    purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
    date_written="2026-08-28"
-   version="3.0"
+   version="3.1"
    >
 </plugin>
 
@@ -42,6 +42,10 @@ THE CHAIN IS A SHADOW FEATURE
   lands, and picks its own method: retreat if something is on us, a
   plain move if the room is clear (a plain move cannot leave combat,
   so "Not while you are fighting!" redoes that leg as a retreat).
+  ONLY that refusal line redoes it.  A combat status arriving while we
+  walk proves nothing about whether the move went through, and in a
+  nomap room the walk has already moved us - retreating on top of it
+  threw us a second room away (fixed in 3.1).
 
 DECIDED BY THE MUD'S OWN LINES, NOT BY GMCP
   This is the important lesson in this plugin.  Everything used to
@@ -303,7 +307,7 @@ local CLR_HI   = "#00FF87"   -- x048
 local TAG = "RetreatFnSucks"
 
 -- Shown in the load line.  Keep in step with version= in the header above.
-local VERSION = "3.0"
+local VERSION = "3.1"
 
 local function echo (msg)
   ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
@@ -857,16 +861,15 @@ function OnPluginTelnetSubnegotiation (theType, data)
         if not gSilent then
           echoHi ("Retreat landed - now going ", dir, ".")
         end
-
-      -- Something engaged us on a leg we were walking.  A plain move will not
-      -- get out of a fight, so redo that leg as a retreat.
-      elseif gWalked and gEnabled and queueLive () then
-        local dir = gQueue[1]
-        sendRetreat ()
-        if not gSilent then
-          echoHi ("Caught in a fight - retreating ", dir, " instead.")
-        end
       end
+
+      -- NOTE: a fight starting while we are walking a leg does NOT turn that
+      -- leg into a retreat.  A combat status says nothing about whether the
+      -- walk went through, and in a nomap room (no room number, so no room
+      -- change to tell us it landed) the walk HAS moved us - sending "retreat
+      -- south" on top of it then throws us a second room away.  The refusal
+      -- line "Not while you are fighting!" is the only thing that proves the
+      -- move did not happen, and RetreatBlocked handles that.
     else
       -- Combat broke.  If we had just landed, the room is empty: walk the
       -- next leg rather than retreating it.  If we never moved at all, the
