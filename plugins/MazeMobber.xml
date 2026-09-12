@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="3.2"
+   version="4.0"
    >
 </plugin>
 
@@ -38,6 +38,12 @@ WHAT IT DOES
     prom     Promises, the ocean off Westport      25825 to 25836
     nix      The Nixie Rebellion, off Rhodus       10330 to 10345
     astral   Chamber of Destiny and the Passages   27898 to 27920
+    ft1      Fairy Tales 1, the Underground Sea    1224 to 1234
+    scar     Scarred Lands, the Winding Tunnels    34036 to 34043
+    nott     Nottingham, Sherwood Forest          11077 to 11088
+    dead     Deadlights, the Surface              16877 to 16889
+    mayhem   Mayhem, In The Mist                  1888 to 1894
+    vale     Sundered Vale, the Maze of Tunnels   1079 to 1116
     sahu     Sahuagin, four doors up to the princes 34600 to 34613
 
 COMMANDS
@@ -408,7 +414,7 @@ WHEN EDITING
 
 <aliases>
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|mm)(?:\s+(.*))?$"
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|mm)(?:\s+(.*))?$"
     script="mm_command" name="mm_command"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -419,7 +425,7 @@ WHEN EDITING
        Digits only, which is what keeps this off mmg, mmo, mmout and
        mmexpress. -->
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|mm)(\d+)$"
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|mm)(\d+)$"
     script="mm_command" name="mm_number"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -447,7 +453,7 @@ WHEN EDITING
   </alias>
 
   <alias
-    match="^(gwillout|gardout|nenukonout|xylout|heleout|prosperout|infamyout|sahuout|mmout|mmo)$"
+    match="^(gwillout|gardout|nenukonout|xylout|heleout|prosperout|infamyout|sahuout|deadout|mmout|mmo)$"
     script="mm_out" name="mm_out"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -1900,6 +1906,362 @@ local AREAS = {
     mobs = {
     },
   },
+  {
+    key = "ft1", cmd = "ft1", label = "The Underground Sea", zone = "ft1",
+    lo = 1224, hi = 1234,
+    roomname = {
+      [1224] = "Royal Bedchamber",
+      [1225] = "Underground Sea",
+      [1226] = "Underground Sea",
+      [1227] = "Underground Sea",
+      [1228] = "Underground Sea",
+      [1229] = "Underground Sea",
+      [1230] = "Underground Sea",
+      [1231] = "Underground Sea",
+      [1232] = "Underground Sea",
+      [1233] = "Underground Sea",
+      [1234] = "A Great Palace",
+    },
+    -- Nine stretches of underground sea.  The bedchamber you drop in
+    -- from and the palace at the far side are fixed.
+    maze = { [1225]=true, [1226]=true, [1227]=true, [1228]=true, [1229]=true,
+             [1230]=true, [1231]=true, [1232]=true, [1233]=true },
+    -- Only the trapdoor down out of the bedchamber.  Which bit of sea
+    -- touches which is what moves, and the way into the palace is off a
+    -- sea room, so that moves with it - walking finds it.
+    seed = { {1224,"d",1227}, },
+    doors = {
+      [1224] = { d = { "open d" } },
+    },
+    exitdirs = {
+      [1224] = { "d", "n" },
+      [1225] = { "e", "n", "s", "w" },
+      [1226] = { "e", "n", "s", "w" },
+      [1228] = { "e", "n", "s", "w" },
+      [1229] = { "e", "n", "s", "w" },
+      [1230] = { "e", "n", "s", "w" },
+      [1231] = { "e", "n", "s", "w" },
+      [1232] = { "e", "n", "s", "w" },
+      [1233] = { "e", "n", "s", "w" },
+      [1227] = { "e", "n", "s", "u", "w" },
+      [1234] = { "n" },
+    },
+    -- North out of the bedchamber is back into the castle, and up out of
+    -- 1227 is the way you came in - neither is part of the sea.
+    leaves = { {1224,"n"}, {1227,"u"}, },
+    auto = { [1227]=true },
+    entrance = { goto_room = 1224 },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way through",
+    -- No mmout: the palace is where you were going.
+    outs = {  },
+    places = {
+      { room = 1234, how = "walk there", label = "A Great Palace" },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
+  {
+    key = "scarred", cmd = "scar", label = "The Winding Tunnels",
+    zone = "scarred",
+    lo = 34036, hi = 34043,
+    roomname = {
+      [34036] = "Before some cracks",
+      [34037] = "Winding tunnels",
+      [34038] = "Winding tunnels",
+      [34039] = "Winding tunnels",
+      [34040] = "Winding tunnels",
+      [34041] = "Winding tunnels",
+      [34042] = "Winding tunnels",
+      [34043] = "Winding tunnels",
+    },
+    -- Seven tunnels, all called the same thing and all shuffling.  34043
+    -- is one of them; what marks it out is the way up.
+    maze = { [34037]=true, [34038]=true, [34039]=true, [34040]=true,
+             [34041]=true, [34042]=true, [34043]=true },
+    -- Nothing fixed in here: every link the mapper resolved runs between
+    -- tunnels, and those move on every repop.
+    seed = {  },
+    exitdirs = {
+      [34036] = { "w" },
+      [34037] = { "e", "n", "s", "w" },
+      [34038] = { "e", "n", "s", "w" },
+      [34039] = { "e", "n", "s", "w" },
+      [34040] = { "e", "n", "s", "w" },
+      [34041] = { "e", "n", "s", "w" },
+      [34042] = { "e", "n", "s", "w" },
+      [34043] = { "e", "n", "s", "u", "w" },
+    },
+    -- West out of the cracks is back the way you came, and up out of
+    -- 34043 leaves the tunnels for good - neither is ours to sweep.
+    leaves = { {34036,"w"}, {34043,"u"}, },
+    auto = { [34037]=true },
+    entrance = { goto_room = 34036, run = "enter crack" },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way through",
+    -- No mmout: 34043 IS the way out, and it is what you came for.
+    outs = {  },
+    places = {
+      { room = 34043, how = "walk there", label = "the way up" },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
+  {
+    key = "nottingham", cmd = "nott", label = "Sherwood Forest",
+    zone = "nottingham",
+    lo = 11077, hi = 11088,
+    roomname = {
+      [11077] = "Entrance to Sherwood",
+      [11078] = "Sherwood Forest",
+      [11079] = "Sherwood Forest",
+      [11080] = "Sherwood Forest",
+      [11081] = "Sherwood Forest",
+      [11082] = "Sherwood Forest",
+      [11083] = "Sherwood Forest",
+      [11084] = "Sherwood Forest",
+      [11085] = "Sherwood Forest",
+      [11087] = "A Clearing in the Forest",
+      [11088] = "Bridge",
+    },
+    -- Eight stretches of forest AND the clearing, which shuffles along
+    -- with them - it is only told apart by its room number.
+    maze = { [11078]=true, [11079]=true, [11080]=true, [11081]=true,
+             [11082]=true, [11083]=true, [11084]=true, [11085]=true,
+             [11087]=true },
+    -- Nothing fixed: every link in the forest moves on a repop, and the
+    -- bridge is reached by a command rather than a direction.
+    seed = {  },
+    exitdirs = {
+      [11077] = { "n", "s" },
+      [11078] = { "d", "e", "n", "s", "u", "w" },
+      [11079] = { "d", "e", "n", "s", "u", "w" },
+      [11080] = { "d", "e", "n", "s", "u", "w" },
+      [11081] = { "d", "e", "n", "s", "u", "w" },
+      [11082] = { "d", "e", "n", "s", "u", "w" },
+      [11083] = { "d", "e", "n", "s", "u", "w" },
+      [11084] = { "d", "e", "n", "s", "u", "w" },
+      [11085] = { "d", "e", "n", "s", "u", "w" },
+      [11087] = { "d", "e", "n", "s", "u", "w" },
+      [11088] = {  },
+    },
+    -- South out of the entrance leaves for the road; the forest is north.
+    leaves = { {11077,"s"}, },
+    auto = { [11077]=true },
+    entrance = { goto_room = 11077 },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way through",
+    -- No mmout: the bridge is where you were going.
+    outs = {  },
+    -- One thing to find.  The clearing is 11087 wherever it has landed
+    -- this repop; standing in it, "enter bridge" is the way on.
+    places = {
+      { room = 11087, how = "enter bridge", label = "Bridge",
+        cmds = { "enter bridge" } },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
+  {
+    key = "deadlights", cmd = "dead", label = "The Surface", zone = "deadlights",
+    lo = 16877, hi = 16889,
+    roomname = {
+      [16877] = "Ascension to the Surface",
+      [16881] = "On the Surface",
+      [16882] = "On the Surface",
+      [16883] = "On the Surface",
+      [16884] = "On the Surface",
+      [16885] = "On the Surface",
+      [16886] = "On the Surface",
+      [16887] = "On the Surface",
+      [16888] = "On the Surface",
+      [16889] = "On the Surface",
+    },
+    -- Nine stretches of surface, all named the same and all shuffling.
+    -- 16887 is the one with the portal off it.
+    maze = { [16881]=true, [16882]=true, [16883]=true, [16884]=true,
+             [16885]=true, [16886]=true, [16887]=true, [16888]=true,
+             [16889]=true },
+    -- Coming up the ascension always puts you on 16885; everything
+    -- between surface rooms moves on a repop.
+    seed = { {16877,"u",16885}, },
+    exitdirs = {
+      [16877] = { "s", "u" },
+      [16881] = { "e", "n", "s", "w" },
+      [16882] = { "e", "n", "s", "w" },
+      [16883] = { "e", "n", "s", "w" },
+      [16884] = { "e", "n", "s", "w" },
+      [16885] = { "e", "n", "s", "w" },
+      [16886] = { "e", "n", "s", "w" },
+      [16887] = { "e", "n", "s", "w" },
+      [16888] = { "e", "n", "s", "w" },
+      [16889] = { "e", "n", "s", "w" },
+    },
+    -- South off the ascension drops back into the burial grounds.
+    leaves = { {16877,"s"}, },
+    auto = { [16885]=true },
+    entrance = { goto_room = 16877, run = "u" },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way out",
+    -- The escape doubles as the way out, so mmout heads for the same
+    -- room and steps through the same portal.
+    outs = {
+      { room = 16887, how = "enter portal", label = "escape",
+        cmds = { "enter portal" } },
+    },
+    places = {
+      { room = 16887, how = "enter portal", label = "escape",
+        cmds = { "enter portal" } },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
+  {
+    key = "mayhem", cmd = "mayhem", label = "The Mist", zone = "mayhem",
+    lo = 1888, hi = 1894,
+    roomname = {
+      [1888] = "In The Mist",
+      [1890] = "In The Mist",
+      [1891] = "In The Mist",
+      [1892] = "In The Mist",
+      [1893] = "In The Mist",
+      [1894] = "In The Mist",
+    },
+    -- Four stretches of mist.  1888 on the way in and 1894 on the far
+    -- side share their name with them but do not move.
+    maze = { [1890]=true, [1891]=true, [1892]=true, [1893]=true },
+    -- South out of 1888 always lands on 1890.  Which bit of mist touches
+    -- which does not hold, and the way into 1894 is off one of them, so
+    -- that moves too - walking finds it.
+    seed = { {1888,"s",1890}, },
+    exitdirs = {
+      [1888] = { "n", "s" },
+      [1890] = { "e", "n", "s", "w" },
+      [1891] = { "e", "n", "s", "w" },
+      [1892] = { "e", "n", "s", "w" },
+      [1893] = { "e", "n", "s", "w" },
+      [1894] = { "s", "w" },
+    },
+    -- North off 1888 goes back up the hallway, and west off 1894 carries
+    -- on into the Misty Hallway - neither is mist we sweep.
+    leaves = { {1888,"n"}, {1894,"w"}, },
+    auto = { [1888]=true },
+    -- 1888 is where you start and where the list goes up, so there is no
+    -- walk-in to run - picking something walks you south into the mist.
+    entrance = { goto_room = 1888 },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way through",
+    outs = {  },
+    places = {
+      { room = 1894, how = "walk there", label = "the way on" },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
+  {
+    key = "vale", cmd = "vale", label = "The Maze of Tunnels", zone = "vale",
+    lo = 1079, hi = 1116,
+    roomname = {
+      [1079] = "A Maze of Tunnels",
+      [1111] = "Leading Away From the Main Tunnel",
+      [1112] = "An Open Chamber",
+      [1114] = "A Maze of Tunnels",
+      [1115] = "A Maze of Tunnels",
+      [1116] = "A Maze of Tunnels",
+    },
+    -- Only four tunnels, but the chamber hangs off whichever one is 1116
+    -- this repop, and nothing leads to it but stumbling into that one.
+    maze = { [1079]=true, [1114]=true, [1115]=true, [1116]=true },
+    -- North off 1111 puts you in the tunnels; where the chamber attaches
+    -- moves, so it is left to be walked.
+    seed = { {1111,"n",1079}, },
+    exitdirs = {
+      [1079] = { "d", "e", "n", "s", "u", "w" },
+      [1111] = { "n", "s" },
+      [1112] = { "e" },
+      [1114] = { "d", "e", "n", "s", "u", "w" },
+      [1115] = { "e", "n", "s", "u", "w" },
+      [1116] = { "d", "e", "n", "s", "u", "w" },
+    },
+    -- South off 1111 goes back down the river, out of the tunnels.
+    leaves = { {1111,"s"}, },
+    auto = { [1111]=true },
+    entrance = { goto_room = 1111 },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way through",
+    outs = {  },
+    places = {
+      { room = 1112, how = "walk there", label = "An Open Chamber" },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
 }
 
 local BYKEY, BYCMD, BYZONE, ROOM2AREA = {}, {}, {}, {}
@@ -1992,7 +2354,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "3.2"
+local VERSION  = "4.0"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3316,6 +3678,20 @@ end
 function after_arrival ()
   if not running then return end
 
+  -- Hunting something that only the room listing can show, and no
+  -- listing has arrived yet: give it a moment before walking on.  In
+  -- step mode this never mattered - nothing moved without a click, so a
+  -- late listing still caught the mob while we stood there.  Express
+  -- walks on by itself, and that is how Morpheus got announced in a room
+  -- we had already left.  An empty room sends no listing at all, so this
+  -- waits once and then carries on regardless - and every empty room in
+  -- a sweep pays it, which is why it is a fifth of a second and not more.
+  if noscan_mode and not rc_seen and not rc_waited then
+    rc_waited = true
+    schedule_decision (0.2)
+    return
+  end
+
   -- A noscan hunt is blind without the room's character list.  Plenty of
   -- rooms are simply empty, so this is a warning and not a reason to give
   -- up - but 30 rooms without a single listing means the tag is not on.
@@ -3402,6 +3778,17 @@ function mm_rc_start ()
   here_mobs = {}
   rc_open = true
   EnableTriggerGroup ("mm_rc", true)
+  -- A listing is on its way, so whatever we were about to decide can
+  -- wait for it - mm_rc_end decides the moment the block closes, which
+  -- is sooner than any timer anyway.  Bumping the arrival counter voids
+  -- the pending decision; the two seconds are only a backstop in case a
+  -- block opens and never closes.
+  --
+  -- Without this, an express run walked out of the room while the
+  -- listing was still arriving, and then announced the mob it had just
+  -- left behind: Morpheus was found in Gates of Hades and the next thing
+  -- on screen was the room after it.
+  if running then schedule_decision (2) end
 end
 
 -- Check the moment the room listing closes rather than waiting for the
