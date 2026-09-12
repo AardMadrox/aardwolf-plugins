@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="3.1"
+   version="3.2"
    >
 </plugin>
 
@@ -36,6 +36,8 @@ WHAT IT DOES
     dark     Darklight, the Skullgore Plains       19644 to 19654
     times    Times of Old, the Cindery Village     28514 to 28527
     prom     Promises, the ocean off Westport      25825 to 25836
+    nix      The Nixie Rebellion, off Rhodus       10330 to 10345
+    astral   Chamber of Destiny and the Passages   27898 to 27920
     sahu     Sahuagin, four doors up to the princes 34600 to 34613
 
 COMMANDS
@@ -406,7 +408,7 @@ WHEN EDITING
 
 <aliases>
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|mm)(?:\s+(.*))?$"
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|mm)(?:\s+(.*))?$"
     script="mm_command" name="mm_command"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -417,7 +419,7 @@ WHEN EDITING
        Digits only, which is what keeps this off mmg, mmo, mmout and
        mmexpress. -->
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|mm)(\d+)$"
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|mm)(\d+)$"
     script="mm_command" name="mm_number"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -430,6 +432,11 @@ WHEN EDITING
 
   <!-- Deliberately not in the help: one mmout walks the whole way out
        instead of a room per press. -->
+  <alias
+    match="^mmr$" script="mm_resume" name="mm_resume"
+    enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100">
+  </alias>
+
   <alias
     match="^mmslow(?:\s+(\w+))?$" script="mm_mode" name="mm_slow"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100">
@@ -493,6 +500,22 @@ WHEN EDITING
        'tags scan on' is set.  Sequence 50 and keep_evaluating so we run
        ahead of Search_and_Destroy's own scan triggers and leave them
        working. -->
+  <!-- Some rooms tell you where each exit GOES:
+
+         Obvious exits from [ Chamber of Destiny ]:
+          North          : The Viridian Passage
+
+       Reading that once beats walking a random exit and hoping - the
+       astral Chamber's six exits each lead somewhere different, and
+       there is no way back to try again.  Only enabled while we are
+       waiting on our own "exits". -->
+  <trigger
+    match="^ (North|East|South|West|Up|Down)\s+: (.+?)\s*$"
+    script="mm_exits_line" name="mm_exits_line" group="mm_exits"
+    enabled="n" regexp="y" keep_evaluating="y" sequence="45"
+  >
+  </trigger>
+
   <trigger match="{scan}" script="mm_scan_start" name="mm_scan_start"
     enabled="y" regexp="n" keep_evaluating="y" sequence="50">
   </trigger>
@@ -1679,6 +1702,204 @@ local AREAS = {
     mobs = {
     },
   },
+  {
+    key = "nix", cmd = "nix", label = "The Nixie Rebellion", zone = "rebellion",
+    lo = 10330, hi = 10345,
+    roomname = {
+      [10330] = "Waves of Nixie Devilment",
+      [10331] = "On the Ocean?",
+      [10332] = "On the Ocean?",
+      [10333] = "On the Ocean?",
+      [10334] = "On One of the Nixie Ships",
+      [10335] = "On One of the Nixie Ships",
+      [10336] = "The Helm of a Nixie Ship",
+      [10337] = "On One of the Nixie Ships",
+      [10338] = "On One of the Nixie Ships",
+      [10339] = "The Helm of a Nixie Ship",
+      [10340] = "On One of the Nixie Ships",
+      [10341] = "On One of the Nixie Ships",
+      [10342] = "At the Helm of a Nixie Ship",
+      [10343] = "On the Flagship's Upper Deck",
+      [10344] = "Beneath the Banner of the Rebellion",
+      [10345] = "On the Ocean?",
+    },
+    -- Only the four stretches of open water shuffle.  The three ships are
+    -- fixed inside themselves - it is which bit of ocean their decks open
+    -- onto that moves.
+    maze = { [10331]=true, [10332]=true, [10333]=true, [10345]=true },
+    -- Every link with both ends off the water: along each ship's deck, up
+    -- to the flagship's upper deck, and across to the banner.  Nothing
+    -- that touches an ocean room is seeded.
+    seed = { {10334,"w",10335}, {10335,"e",10334}, {10335,"w",10336},
+             {10336,"e",10335}, {10337,"w",10338}, {10338,"e",10337},
+             {10338,"w",10339}, {10339,"e",10338}, {10340,"w",10341},
+             {10341,"e",10340}, {10341,"w",10342}, {10342,"e",10341},
+             {10342,"u",10343}, {10343,"d",10342}, {10343,"e",10344},
+             {10344,"w",10343}, },
+    exitdirs = {
+      [10330] = { "e", "w" },
+      [10331] = { "e", "n", "s", "w" },
+      [10332] = { "e", "n", "s", "w" },
+      [10333] = { "e", "n", "s", "w" },
+      [10334] = { "e", "n", "s", "w" },
+      [10335] = { "e", "n", "s", "w" },
+      [10336] = { "e", "n", "s", "w" },
+      [10337] = { "e", "n", "s", "w" },
+      [10338] = { "e", "n", "s", "w" },
+      [10339] = { "e", "n", "s", "w" },
+      [10340] = { "e", "n", "s", "w" },
+      [10341] = { "e", "n", "s", "w" },
+      [10342] = { "e", "n", "s", "u", "w" },
+      [10343] = { "d", "e" },
+      [10344] = { "w" },
+      [10345] = { "e", "n", "s", "w" },
+    },
+    -- East off the Waves goes back into Rhodus, out of the part we sweep.
+    leaves = { {10330,"e"}, },
+    auto = { [10331]=true },
+    entrance = { goto_room = 10330, run = "w" },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way through",
+    -- No mmout: the banner is where you were going, and this is recallable.
+    outs = {  },
+    places = {
+      { room = 10344, how = "walk there", label = "Nestoda" },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
+  {
+    key = "astral", cmd = "astral", label = "The Chamber of Destiny",
+    zone = "astral",
+    lo = 27898, hi = 27920,
+    roomname = {
+      [27898] = "Chamber of Destiny",
+      [27899] = "The Alizarin Passage",
+      [27900] = "The Viridian Passage",
+      [27901] = "The Indigo Passage",
+      [27902] = "The Silver Passage",
+      [27912] = "A Terrible Nightmare!",
+      [27913] = "The Path of Torment",
+      [27914] = "The Burning Desert",
+      [27915] = "The Path of Torment",
+      [27916] = "The Blood Swamp",
+      [27917] = "The Burning Desert",
+      [27918] = "The Blood Swamp",
+      [27919] = "Falling into Darkness",
+      [27920] = "The Cerulean Passage",
+    },
+    -- Two mazes in one area.  The Chamber's six exits are the first:
+    -- they shuffle, and each opens on a different coloured Passage.
+    -- Behind Alizarin is the second, the nightmare, and the boogie man
+    -- is out the west side of that.
+    maze = { [27898]=true,
+             [27912]=true, [27913]=true, [27914]=true, [27915]=true,
+             [27916]=true, [27917]=true, [27918]=true },
+    -- The door west out of 27915 into the boogie man's room is fixed.
+    -- Which Chamber exit reaches which Passage is not - that is exactly
+    -- what moves, and what the "exits" listing is read for.
+    seed = { {27915,"w",27919}, },
+    exitdirs = {
+      [27898] = { "d", "e", "n", "s", "u", "w" },
+      [27899] = {  },
+      [27900] = {  },
+      [27901] = {  },
+      [27902] = {  },
+      [27912] = { "d", "e", "n" },
+      [27913] = { "d", "e", "n", "s", "u", "w" },
+      [27914] = { "e", "n", "s", "w" },
+      [27915] = { "e", "n", "s", "w" },
+      [27916] = { "d", "e", "n", "s", "u", "w" },
+      [27917] = { "d", "e", "n", "s", "u", "w" },
+      [27918] = { "e", "n", "s", "w" },
+      [27919] = { "d" },
+      [27920] = {  },
+    },
+    -- West out of 27915 is the door to the boogie man, taken on purpose
+    -- and never swept through; down out of his room drops you back into
+    -- Dreaming, well outside what we sweep.
+    leaves = { {27915,"w"}, {27919,"d"}, },
+    doors = {
+      [27915] = { w = { "open w" } },
+    },
+    auto = { [27898]=true },
+    entrance = { goto_room = 27898 },
+    -- Alizarin is the way from the Chamber into the nightmare.  There is
+    -- no bridge back: you leave the nightmare through the boogie man's
+    -- room, which drops you into Dreaming.
+    bridges = { ["chamber"] = { room = 27899, how = "enter aliz", label = "the Alizarin Passage", to = "nightmare", cmds = { "enter aliz" } }, },
+    sections = { [27898]="chamber", [27899]="chamber", [27900]="chamber",
+                 [27901]="chamber", [27902]="chamber", [27920]="chamber",
+                 [27912]="nightmare", [27913]="nightmare", [27914]="nightmare",
+                 [27915]="nightmare", [27916]="nightmare", [27917]="nightmare",
+                 [27918]="nightmare", [27919]="nightmare", },
+    outlabel = "the passages",
+    -- Only from inside the nightmare, where mmo walks you back to the
+    -- room Alizarin drops you in.  Out in the Chamber there is nothing to
+    -- leave by - each Passage is a way on of its own.
+    outs = {
+      { room = 27912, how = "walk there", label = "A Terrible Nightmare!",
+        section = "nightmare" },
+    },
+    -- Each Passage is entered by name once you are standing in it.
+    places = {
+      { room = 27899, how = "enter aliz", label = "Alizarin",
+        cmds = { "enter aliz" }, section = "chamber" },
+      { room = 27900, how = "ent viri", label = "Viridian",
+        cmds = { "ent viri" }, section = "chamber" },
+      { room = 27901, how = "enter indi", label = "Indigo",
+        cmds = { "enter indi" }, section = "chamber" },
+      { room = 27920, how = "enter ceru", label = "Cerulean",
+        cmds = { "enter ceru" }, section = "chamber" },
+      -- Everything below is through Alizarin: clicking one walks the
+      -- Chamber, enters the Passage and then sweeps the nightmare.
+      { room = 27913, how = "walk there", label = "Path of Torment",
+        section = "nightmare", head = "through Alizarin" },
+      { room = 27915, how = "walk there", label = "Path of Torment",
+        section = "nightmare", head = "through Alizarin" },
+      { room = 27914, how = "walk there", label = "Burning Desert",
+        section = "nightmare", head = "through Alizarin" },
+      { room = 27918, how = "walk there", label = "Blood Swamp",
+        section = "nightmare", head = "through Alizarin" },
+      -- ...and out the west door of 27915.
+      { room = 27915, how = "open w, w", label = "the Boogie Man",
+        cmds = { "open w", "w" }, section = "nightmare",
+        head = "through Alizarin" },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    -- The Chamber lists where every exit goes.  Read it and walk straight
+    -- at the Passage you asked for - there is no coming back to try a
+    -- second one.  Only there: the nightmare's rooms share names, so its
+    -- listing would say nothing we could use.
+    -- Every room in here lists where its exits go.  The Chamber's names
+    -- are unique so they pin a room outright; the nightmare's repeat, so
+    -- there a name only says which direction is worth trying first.
+    uses_exits = { [27898]=true,
+                   [27912]=true, [27913]=true, [27914]=true, [27915]=true,
+                   [27916]=true, [27917]=true, [27918]=true },
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
 }
 
 local BYKEY, BYCMD, BYZONE, ROOM2AREA = {}, {}, {}, {}
@@ -1771,7 +1992,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "3.1"
+local VERSION  = "3.2"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -2241,6 +2462,13 @@ local out_walk  = false    -- this walk is "get me out", so ANY way out will do
 local reopened  = false    -- crossed-off exits given a second chance
 local widened   = false    -- a mob's usual rooms gave out, now sweeping wider
 local wipes     = 0        -- maps thrown away this run because they went stale
+local exits_wait = false   -- waiting on the reply to our own "exits"
+local exits_seen = {}      -- rooms already asked this run.  A single
+                           -- "last room" was not enough: three rooms in a
+                           -- ring each re-asked as we came back round, and
+                           -- the run spent its whole move budget on it
+local exits_token = 0      -- bumped by each line, so we finish just after
+                           -- the LAST one instead of sitting out a timeout
 local rc_seen   = false    -- a {roomchars} block arrived for THIS room
 local rc_waited = false    -- and we have already given it one extra second
 local rc_warned = false    -- only nag about a missing room listing once
@@ -2271,6 +2499,10 @@ local function stop (msg, bad)
   if where_wait then
     where_wait = false
     EnableTriggerGroup ("mm_where", false)
+  end
+  if exits_wait then
+    exits_wait = false
+    EnableTriggerGroup ("mm_exits", false)
   end
   -- Only a real abort forgets a crossing.  begin() calls stop () with no
   -- message to tidy up before a fresh run, and the walk to a portal is
@@ -2547,22 +2779,14 @@ local function take_exit ()
     if journey then awaiting_leg = true end
     if xover then awaiting_cross = true end
     for _, c in ipairs (o.cmds) do SendNoEcho (c) end
-  elseif is_way_out (o) then
-    -- A way OUT with no command of its own: the walk is done but you are
-    -- still inside, so say what is left to do.
-    note ("At @x048" .. (o.label or roomname (o.room)) .. "@w (@x048" .. o.room ..
-          "@w). I do not know the command that leaves from here - " ..
-          o.how .. " yourself and you are clear.")
   else
-    -- A room you asked to be walked to.  Getting there IS the whole job -
-    -- there is nothing left to send.  This used to fall through to the
-    -- message above and tell you it did not know the command that leaves
-    -- from here, which reads as a failure at the exact moment it
-    -- succeeded.  An area with no A.outs leaves under its own steam, so
-    -- remind_out () stays quiet there too.
+    -- Nothing to send: getting there IS the whole job, whether it is a
+    -- room you picked or a way out that is simply a room to stand in.
+    -- This used to say it did not know the command that leaves from here,
+    -- which reads as a failure at the exact moment it succeeded.
     note ("Arrived: @x048" .. (o.label or roomname (o.room)) ..
           "@w  (@x048" .. o.room .. "@w)")
-    remind_out ()
+    if not is_way_out (o) then remind_out () end
   end
 end
 
@@ -2723,6 +2947,21 @@ function advance ()
               "@w is the nearer way out now - heading there instead.")
       end
     end
+  end
+
+  -- Where the room itself will tell us which exit goes where, ask before
+  -- guessing.  Once per room per run: the answer goes straight onto the
+  -- map, so the ordinary router takes it from there.
+  if phase == "goto" and A.uses_exits and A.uses_exits[cur]
+     and not exits_seen[cur] and cur ~= target and NAME[cur] then
+    exits_seen[cur] = true
+    exits_wait = true
+    exits_token = 0
+    EnableTriggerGroup ("mm_exits", true)
+    SendNoEcho ("exits")
+    -- Only a backstop, for a room that answers nothing at all.
+    DoAfterSpecial (3, "mm_exits_done (" .. gen .. ",0)", 12)
+    return
   end
 
   if phase == "goto" then
@@ -3397,6 +3636,11 @@ end
 -- mm_go is above it and would otherwise pick up a nil global.
 local resume_paused
 
+-- Same as "<area> resume", short enough to type mid-fight.
+function mm_resume ()
+  if not resume_paused () then note ("Nothing to resume.") end
+end
+
 function mm_go ()
   if step_once () then return end
   -- an express run that a fight interrupted resumes on mmg as well as on
@@ -3463,6 +3707,55 @@ function mm_where_done (g)
   end
   SendNoEcho ("look")
   begin_room ()
+end
+
+-- One line of an "exits" listing: a direction and the room it opens on.
+-- Only names unique to one room in the area are any use, which is what
+-- UNIQUE already works out.
+function mm_exits_line (name, line, wildcards)
+  if not exits_wait or not A then return end
+  local d = ({ North = "n", East = "e", South = "s",
+         West = "w", Up = "u", Down = "d" })[wildcards[1]]
+  if not d then return end
+  -- The listing is the truth about which exits this room HAS, and it is
+  -- read fresh every visit - better than any table written down here,
+  -- which was already wrong (27912 was guessed at six exits and has
+  -- three).  The first line of a listing replaces what we thought.
+  if exits_token == 0 then exits[cur] = {} end
+  exits[cur] = exits[cur] or {}
+  exits[cur][d] = true
+  local nm = (wildcards[2] or ""):gsub ("%s+$", ""):lower ()
+  local v = UNIQUE[A.key] and UNIQUE[A.key][nm]
+  -- The nightmare holds two rooms called each thing - two Paths of
+  -- Torment, two Burning Deserts, two Blood Swamps - so the name alone
+  -- cannot say WHICH one an exit opens on.  If the one we are headed for
+  -- goes by that name, take this exit as a good bet: walking it settles
+  -- the question outright, and record () corrects the map on arrival if
+  -- it turns out to be the other one.
+  local guess = false
+  if not v and target and NAME[target] and NAME[target]:lower () == nm then
+    v, guess = target, true
+  end
+  -- A unique name is the MUD telling us where that exit goes, so it wins
+  -- over anything we thought.  A guess must not: overwriting a link we
+  -- actually walked would keep pointing us back at a room we have
+  -- already been shown is the wrong one.
+  if v and not (guess and edges[cur] and edges[cur][d] ~= nil) then
+    link (cur, d, v)
+  end
+  -- Carry on a fifth of a second after the listing stops, rather than
+  -- when a fallback timeout expires.  Each line pushes the finish out,
+  -- so a slow or long listing still arrives whole.
+  exits_token = exits_token + 1
+  DoAfterSpecial (0.3, "mm_exits_done (" .. gen .. "," .. exits_token .. ")", 12)
+end
+
+-- Whatever the listing said, carry on with the walk.
+function mm_exits_done (g, tok)
+  if not exits_wait or g ~= gen or tok ~= exits_token then return end
+  exits_wait = false
+  EnableTriggerGroup ("mm_exits", false)
+  if running then advance () end
 end
 
 function mm_automenu (tok, room)
@@ -3936,6 +4229,7 @@ function begin (kind, tgt, mobname, noscan, wide_search)
   reopened   = false
   widened    = false
   wipes      = 0
+  exits_seen = {}
   want       = mobname and normalise (mobname) or nil
   want_range = (kind == "hunt" and not wide) and RANGE[want] or nil
 
@@ -4153,7 +4447,15 @@ function menu ()
   local shown = A.places
   if #shown > 0 then
     ColourNote (CLR_TAG, "", "   -- " .. A.outlabel .. " --")
+    local shown_head
     for i, p in ipairs (shown) do
+      -- An entry can carry its own heading, so rooms that sit behind
+      -- something else are listed under it rather than jumbled in with
+      -- the ones you can just walk to.
+      if p.head and p.head ~= shown_head then
+        shown_head = p.head
+        ColourNote (CLR_TAG, "", "   -- " .. p.head .. " --")
+      end
       local k = #MOBS + i
       local label = p.label or roomname (p.room)
       -- The rooms off the maze - Prosper's four up rooms - are the ones
@@ -4261,13 +4563,15 @@ local function show_help ()
   -- cover everything, so those are what this teaches.
   local lines = {
     "@x048mm@w            the clickable list for the area you are standing in",
-    "@x048mmg@w           walk one more room - or click @x048NEXT@w",
-    "@x048mmout@w or @x048mmo@w  walk back out, one room per press",
+    "@x048mmg@w           carry on - after a fight, or a room at a time in slow mode",
+    "@x048mmout@w or @x048mmo@w  walk back out of here",
     "",
-    "Pick a mob or a room off the list and it walks @x048one room@w and reads",
-    "it, then stops and waits for you. Click @x048NEXT@w or type @x048mmg@w for the",
-    "room after that. While you are in combat it will not move you at all -",
-    "finish the fight, then carry on. It tells you when you have arrived.",
+    "Pick a mob or a room off the list and it walks you @x048the whole way@w,",
+    "and tells you when you get there. A fight stops it where it stands -",
+    "finish the fight and click @x048RESUME@w, or type @x048mmr@w or @x048mmg@w.",
+    "",
+    "@x048mmslow@w makes it walk @x048one room at a time@w instead, waiting after each",
+    "for @x048NEXT@w or @x048mmg@w. Either way it will not move you during a fight.",
     "",
     "@x048WHERE IT WORKS@w",
   }
@@ -4278,24 +4582,15 @@ local function show_help ()
     "you to the maze entrance first if you are not in the maze yet.",
     "",
     "@x048THE REST@w",
-    "mm <mob name>    hunt a mob by name, whether it is on the list or not",
-    "mm all <mob>     search the whole area, not just its usual rooms",
     "mm stop          give up on the current hunt",
+    "mm resume        pick a run back up after a fight stopped it",
+    "mmr @wor @x048mmg@w       the same thing, shorter",
+    "mmout @wor @x048mmo@w     walk back out of here",
     "mm list          stop this area putting its list up on arrival",
     "mmslow           one room per press instead of the whole walk",
     "mmexpress        back to walking the whole way (the default)",
-    "mm resume        pick a run back up after a fight stopped it",
-    "mm map           the links learned here so far",
-    "mm seen          what the last sweep scanned, and where",
-    "mm here          what this room lists, flags stripped off",
     "mm reset         forget this area's map and start again",
-    "mm fixed         exits here that have not moved between visits",
-    "mm forget        clear that and start watching again",
-    "mm wait <secs>   how long to wait on a move (default 25)",
-    "mm desc          the room-description overrides, and how to add one",
     "mm reload        load this plugin again after an update",
-    "mm version       which build is running",
-    "mm debug         echo every room listing and scan as it arrives",
     "",
     "Mobs that show up in a scan are found by scanning as it goes; the ones",
     "that do not are found by walking in and reading the room. Where a mob",
@@ -4527,16 +4822,12 @@ function mm_command (name, line, wildcards)
     save_map ()
     note ("Map forgotten. The next sweep starts from scratch.")
   else
-    -- anything else is a mob name - hunt it whether it is on the list or
-    -- not.  "all <mob>" ignores the room range and sweeps everything.
-    local wide_search = false
-    local rest = arg:match ("^all%s+(.+)$")
-    if rest then wide_search, arg = true, rest end
-    local noscan = false
-    for _, m in ipairs (MOBS) do
-      if normalise (m[1]) == normalise (arg) then noscan = m[2] end
-    end
-    begin ("hunt", nil, arg, noscan, wide_search)
+    -- Only what the area actually lists.  Hunting a free-typed name sent
+    -- it sweeping for something that may not live here at all, and "all"
+    -- threw away the room ranges that make a hunt short - both cost a lot
+    -- of walking to learn nothing.  Pick from the list instead.
+    warn ("I do not know @x048" .. arg .. "@w. Type @x048" .. A.cmd ..
+          "@w for the list and pick from it.")
   end
 end
 
