@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="4.1"
+   version="4.2"
    >
 </plugin>
 
@@ -270,6 +270,24 @@ ARCHITECTURE
   after which the line is held and applied when GMCP names the room.
   Guessing the other way costs Prosper 14 of its 48 walks, so this must
   stay evidence-led rather than assumed either way.
+
+  A ROOM HAS RE-ROLLED ONLY IF ITS EXIT LINE DISAGREES WITH ITS OWN LAST
+  EXIT LINE. apply_exits () used to compare the new line against exits[],
+  which GMCP and the area table also write - and in a sparse maze those
+  list exits the room does not have. So every visit looked like a re-roll,
+  every visit threw away what that room had taught us, and the walk never
+  ran out of exits to try: 4.1 walked Prosper for 880 moves without ever
+  reaching Stalwart. The previous line per room is kept in walked.lines.
+
+  A MAP WIPE MUST NOT UN-TEACH THE ROOM YOU ARE STANDING IN. The wipes
+  refill exits[] from the area table through seed (), but the flag saying
+  this room line was read (walked.exits_at) survives, so the sweep trusted
+  the table in the one room it had just been told the truth about, and
+  walked into a wall. seed () now puts back every line recorded this run;
+  stop () drops them, because a new visit may find the maze shuffled.
+  Do NOT gate that on `running` inside seed (): running is declared further
+  down the file, is a nil global in there, and the first version of this
+  fix silently never ran.
 
   REPOP IS TOLD TO US
 
@@ -2448,7 +2466,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "4.1"
+local VERSION  = "4.2"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -2730,6 +2748,22 @@ local function seed ()
       end
     end
   end
+  -- What the rooms themselves said this run outranks the area table.
+  -- A map wipe in the middle of a run lands here and refilled every
+  -- room from the table - six directions in Xyl - while the room we are
+  -- standing in had already said it has four, and the flag saying its
+  -- line was read survived the wipe, so the table was believed and the
+  -- sweep walked into a wall.
+  --
+  -- NOT gated on `running`: that is declared further down the file, so
+  -- in here it is a nil global and the test was never true - the first
+  -- version of this did nothing at all.  walked.lines only exists while
+  -- a run is going (stop () throws it away), which is the same thing.
+  for v, e in pairs (walked.lines or {}) do
+    local c = {}
+    for d in pairs (e) do c[d] = true end
+    exits[v] = c
+  end
 end
 
 -- Switch areas: point edges/exits and the per-area tables at this one.
@@ -2996,6 +3030,9 @@ local LAP_LIMIT = 4
 
 local function stop (msg, bad)
   running   = false
+  -- What each room said about its exits belongs to this run only: a new
+  -- visit may find the maze shuffled.
+  walked.lines = nil
   resyncing = false
   stepping_back = false
   if where_wait then
@@ -4559,11 +4596,13 @@ function apply_exits (room, e)
     for _, d in ipairs (A.exitdirs[room] or {}) do e[d] = true end
   end
 
-  -- If the set of exits is not what it was, this room has re-rolled and
-  -- everything learned about it is out of date.  Forget its links so the
-  -- sweep tries them again rather than trusting a map of a maze that has
-  -- since moved.
-  local was = exits[room]
+  -- If this room's exit line is not what its exit line said last time,
+  -- the room has re-rolled and everything learned about it is out of
+  -- date.  Compared against the previous LINE only - not against exits[],
+  -- which GMCP and the area table also write, and which disagreeing with
+  -- the line proves nothing about a re-roll.
+  walked.lines = walked.lines or {}
+  local was = walked.lines[room]
   if was then
     local same = true
     for _, d in ipairs (DIRS) do
@@ -4580,6 +4619,9 @@ function apply_exits (room, e)
       end
     end
   end
+  local keep = {}
+  for d in pairs (e) do keep[d] = true end
+  walked.lines[room] = keep
 
   exits[room] = e
   walked.exits_at = room
