@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="4.4"
+   version="4.5"
    >
 </plugin>
 
@@ -44,6 +44,7 @@ WHAT IT DOES
     dead     Deadlights, the Surface              16877 to 16889
     mayhem   Mayhem, In The Mist                  1888 to 1894
     vale     Sundered Vale, the Maze of Tunnels   1079 to 1116
+    gallows  Gallows Hill, the fog                4384 to 4391
     sahu     Sahuagin, four doors up to the princes 34600 to 34613
 
 COMMANDS
@@ -432,7 +433,7 @@ WHEN EDITING
 
 <aliases>
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|mm)(?:\s+(.*))?$"
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|gallows|mm)(?:\s+(.*))?$"
     script="mm_command" name="mm_command"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -442,7 +443,7 @@ WHEN EDITING
        either the end of the line or a space, so "mm1" falls through it.
        Digits only, which is what keeps this off mmo, mmout and mmr. -->
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|mm)(\d+)$"
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|gallows|mm)(\d+)$"
     script="mm_command" name="mm_number"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -456,7 +457,7 @@ WHEN EDITING
   </alias>
 
   <alias
-    match="^(gwillout|gardout|nenukonout|xylout|heleout|prosperout|infamyout|sahuout|deadout|mmout|mmo)$"
+    match="^(gwillout|gardout|nenukonout|xylout|heleout|prosperout|infamyout|sahuout|deadout|gallowsout|mmout|mmo)$"
     script="mm_out" name="mm_out"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -2398,6 +2399,67 @@ local AREAS = {
     mobs = {
     },
   },
+  {
+    key = "gallows", cmd = "gallows", label = "The Fog", zone = "gallows",
+    lo = 4384, hi = 4391,
+    roomname = {
+      [4384] = "The forest gate",
+      [4385] = "Entering the fog",
+      [4386] = "In the thick fog",
+      [4387] = "A dead end",
+      [4388] = "In the thick fog",
+      [4389] = "Another dead end",
+      [4390] = "On top of a hill",
+      [4391] = "The ravine",
+    },
+    -- Nothing to hunt and nowhere to walk to: the only thing wanted in
+    -- here is the way back out.  Two fog rooms shuffle; the five side
+    -- rooms each have one fixed way back into the thick fog.
+    maze = { [4385]=true, [4386]=true },
+    seed = { {4384,"n",4385}, {4387,"s",4386}, {4388,"n",4386}, {4389,"w",4386},
+             {4390,"d",4386}, {4391,"u",4386}, },
+    exitdirs = {
+      [4384] = { "n", "s" },
+      [4385] = { "d", "e", "n", "s", "u", "w" },
+      [4386] = { "d", "e", "n", "s", "u", "w" },
+      [4387] = { "s" },
+      [4388] = { "n" },
+      [4389] = { "w" },
+      [4390] = { "d" },
+      [4391] = { "u" },
+    },
+    -- South from the forest gate is the rest of Gallows Hill.
+    leaves = { {4384,"s"}, },
+    -- The gate into the fog is a door.
+    doors = {
+      [4384] = { n = { "op n" } },
+    },
+    auto = { [4385]=true },
+    entrance = { goto_room = 4384 },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way out",
+    outs = {
+      { room = 4385, how = "use mmout/mmo to get out", label = "Out" },
+    },
+    -- The list only ever shows places, so the way out goes in here too
+    -- (Deadlights does the same with its escape).
+    places = {
+      { room = 4385, how = "use mmout/mmo to get out", label = "Out" },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
 }
 
 local BYKEY, BYCMD, BYZONE, ROOM2AREA = {}, {}, {}, {}
@@ -2490,7 +2552,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "4.4"
+local VERSION  = "4.5"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -2946,7 +3008,16 @@ local function absorb_room ()
     -- north, east and west - so only do it when the room's own exit line
     -- is not about to tell us better.
     if not held_exits then
-      for _, d in ipairs (DIRS) do e[d] = true end
+      -- The area table first, all six only if it knows nothing.  GMCP
+      -- sends no exits for the Gallows fog, and assuming all six made the
+      -- walk try five walls in every one-exit dead end before the right
+      -- way - no wait needed to fix that, just a better guess.
+      local known = A.exitdirs and A.exitdirs[num]
+      if known and #known > 0 then
+        for _, d in ipairs (known) do e[d] = true end
+      else
+        for _, d in ipairs (DIRS) do e[d] = true end
+      end
       exits[num] = e
     end
   else
