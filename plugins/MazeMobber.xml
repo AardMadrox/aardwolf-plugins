@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="4.3"
+   version="4.4"
    >
 </plugin>
 
@@ -2490,7 +2490,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "4.3"
+local VERSION  = "4.4"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3558,13 +3558,11 @@ function advance ()
   -- made in that window picks a direction the room does not have and
   -- walks into a wall.  Waited for once per arrival, so a room that
   -- prints no exit line at all still gets on with it.
-  -- Walks to a room wait too.  Exempting them (6.3) meant a walk chose its
-  -- direction the moment GMCP landed, before the room had printed its exit
-  -- line, off GMCP's own exit list - which inside a maze can name exits the
-  -- room does not have.  Measured on Prosper: three moves in ten were walls.
-  -- It costs next to nothing now, because the exit line arriving makes the
-  -- decision at once (see apply_exits) rather than waiting out this timer.
-  if A.maze[cur] and walked.exits_at ~= cur and not walked.exwait then
+  -- Sweeps only.  NO WAIT ON A WALK TO A ROOM OR ON MMOUT - the only delay
+  -- this plugin is allowed is the one for noscan mobs.  4.3 put this wait
+  -- back on walks and Prosper crawled; do not do that again.
+  if phase ~= "goto" and A.maze[cur]
+     and walked.exits_at ~= cur and not walked.exwait then
     walked.exwait = true
     schedule_decision (0.25)
     return
