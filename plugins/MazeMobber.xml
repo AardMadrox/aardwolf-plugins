@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="4.2"
+   version="4.3"
    >
 </plugin>
 
@@ -288,6 +288,25 @@ ARCHITECTURE
   Do NOT gate that on `running` inside seed (): running is declared further
   down the file, is a nil global in there, and the first version of this
   fix silently never ran.
+
+  WALKS TO A ROOM WAIT FOR THE EXIT LINE, SAME AS SWEEPS. 6.3 exempted
+  them to save a quarter second a room, and they then chose a direction
+  the moment GMCP landed - off GMCP's exit list, which inside a maze can
+  name exits the room does not have. In Prosper three moves in ten were
+  walls and Stalwart was found 4 times in 12. The exit line arriving now
+  triggers the held decision at once (apply_exits), so the wait that
+  actually happens is 0.06s a move, not the 0.25s backstop.
+
+  A WALK THAT STOPS REACHING NEW ROOMS STARTS AGAIN. Thirty moves with no
+  room it has not stood in before, and stall_reset () forgets the learned
+  map (fixed links, ways out and this run's exit lines all come back) and
+  walks on. A walk also no longer gives up after three map wipes - only
+  if a wipe comes round with not one move made since the last. Walks only:
+  see the comment where it is called.
+
+  PROSPER'S FOUR SIDE ROOMS HANG OFF FIXED EXITS and are seeded: down from
+  each is resolved in the mapper, and up into each was proved across ten
+  repops. Before they were seeded the walk had to find up by accident.
 
   REPOP IS TOLD TO US
 
@@ -1176,7 +1195,12 @@ local AREAS = {
              -- it is the only way through to Calabus: nothing else has
              -- a link into 28285's pocket.
              [28284]=true },
-    seed = { {28268,"e",28271}, {28269,"u",28278}, {28270,"u",28279}, {28271,"n",28272}, {28271,"u",28280}, {28271,"w",28268}, {28272,"e",28275}, {28272,"s",28271}, {28273,"e",28276}, {28274,"n",28275}, {28275,"n",28276}, {28275,"s",28274}, {28275,"u",28284}, {28275,"w",28272}, {28276,"s",28275}, {28276,"w",28273}, {28277,"e",28280}, {28277,"n",28278}, {28277,"u",28286}, {28278,"d",28269}, {28278,"s",28277}, {28279,"d",28270}, {28279,"u",28288}, {28280,"d",28271}, {28280,"u",28289}, {28280,"w",28277}, {28281,"n",28295}, {28282,"s",28281}, {28282,"u",28291}, {28283,"n",28284}, {28283,"u",28292}, {28285,"s",28284}, {28285,"u",28294}, {28286,"d",28277}, {28286,"n",28287}, {28287,"n",28288}, {28287,"s",28286}, {28288,"d",28279}, {28288,"e",28291}, {28288,"s",28287}, {28289,"d",28280}, {28289,"e",28292}, {28290,"e",28293}, {28291,"d",28282}, {28291,"w",28288}, {28292,"d",28283}, {28292,"w",28289}, {28293,"n",28294}, {28293,"w",28290}, {28294,"d",28285}, {28294,"s",28293}, {28295,"s",28281} },
+    -- The four side rooms of the theatre hang off fixed exits.  Down from
+    -- each is resolved in the mapper; up into each has been proved across
+    -- separate repops.  Without these the walk had to stumble onto "up".
+    seed = { {28252,"u",28266}, {28254,"u",28265}, {28261,"u",28267}, {28263,"u",28264},
+             {28264,"d",28263}, {28265,"d",28254}, {28266,"d",28252}, {28267,"d",28261},
+             {28268,"e",28271}, {28269,"u",28278}, {28270,"u",28279}, {28271,"n",28272}, {28271,"u",28280}, {28271,"w",28268}, {28272,"e",28275}, {28272,"s",28271}, {28273,"e",28276}, {28274,"n",28275}, {28275,"n",28276}, {28275,"s",28274}, {28275,"u",28284}, {28275,"w",28272}, {28276,"s",28275}, {28276,"w",28273}, {28277,"e",28280}, {28277,"n",28278}, {28277,"u",28286}, {28278,"d",28269}, {28278,"s",28277}, {28279,"d",28270}, {28279,"u",28288}, {28280,"d",28271}, {28280,"u",28289}, {28280,"w",28277}, {28281,"n",28295}, {28282,"s",28281}, {28282,"u",28291}, {28283,"n",28284}, {28283,"u",28292}, {28285,"s",28284}, {28285,"u",28294}, {28286,"d",28277}, {28286,"n",28287}, {28287,"n",28288}, {28287,"s",28286}, {28288,"d",28279}, {28288,"e",28291}, {28288,"s",28287}, {28289,"d",28280}, {28289,"e",28292}, {28290,"e",28293}, {28291,"d",28282}, {28291,"w",28288}, {28292,"d",28283}, {28292,"w",28289}, {28293,"n",28294}, {28293,"w",28290}, {28294,"d",28285}, {28294,"s",28293}, {28295,"s",28281} },
     exitdirs = {
       [28252] = { "e", "n", "s", "u" },
       [28253] = { "e", "n", "s" },
@@ -2466,7 +2490,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "4.2"
+local VERSION  = "4.3"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -2887,6 +2911,7 @@ local function absorb_room ()
   if not A or not NAME[num] then held_exits = nil return end
   visited[num] = true
   walked.seen = walked.seen or {}
+  if not walked.seen[num] then walked.lastnew = walked.n end
   walked.seen[num] = true
   -- "details" is a comma separated flag list; a flag starting "pk" is a
   -- player-killing room.  The stock mapper reads it the same way.
@@ -3482,6 +3507,24 @@ function coverage ()
   return seen, total
 end
 
+-- Walking without reaching anywhere new.  Whatever the map believes, it is
+-- not getting us there, so forget what was learned - the area's fixed
+-- links, its ways out and the exits each room showed this run all come
+-- back through seed () - and walk on from a clean slate.  Asked for as "if
+-- it has not found it in ten seconds, reset and try again": thirty moves is
+-- about that.
+local STALL_MOVES = 30
+local function stall_reset ()
+  for k in pairs (edges) do edges[k] = nil end
+  for k in pairs (exits) do exits[k] = nil end
+  seed ()
+  visited = { [cur] = true, last = visited.last }
+  reopened = false
+  queued = {}
+  walked.lastnew = walked.n
+  note ("Not getting anywhere - forgetting the map and trying again.")
+end
+
 function advance ()
   if #queued > 0 then
     move (table.remove (queued, 1))
@@ -3499,18 +3542,29 @@ function advance ()
     return
   end
 
+  -- Walks to a room only.  On hunts too it measured worse where it matters
+  -- most: with the mob not there at all, the Nenukon went from reaching
+  -- every room in 8 runs of 12 to 1, because a hunt that has already seen
+  -- every room goes thirty moves without a new one by design, and each
+  -- reset threw away map it still needed.
+  if phase == "goto" and NAME[cur]
+     and walked.n - (walked.lastnew or 0) >= STALL_MOVES then
+    stall_reset ()
+  end
+
   -- Inside a maze, wait for this room's exit line before choosing a
   -- direction.  Until it arrives the only thing we have is the area's own
   -- table, which for these rooms lists every cardinal - so a decision
   -- made in that window picks a direction the room does not have and
   -- walks into a wall.  Waited for once per arrival, so a room that
   -- prints no exit line at all still gets on with it.
-  -- Only while SWEEPING.  A walk to a known room is routed over links we
-  -- already hold, so there is no direction being guessed and nothing for
-  -- this to protect - it was just a quarter of a second added to every
-  -- room of an mmout.
-  if phase ~= "goto" and A.maze[cur]
-     and walked.exits_at ~= cur and not walked.exwait then
+  -- Walks to a room wait too.  Exempting them (6.3) meant a walk chose its
+  -- direction the moment GMCP landed, before the room had printed its exit
+  -- line, off GMCP's own exit list - which inside a maze can name exits the
+  -- room does not have.  Measured on Prosper: three moves in ten were walls.
+  -- It costs next to nothing now, because the exit line arriving makes the
+  -- decision at once (see apply_exits) rather than waiting out this timer.
+  if A.maze[cur] and walked.exits_at ~= cur and not walked.exwait then
     walked.exwait = true
     schedule_decision (0.25)
     return
@@ -3684,11 +3738,15 @@ function advance ()
     -- Capped, because if a wipe leaves nothing to try we would come
     -- straight back here and recurse.  Three is plenty: each one is a
     -- fresh sweep of the whole area, and MAXSTEPS bounds the walking.
-    if wipes >= 3 then
-      stop ("Wiped the map and swept " .. wipes .. " times over and still " ..
-            "no sign of it. Something is wrong - walk out and back in.", true)
+    -- Never give up on a count of wipes.  Only if a wipe comes round again
+    -- without one move made since the last, which means there is genuinely
+    -- nothing here left to walk.  MAXSTEPS still bounds the whole thing.
+    if walked.lastwipe == walked.n then
+      stop ("Nowhere left to walk from here and it is not found - stopped. " ..
+            "Walk out and back in.", true)
       return
     end
+    walked.lastwipe = walked.n
     wipes = wipes + 1
     -- cleared in place: edges/exits are the tables inside MAPS[A.key],
     -- and handing the locals fresh ones instead quietly detaches them,
@@ -4625,6 +4683,11 @@ function apply_exits (room, e)
 
   exits[room] = e
   walked.exits_at = room
+  -- A decision was held back waiting for exactly this line.  Make it now,
+  -- not when the backstop timer runs out.
+  if walked.exwait and running and room == cur then
+    schedule_decision (0.05)
+  end
   local t = edges[room]
   if t then
     for _, d in ipairs (DIRS) do
