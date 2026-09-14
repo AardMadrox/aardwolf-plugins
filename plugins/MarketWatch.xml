@@ -37,7 +37,7 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="4.1"
+   version="4.2"
 >
 </plugin>
 
@@ -153,6 +153,11 @@ WHEN EDITING
   * The popup prompt is a miniwindow (WIN_ID "MarketWatch_prompt") with a
     POPUP_TTL of 60 seconds. It is a convenience layer over the same
     click to bid actions, not a separate path.
+  * Pop-up font (v4.2): POPUP_FONT / POPUP_FONT_SIZE (Consolas 12) for both
+    title and text. Bold is forced by pointing textrect.font at
+    textrect.font_bold, because a style's bold flag only draws when the
+    world's show bold option is on. fit_contents (1000, 600) sizes the window
+    to the text, so changing the size there is all that is needed.
 -->
 
 <!-- ============ TRIGGERS: the live auction channel ============
@@ -1023,6 +1028,10 @@ local gHaveWin = pcall (require, "themed_miniwindows")
 
 local WIN_ID    = "MarketWatch_prompt"
 local POPUP_TTL = 60    -- seconds a prompt stays up if you never answer it
+-- Pop-up font (v4.2). Consolas ships with Windows; the library default Dina 10
+-- is a bitmap font with no larger sizes.  Drawn bold, see popupBuild.
+local POPUP_FONT      = "Consolas"
+local POPUP_FONT_SIZE = 12
 local gWin      = nil
 local gPrompts  = {}    -- see popupAdd for the entry shape
 
@@ -1100,7 +1109,7 @@ popupBuild = function ()
     local ok, w = pcall (ThemedTextWindow,
       WIN_ID,          -- id
       200, 150,        -- default left, top
-      460, 160,        -- default width, height
+      620, 200,        -- default width, height (fit_contents resizes it)
       "MarketWatch",   -- title
       "center",        -- title alignment
       true,            -- is_temporary: gives the title-bar close button
@@ -1110,8 +1119,8 @@ popupBuild = function ()
       false,           -- text_copyable
       false,           -- url_hyperlinks: no auto URL detection (ours are explicit)
       true,            -- autowrap
-      nil, nil,        -- title font
-      nil, nil,        -- text font
+      POPUP_FONT, POPUP_FONT_SIZE,   -- title font
+      POPUP_FONT, POPUP_FONT_SIZE,   -- text font
       60,              -- max lines
       nil,             -- padding
       true,            -- defer showing until we have drawn
@@ -1123,6 +1132,13 @@ popupBuild = function ()
       return
     end
     gWin = w
+    -- Bold everything.  A style's own bold flag is ignored unless the world's
+    -- "show bold" option is on, so instead point TextRect's normal font at the
+    -- bold one it already loaded.  Widths are measured with the same font, so
+    -- fit_contents still sizes the window to the bold text.
+    if gWin.textrect and gWin.textrect.font_bold then
+      gWin.textrect.font = gWin.textrect.font_bold
+    end
     -- the [x] button and our No link should behave the same
     local prior = gWin.do_on_delete
     gWin.do_on_delete = function (self)
@@ -1192,7 +1208,7 @@ popupBuild = function ()
   }
   gWin:add_text (s, false, l)
 
-  pcall (function () gWin:fit_contents (700, 400) end)
+  pcall (function () gWin:fit_contents (1000, 600) end)
   gWin:draw ()
   gWin:show ()
   -- We are usually inside a trigger or timer here, and MUSHclient holds the
