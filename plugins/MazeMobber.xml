@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="5.0"
+   version="5.1"
    >
 </plugin>
 
@@ -145,6 +145,11 @@ ONE MODE, AND HOW A RUN STOPS
   straight to 28268 through entry_override (one walk only; cleared at the
   top of mm_command and mm_out). That route relies on the mapper knowing a
   path to 28268 - not checked in the harness.
+
+  menu_on_arrival IS CLEARED AT THE TOP OF mm_command AND mm_out (5.1).
+  It is only consumed when a goto reaches its exact target, and a walk in
+  from outside targets the entrance - often outside the maze - so it could
+  outlive its walk and eat the next pick's "Arrived:" line.
 
   THE LIST CAN LIVE IN A MINIWINDOW (4.6). Since 4.8 only the list that
   puts itself up on arrival uses it: menu () opens the window in window mode
@@ -2579,7 +2584,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "5.0"
+local VERSION  = "5.1"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3195,6 +3200,10 @@ local function stop (msg, bad)
   gen      = gen + 1
   EnableTriggerGroup ("mm_scan", false)
   save_map ()
+  if debug_on then
+    Note ("[mm debug] stop: " .. tostring (msg) .. "  queued notes=" .. #msg_q ..
+          "  flush armed=" .. tostring (msg_armed))
+  end
   if msg then
     if bad then warn (msg) else note (msg) end
   end
@@ -3724,6 +3733,11 @@ function advance ()
 
   if phase == "goto" then
     if cur == target then
+      if debug_on then
+        Note ("[mm debug] at target " .. tostring (cur) ..
+              "  menu_on_arrival=" .. tostring (menu_on_arrival) ..
+              "  leaving=" .. tostring (leaving and leaving.room))
+      end
       if leaving and leaving.room == cur then
         stop ()
         take_exit ()
@@ -5486,6 +5500,7 @@ function mm_out (name, line, wildcards)
   -- mmout used to just give up there.
   if word == "mmo" then word = "mmout" end
   entry_override = nil
+  menu_on_arrival = false
   local area = BYCMD[word:gsub ("out$", "")]
   if not area then
     area = ROOM2AREA[cur]
@@ -5693,6 +5708,7 @@ end
 
 -- An entry was clicked: drop the window, then do what the chat link does.
 function MM_WinPick (cmd)
+  if debug_on then Note ("[mm debug] window click -> " .. tostring (cmd)) end
   win_close ()
   Execute (cmd)
 end
@@ -5931,6 +5947,11 @@ end
 function mm_command (name, line, wildcards)
   out_walk = false
   entry_override = nil
+  -- Every command starts clean.  Left set by a walk in from outside that
+  -- ended any other way than on its target, it turned the NEXT walk's
+  -- "Arrived:" into a list - most often when you walked in from the area
+  -- list and then picked something off the list window that came up.
+  menu_on_arrival = false
   local word = (wildcards[1] or ""):lower ()
   local arg  = (wildcards[2] or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
 
