@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="4.5"
+   version="5.0"
    >
 </plugin>
 
@@ -137,6 +137,27 @@ ONE MODE, AND HOW A RUN STOPS
   resume_paused is FORWARD DECLARED above mm_resume, which is defined
   before it and would otherwise pick up a nil global - silent until the
   moment someone types mmr.
+
+  OUTSIDE EVERY AREA, mm AND mm win LIST THE AREAS (4.9). area_rows ()
+  reads AREAS; each link is the area's own command, which walks to its
+  entrance and puts the list up. An area with more than one way in lists
+  `ways_in` - Prosper's Sea Witch is "prosper sea", which sends the mapper
+  straight to 28268 through entry_override (one walk only; cleared at the
+  top of mm_command and mm_out). That route relies on the mapper knowing a
+  path to 28268 - not checked in the harness.
+
+  THE LIST CAN LIVE IN A MINIWINDOW (4.6). Since 4.8 only the list that
+  puts itself up on arrival uses it: menu () opens the window in window mode
+  (`win`, saved, on by default since 4.7; mm window switches it). Typed mm,
+  and the list shown after mm walks you in, always print in the main window
+  via menu_chat (). mm win opens the window whatever the setting.
+  list_rows () builds the entries once for both. A click drops the window
+  and sends what the chat link would. The window scrolls (mouse wheel or
+  the scrollbar) and is never taller than WIN_MAX_H, so Nenukon's long list
+  fits. Where you drag it is saved in the data file (winx/winy) and put
+  back into movewindow's variables on load, because the plugin itself
+  keeps no state file. Built the MarketWatch way - see the comment above
+  list_rows () for the teardown trap and why it matters.
 
   A SEEDED LINK IS A BELIEF, NOT A WALK.  Links put on the map from the
   long-term record are marked in `hinted`.  untried () still offers them,
@@ -1259,6 +1280,12 @@ local AREAS = {
     },
     auto = { [28256]=true, [28268]=true },
     entrance = { goto_room = 2010, run = "up" },
+    -- Two links in the area list (mm from outside every area): the theatre
+    -- by the entrance above, and the Sea Witch by walking the mapper
+    -- straight to its list room - the two halves never touch.
+    ways_in = { { label = "Prosper 201 Mazes - Theater" },
+                { label = "Prosper 201 Mazes - The Sea Witch", arg = "sea",
+                  goto_room = 28268, section = "seawitch" } },
     bridges = {  },
     -- Two places in one zone that never touch.  Marking them keeps each
     -- one's list to itself: standing on the ship you get the ship.
@@ -2552,7 +2579,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "4.5"
+local VERSION  = "5.0"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -2869,6 +2896,9 @@ local move_wait = 25
 -- area, and only the ones switched OFF are in here, so the table stays
 -- empty for anyone who never touches it.
 local no_auto = {}
+-- Show the list in a miniwindow instead of the main window (mm window).
+-- Saved with everything else.  On unless you have turned it off (4.7).
+local win_mode = true
 
 local function save_map ()
   local f = io.open (DATA_FILE, "w")
@@ -2880,6 +2910,9 @@ local function save_map ()
   end
   f:write ("return {\n  wait = " .. move_wait ..
            ",\n  no_auto = {" .. table.concat (na, ",") .. "}" ..
+           ",\n  win = " .. tostring (win_mode) ..
+           ",\n  winx = " .. (tonumber (GetVariable ("mw_MazeMobber_list_windowx")) or "nil") ..
+           ",\n  winy = " .. (tonumber (GetVariable ("mw_MazeMobber_list_windowy")) or "nil") ..
            ",\n  maps = {\n")
   for key, mp in pairs (MAPS) do
     f:write (string.format ("    [%q] = { edges = {\n", key))
@@ -2944,6 +2977,12 @@ local function load_map ()
   no_auto = {}
   for k, v in pairs (t.no_auto or {}) do
     if v then no_auto[k] = true end
+  end
+  if t.win == nil then win_mode = true else win_mode = t.win and true or false end
+  -- Where the list window was dragged to.  movewindow reads these.
+  if tonumber (t.winx) and tonumber (t.winy) then
+    SetVariable ("mw_MazeMobber_list_windowx", tostring (t.winx))
+    SetVariable ("mw_MazeMobber_list_windowy", tostring (t.winy))
   end
   for key, mp in pairs (t.maps or {}) do
     if MAPS[key] then
@@ -3072,6 +3111,9 @@ local recovers    = 0      -- times we have climbed back in this run
 local journey     = nil    -- a second leg to run once we cross over
 local awaiting_leg = false -- crossed over, waiting to land
 local menu_on_arrival = false -- walked in from outside; show the list
+-- A way in other than A.entrance, for this walk only (Prosper's Sea
+-- Witch).  Cleared at the start of every mm / mmout command.
+local entry_override = nil
 local want_levels  = nil   -- ordered sections to search, most likely first
 local level_i      = 1     -- which of them we are on
 local crossing     = nil
@@ -3691,7 +3733,7 @@ function advance ()
       if menu_on_arrival then
         menu_on_arrival = false
         stop ()
-        menu ()
+        menu_chat ()
         return
       end
       stop ("Arrived: @x048" .. (NAME[cur] or cur) .. "@w  (@x048" .. cur .. "@w)")
@@ -5427,7 +5469,7 @@ function begin (kind, tgt, mobname, noscan, wide_search)
   else
     phase = "travel"
     note ("Not in " .. A.label .. " - taking you to the way in first.")
-    Execute ("mapper goto " .. A.entrance.goto_room)
+    Execute ("mapper goto " .. (entry_override or A.entrance).goto_room)
     DoAfterSpecial (30, "mm_entry (" .. gen .. ")", 12)
   end
 end
@@ -5443,6 +5485,7 @@ function mm_out (name, line, wildcards)
   -- zone, because most of Gwillimberry is not a Gardens maze room and
   -- mmout used to just give up there.
   if word == "mmo" then word = "mmout" end
+  entry_override = nil
   local area = BYCMD[word:gsub ("out$", "")]
   if not area then
     area = ROOM2AREA[cur]
@@ -5512,9 +5555,10 @@ function mm_entry (g)
   if not running or g ~= gen or phase ~= "travel" then return end
   if NAME[cur] then return end   -- the room.info handler has taken over
   -- Some areas need a stored walk after the mapper drops us off.
-  if A.entrance.run and cur == A.entrance.goto_room then
+  local ent = entry_override or A.entrance
+  if ent.run and cur == ent.goto_room then
     note ("Running the entrance walk in.")
-    SendNoEcho (A.entrance.run)
+    SendNoEcho (ent.run)
     DoAfterSpecial (30, "mm_entry (" .. gen .. ")", 12)
     return
   end
@@ -5522,21 +5566,19 @@ function mm_entry (g)
         "yourself and try again.", true)
 end
 
-function menu ()
-  note_now (A.label .. ((#MOBS > 0) and " - click a mob to hunt it:"
-                                 or " - click a room to walk to it:"))
+-- The list, as rows, so the main window and the miniwindow draw exactly the
+-- same thing.  A row is either { head = "..." } or a clickable entry.
+function list_rows ()
+  local rows = {}
+  rows.title = A.label .. ((#MOBS > 0) and " - click a mob to hunt it:"
+                                       or " - click a room to walk to it:")
   local shown_level
   for i, m in ipairs (MOBS) do
     local nm = m[1]
     if m[3] and m[3] ~= shown_level then
       shown_level = m[3]
-      ColourNote (CLR_TAG, "", "   -- " .. m[3] .. " --")
+      rows[#rows + 1] = { head = m[3] }
     end
-    ColourTell (CLR_TAG, "", "   ")
-    Hyperlink (A.cmd .. " " .. i, string.format ("%2d", i), "Hunt " .. nm,
-               CLR_HI, "black", 0, 1)
-    ColourTell (CLR_TAG, "", "  ")
-    Hyperlink (A.cmd .. " " .. i, nm, "Hunt " .. nm, CLR_MSG, "black", 0, 1)
     -- what we know about where it lives, and whether it scans
     local rg, cnt, only = RANGE[normalise (nm)], 0, nil
     if rg then for v in pairs (rg) do cnt = cnt + 1; only = v end end
@@ -5553,12 +5595,14 @@ function menu ()
     if m[4] then
       tail = (tail ~= "" and (tail .. " - ") or "") .. m[4]
     end
-    ColourNote (CLR_TAG, "", string.rep (" ", math.max (1, 30 - #nm)) .. tail)
+    rows[#rows + 1] = { n = i, label = nm, tip = "Hunt " .. nm,
+                        cmd = A.cmd .. " " .. i, colour = CLR_MSG,
+                        pad = 30, tail = tail }
   end
 
   local shown = A.places
   if #shown > 0 then
-    ColourNote (CLR_TAG, "", "   -- " .. A.outlabel .. " --")
+    rows[#rows + 1] = { head = A.outlabel }
     local shown_head
     for i, p in ipairs (shown) do
       -- An entry can carry its own heading, so rooms that sit behind
@@ -5566,7 +5610,7 @@ function menu ()
       -- the ones you can just walk to.
       if p.head and p.head ~= shown_head then
         shown_head = p.head
-        ColourNote (CLR_TAG, "", "   -- " .. p.head .. " --")
+        rows[#rows + 1] = { head = p.head }
       end
       local k = #MOBS + i
       local label = p.label or roomname (p.room)
@@ -5574,12 +5618,6 @@ function menu ()
       -- worth picking out, the way STTNG did it: they are the places you
       -- actually go, the rest are just maze rooms you can aim at.
       local side = not A.maze[p.room]
-      ColourTell (CLR_TAG, "", "   ")
-      Hyperlink (A.cmd .. " " .. k, string.format ("%2d", k), "Go and " .. p.how,
-                 CLR_HI, "black", 0, 1)
-      ColourTell (CLR_TAG, "", "  ")
-      Hyperlink (A.cmd .. " " .. k, label, "Go and " .. p.how,
-                 side and CLR_NAME or CLR_MSG, "black", 0, 1)
       local extra = ""
       if p.section and A.sections[cur] and A.sections[cur] ~= p.section then
         local b = A.bridges[A.sections[cur]]
@@ -5589,15 +5627,188 @@ function menu ()
       -- something to do beyond walking.
       local how = (p.how == "walk there") and "" or (p.how .. extra)
       if how ~= "" then how = how .. "  " end
-      ColourNote (CLR_TAG, "", string.rep (" ", math.max (1, 32 - #label)) ..
-                  how .. "(" .. p.room .. ")" ..
-                  ((cur == p.room) and "  <- you are here" or ""))
+      rows[#rows + 1] = { n = k, label = label, tip = "Go and " .. p.how,
+                          cmd = A.cmd .. " " .. k,
+                          colour = side and CLR_NAME or CLR_MSG, pad = 32,
+                          tail = how .. "(" .. p.room .. ")" ..
+                                 ((cur == p.room) and "  <- you are here" or "") }
+    end
+  end
+  return rows
+end
+
+-- =====================================================================
+-- The list window (mm window / mm win)
+--
+-- Built the way MarketWatch builds its pop-up, and for the same reasons:
+--   * a TextRect link whose text is not a URL is run as Lua, so each entry
+--     calls MM_WinPick with the command the chat link would have sent;
+--   * a click runs INSIDE the window's own hotspot callback, and destroying
+--     the window there leaves live hotspots on a dead object - so a click
+--     hides it at once and destroys it on a timer, after the callback;
+--   * a window the library no longer knows about is a zombie and is never
+--     reused; one left over from a previous session is deleted on install;
+--   * Repaint () after showing, or it does not appear until something else
+--     redraws.
+-- The window stays up until it is closed or an entry is clicked.
+-- =====================================================================
+pcall (require, "themed_miniwindows")
+local WIN_ID        = "MazeMobber_list"
+local WIN_FONT      = "Consolas"
+local WIN_FONT_SIZE = 12
+local WIN_MAX_H     = 520    -- pixels; a longer list scrolls
+local gWin          = nil
+local win_gen       = 0      -- voids a pending destroy when the window reopens
+
+local function win_line (segs)
+  local styles, links, pos = {}, {}, 1
+  for _, sg in ipairs (segs) do
+    if sg.text ~= "" then
+      styles[#styles + 1] = { text = sg.text, textcolour = ColourNameToRGB (sg.colour or CLR_MSG) }
+      if sg.code then
+        links[#links + 1] = { start = pos, stop = pos + #sg.text - 1,
+                              text = sg.code, label = sg.tip }
+      end
+      pos = pos + #sg.text
+    end
+  end
+  return styles, links
+end
+
+function MM_WinDestroy (tok)
+  if tok and tok ~= win_gen then return end   -- reopened since: keep it
+  local w = gWin
+  gWin = nil
+  if w then pcall (function () w:delete (true) end) end
+  pcall (WindowDelete, WIN_ID)
+  pcall (Repaint)
+end
+
+local function win_close ()
+  win_gen = win_gen + 1
+  pcall (WindowShow, WIN_ID, false)
+  pcall (Repaint)
+  DoAfterSpecial (0.2, "MM_WinDestroy (" .. win_gen .. ")", 12)
+end
+
+-- An entry was clicked: drop the window, then do what the chat link does.
+function MM_WinPick (cmd)
+  win_close ()
+  Execute (cmd)
+end
+
+-- Put the current area's list (or the rows given) in the window.  False if
+-- there is no window to be had, so the caller can fall back to the main
+-- window.
+function win_open (rows)
+  if (not rows and not A) or type (ThemedTextWindow) ~= "function" then
+    return false
+  end
+  win_gen = win_gen + 1
+  if gWin and not (ThemedWindowClass and ThemedWindowClass.window_map
+                   and ThemedWindowClass.window_map[WIN_ID]) then
+    gWin = nil
+    pcall (WindowDelete, WIN_ID)
+  end
+  if not gWin then
+    local ok, w = pcall (ThemedTextWindow,
+      WIN_ID,
+      386, 0,            -- default left, top
+      420, 300,          -- default width, height (fit_contents resizes it)
+      "MazeMobber",      -- title
+      "center",
+      true,              -- title-bar close button
+      false,             -- resizeable
+      true,              -- text scrolls (mouse wheel and a scrollbar)
+      false, false, false,
+      true,              -- autowrap
+      WIN_FONT, WIN_FONT_SIZE,
+      WIN_FONT, WIN_FONT_SIZE,
+      300,               -- max lines
+      nil,
+      true,              -- defer showing until drawn
+      false, nil,
+      "Close")
+    if not ok or not w then return false end
+    gWin = w
+    if gWin.textrect and gWin.textrect.font_bold then
+      gWin.textrect.font = gWin.textrect.font_bold
+    end
+    local prior = gWin.do_on_delete
+    gWin.do_on_delete = function (self)
+      if prior then prior (self) end
+      gWin = nil
     end
   end
 
+  rows = rows or list_rows ()
+  gWin:clear (false)
+  local st, lk = win_line { { text = rows.title, colour = CLR_NAME } }
+  gWin:add_text (st, false, lk)
+  for _, r in ipairs (rows) do
+    if r.head then
+      st, lk = win_line { { text = "   -- " .. r.head .. " --", colour = CLR_TAG } }
+    else
+      local code = string.format ("MM_WinPick(%q)", r.cmd)
+      st, lk = win_line {
+        { text = "   " },
+        { text = string.format ("%2d", r.n), colour = CLR_HI, code = code, tip = r.tip },
+        { text = "  " },
+        { text = r.label, colour = r.colour, code = code, tip = r.tip },
+        { text = string.rep (" ", math.max (1, r.pad - #r.label)) .. r.tail, colour = CLR_TAG },
+      }
+    end
+    gWin:add_text (st, false, lk)
+  end
+  pcall (function () gWin:fit_contents (1000, WIN_MAX_H) end)
+  gWin:draw ()
+  gWin:show ()
+  pcall (Repaint)
+  return true
+end
+
+-- Every area this works in, for mm from outside all of them.  Clicking one
+-- sends its command, which walks you to its way in and puts its list up.
+function area_rows ()
+  local rows = { title = "MazeMobber works in these areas - click one to go there:" }
+  local n = 0
+  for _, a in ipairs (AREAS) do
+    for _, w in ipairs (a.ways_in or { {} }) do
+      n = n + 1
+      local label = w.label or a.label
+      local cmd = a.cmd .. (w.arg and (" " .. w.arg) or "")
+      rows[#rows + 1] = { n = n, label = label, tip = "Go to " .. label,
+                          cmd = cmd, colour = CLR_MSG, pad = 36, tail = cmd }
+    end
+  end
+  return rows
+end
+
+-- The list in the main window: this area's, or the rows given.
+function menu_chat (rows)
+  rows = rows or list_rows ()
+  note_now (rows.title)
+  for _, r in ipairs (rows) do
+    if r.head then
+      ColourNote (CLR_TAG, "", "   -- " .. r.head .. " --")
+    else
+      ColourTell (CLR_TAG, "", "   ")
+      Hyperlink (r.cmd, string.format ("%2d", r.n), r.tip, CLR_HI, "black", 0, 1)
+      ColourTell (CLR_TAG, "", "  ")
+      Hyperlink (r.cmd, r.label, r.tip, r.colour, "black", 0, 1)
+      ColourNote (CLR_TAG, "", string.rep (" ", math.max (1, r.pad - #r.label)) .. r.tail)
+    end
+  end
   -- No footer.  The link count means nothing to anyone reading it, and
   -- the command list repeated itself under every list when mm help holds
   -- the same thing and says it once.
+end
+
+-- The list that puts itself up on arrival.  Typed mm always prints in the
+-- main window (menu_chat); mm win opens the window by hand.
+function menu ()
+  if win_mode and win_open () then return end
+  menu_chat ()
 end
 
 local function pick (n)
@@ -5696,6 +5907,9 @@ local function show_help ()
     "mmr              the same thing, shorter",
     "mmout @wor @x048mmo@w     walk back out of here",
     "mm list          stop this area putting its list up on arrival",
+    "mm window        arrival list in its window, or here",
+    "mm win           open the list window",
+    "mm (elsewhere)   list the areas - click one to go there",
     "mm reset         forget this area's map and start again",
     "mm reload        load this plugin again after an update",
     "",
@@ -5716,6 +5930,7 @@ end
 
 function mm_command (name, line, wildcards)
   out_walk = false
+  entry_override = nil
   local word = (wildcards[1] or ""):lower ()
   local arg  = (wildcards[2] or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
 
@@ -5744,6 +5959,17 @@ function mm_command (name, line, wildcards)
 
   if arg == "help" then show_help () return end
 
+  -- Before the area is worked out: it is a setting, not something done in
+  -- an area, and should not complain that you are not standing in a maze.
+  if arg == "window" then
+    win_mode = not win_mode
+    save_map ()
+    note (win_mode
+          and "The list will open in a window now - @x048mm window@w again to keep it here."
+          or  "The list will show here again - @x048mm window@w to put it back in a window.")
+    return
+  end
+
   if arg == "resume" then
     if not resume_paused () then
       note ("Nothing to resume.")
@@ -5762,6 +5988,12 @@ function mm_command (name, line, wildcards)
       local ri = gmcp ("room.info")
       local zone = (type (ri) == "table") and ri.zone or nil
       area = zone and BYZONE[zone] or nil
+    end
+    if not area and (arg == "" or arg == "win") then
+      -- Outside every area: list the areas, clickable, to go to one.
+      if arg == "win" and win_open (area_rows ()) then return end
+      menu_chat (area_rows ())
+      return
     end
     if not area then
       -- Say what the MUD actually told us.  Without this, "not standing in
@@ -5783,6 +6015,14 @@ function mm_command (name, line, wildcards)
 
   -- Handled after the area is worked out, so it applies to the one you
   -- are standing in - or to a named one, "sahu list".
+  if arg == "win" then
+    if not win_open () then
+      warn ("The list window is not available - showing the list here instead.")
+      menu_chat ()
+    end
+    return
+  end
+
   if arg == "list" then
     no_auto[A.key] = (not no_auto[A.key]) or nil
     save_map ()
@@ -5793,8 +6033,25 @@ function mm_command (name, line, wildcards)
     return
   end
 
+  -- A second way in, named by its word: "prosper sea".
+  for _, w in ipairs (A.ways_in or {}) do
+    if w.arg and w.arg == arg then
+      if NAME[cur] and A.sections[cur] == w.section then menu_chat () return end
+      if NAME[cur] then
+        note ("You are in the other part of " .. A.label .. " - get out with " ..
+              "@x048mmout@w first, then @x048" .. A.cmd .. " " .. w.arg .. "@w.")
+        return
+      end
+      menu_on_arrival = true
+      entry_override = { goto_room = w.goto_room }
+      note ("Taking you to @x048" .. w.label .. "@w (" .. w.goto_room .. ").")
+      begin ("goto", w.goto_room, nil, false)
+      return
+    end
+  end
+
   if arg == "" then
-    if NAME[cur] then menu () return end
+    if NAME[cur] then menu_chat () return end
     -- Outside the maze itself: go to the way in, then show the list.
     menu_on_arrival = true
     note ("Not in " .. A.label .. " yet - taking you to @x048" ..
@@ -5941,6 +6198,7 @@ end
 -- ===========================================================
 
 function OnPluginInstall ()
+  pcall (WindowDelete, "MazeMobber_list")   -- one left over from last session
   load_map ()
   prime_known ()   -- after loading, so real observations win
   load_descs ()
@@ -5955,7 +6213,7 @@ function OnPluginInstall ()
         "area. See @x048mm help@w for a list.")
 end
 
-function OnPluginClose () save_map () end
+function OnPluginClose () save_map () pcall (WindowDelete, "MazeMobber_list") end
 function OnPluginDisable () stop () end
 
 ]]>
