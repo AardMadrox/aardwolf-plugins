@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="5.1"
+   version="5.3"
    >
 </plugin>
 
@@ -45,6 +45,7 @@ WHAT IT DOES
     mayhem   Mayhem, In The Mist                  1888 to 1894
     vale     Sundered Vale, the Maze of Tunnels   1079 to 1116
     gallows  Gallows Hill, the fog                4384 to 4391
+    goldrush Gold Rush, the deep shaft in the mine 15043 to 15048
     sahu     Sahuagin, four doors up to the princes 34600 to 34613
 
 COMMANDS
@@ -137,6 +138,21 @@ ONE MODE, AND HOW A RUN STOPS
   resume_paused is FORWARD DECLARED above mm_resume, which is defined
   before it and would otherwise pick up a nil global - silent until the
   moment someone types mmr.
+
+  THE LIST WINDOW CLOSES WHEN YOU LEAVE ITS AREA, AND ITS FONT IS YOURS
+  (5.3). win_open records win_area (nil for the area list); the room
+  handler calls MM_WinAreaCheck on every room, which closes the window once
+  neither the room nor the GMCP zone belongs to that area. mm font opens
+  utils.fontpicker (as SnD and the mapper do), mm font <name> and
+  mm fontsize <n> set it by hand; saved as winfont/winfontsize, and an open
+  window is rebuilt with the new font.
+
+  GOLD RUSH (5.2). Four shaft rooms shuffle (15044-15047). Crack room,
+  15048, is not a maze room - GMCP gives its real exits, north to 15044
+  and west to 15047 - so those two are seeded. You get in from 15043 with
+  "enter shaft" (entrance run, like Scarred's "enter crack"), and nothing
+  in the shaft leads back out, so there is no mmout. The list comes up in
+  15044; its one entry is Crack room.
 
   OUTSIDE EVERY AREA, mm AND mm win LIST THE AREAS (4.9). area_rows ()
   reads AREAS; each link is the area's own command, which walks to its
@@ -459,7 +475,7 @@ WHEN EDITING
 
 <aliases>
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|gallows|mm)(?:\s+(.*))?$"
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|gallows|goldrush|mm)(?:\s+(.*))?$"
     script="mm_command" name="mm_command"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -469,7 +485,7 @@ WHEN EDITING
        either the end of the line or a space, so "mm1" falls through it.
        Digits only, which is what keeps this off mmo, mmout and mmr. -->
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|gallows|mm)(\d+)$"
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|gallows|goldrush|mm)(\d+)$"
     script="mm_command" name="mm_number"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -2492,6 +2508,55 @@ local AREAS = {
     mobs = {
     },
   },
+  {
+    key = "goldrush", cmd = "goldrush", label = "Gold Rush",
+    zone = "goldrush",
+    lo = 15043, hi = 15048,
+    roomname = {
+      [15043] = "The End of a Long Mine Shaft",
+      [15044] = "A Deep Shaft in the Gold Mine",
+      [15045] = "A Deep Shaft in the Gold Mine",
+      [15046] = "A Deep Shaft in the Gold Mine",
+      [15047] = "A Deep Shaft in the Gold Mine",
+      [15048] = "A Deep Shaft in the Gold Mine",
+    },
+    -- Four shaft rooms shuffle.  The fifth, Crack room, gives real exit
+    -- numbers, so its two ways back into the shaft are fixed.
+    maze = { [15044]=true, [15045]=true, [15046]=true, [15047]=true },
+    seed = { {15048,"n",15044}, {15048,"w",15047}, },
+    exitdirs = {
+      [15043] = { "n" },
+      [15044] = { "e", "n" },
+      [15045] = { "e", "n", "s" },
+      [15046] = { "s", "w" },
+      [15047] = { "e", "n", "s", "w" },
+      [15048] = { "n", "w" },
+    },
+    -- North from the end of the mine shaft is back the way you came.
+    leaves = { {15043,"n"}, },
+    auto = { [15044]=true },
+    entrance = { goto_room = 15043, run = "enter shaft" },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way through",
+    -- No mmout: nothing in the shaft leads back out.
+    outs = {  },
+    places = {
+      { room = 15048, how = "walk there", label = "Crack room" },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
 }
 
 local BYKEY, BYCMD, BYZONE, ROOM2AREA = {}, {}, {}, {}
@@ -2584,7 +2649,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "5.1"
+local VERSION  = "5.3"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -2904,6 +2969,8 @@ local no_auto = {}
 -- Show the list in a miniwindow instead of the main window (mm window).
 -- Saved with everything else.  On unless you have turned it off (4.7).
 local win_mode = true
+-- The list window's font (mm font / mm fontsize).  Saved too.
+local win_font, win_font_size = "Consolas", 12
 
 local function save_map ()
   local f = io.open (DATA_FILE, "w")
@@ -2918,6 +2985,8 @@ local function save_map ()
            ",\n  win = " .. tostring (win_mode) ..
            ",\n  winx = " .. (tonumber (GetVariable ("mw_MazeMobber_list_windowx")) or "nil") ..
            ",\n  winy = " .. (tonumber (GetVariable ("mw_MazeMobber_list_windowy")) or "nil") ..
+           ",\n  winfont = " .. string.format ("%q", win_font) ..
+           ",\n  winfontsize = " .. win_font_size ..
            ",\n  maps = {\n")
   for key, mp in pairs (MAPS) do
     f:write (string.format ("    [%q] = { edges = {\n", key))
@@ -2989,6 +3058,8 @@ local function load_map ()
     SetVariable ("mw_MazeMobber_list_windowx", tostring (t.winx))
     SetVariable ("mw_MazeMobber_list_windowy", tostring (t.winy))
   end
+  if type (t.winfont) == "string" and t.winfont ~= "" then win_font = t.winfont end
+  if tonumber (t.winfontsize) then win_font_size = tonumber (t.winfontsize) end
   for key, mp in pairs (t.maps or {}) do
     if MAPS[key] then
       MAPS[key].edges = mp.edges or {}
@@ -5062,6 +5133,7 @@ function OnPluginBroadcast (msg, id, bname, text)
     visited.prev2, visited.last = visited.last, was
   end
   absorb_room ()
+  MM_WinAreaCheck (num, ri.zone)
 
   -- Just come in: show the list without being asked.  Only when we have
   -- arrived from outside, so sweeping through these rooms stays quiet.
@@ -5669,11 +5741,11 @@ end
 -- =====================================================================
 pcall (require, "themed_miniwindows")
 local WIN_ID        = "MazeMobber_list"
-local WIN_FONT      = "Consolas"
-local WIN_FONT_SIZE = 12
 local WIN_MAX_H     = 520    -- pixels; a longer list scrolls
 local gWin          = nil
 local win_gen       = 0      -- voids a pending destroy when the window reopens
+local win_area      = nil    -- key of the area whose list is up; nil for the area list
+local win_rows      = nil    -- the rows given to the open window (nil = area's own list)
 
 local function win_line (segs)
   local styles, links, pos = {}, {}, 1
@@ -5704,6 +5776,26 @@ local function win_close ()
   pcall (WindowShow, WIN_ID, false)
   pcall (Repaint)
   DoAfterSpecial (0.2, "MM_WinDestroy (" .. win_gen .. ")", 12)
+end
+
+-- Walked out of the area whose list is up: put it away.  Called from the
+-- room handler on every room (a global, so that handler takes on no more
+-- upvalues).  The area list, opened outside every area, is left alone.
+function MM_WinAreaCheck (num, zone)
+  if not gWin or not win_area then return end
+  local here = ROOM2AREA[num] or (zone and BYZONE[zone]) or nil
+  if here and here.key == win_area then return end
+  win_close ()
+end
+
+-- The font changed: rebuild an open window so it takes the new one.
+local function win_refont ()
+  if not gWin then return end
+  local rows, area = win_rows, win_area
+  win_gen = win_gen + 1
+  MM_WinDestroy ()
+  if rows then win_open (rows)
+  elseif area and A and A.key == area then win_open () end
 end
 
 -- An entry was clicked: drop the window, then do what the chat link does.
@@ -5738,8 +5830,8 @@ function win_open (rows)
       true,              -- text scrolls (mouse wheel and a scrollbar)
       false, false, false,
       true,              -- autowrap
-      WIN_FONT, WIN_FONT_SIZE,
-      WIN_FONT, WIN_FONT_SIZE,
+      win_font, win_font_size,
+      win_font, win_font_size,
       300,               -- max lines
       nil,
       true,              -- defer showing until drawn
@@ -5757,6 +5849,8 @@ function win_open (rows)
     end
   end
 
+  win_rows = rows
+  win_area = (not rows) and A.key or nil
   rows = rows or list_rows ()
   gWin:clear (false)
   local st, lk = win_line { { text = rows.title, colour = CLR_NAME } }
@@ -5799,6 +5893,9 @@ function area_rows ()
   end
   return rows
 end
+
+-- mm_command is defined above the window code and cannot see win_refont.
+function MM_FontApply () win_refont () end
 
 -- The list in the main window: this area's, or the rows given.
 function menu_chat (rows)
@@ -5923,8 +6020,10 @@ local function show_help ()
     "mmr              the same thing, shorter",
     "mmout @wor @x048mmo@w     walk back out of here",
     "mm list          stop this area putting its list up on arrival",
-    "mm window        arrival list in its window, or here",
+    "mm window        window off: the list prints here instead (again: back on)",
     "mm win           open the list window",
+    "mm font          pick the list window's font (or mm font <name>)",
+    "mm fontsize <n>  the list window's font size",
     "mm (elsewhere)   list the areas - click one to go there",
     "mm reset         forget this area's map and start again",
     "mm reload        load this plugin again after an update",
@@ -5982,6 +6081,37 @@ function mm_command (name, line, wildcards)
 
   -- Before the area is worked out: it is a setting, not something done in
   -- an area, and should not complain that you are not standing in a maze.
+  local fsize = arg:match ("^fontsize%s*(.*)$")
+  if fsize then
+    local n = tonumber (fsize)
+    if not n or n < 6 or n > 40 then
+      warn ("Give a size from 6 to 40 - @x048mm fontsize 12@w. It is " ..
+            win_font_size .. " now.")
+      return
+    end
+    win_font_size = math.floor (n)
+    save_map ()
+    MM_FontApply ()
+    note ("List window font: @x048" .. win_font .. " " .. win_font_size .. "@w.")
+    return
+  end
+
+  -- "fontsize" first: "^font" alone would swallow it as a font called "size 11".
+  local fname = (arg == "font") and "" or arg:match ("^font%s+(.+)$")
+  if fname then
+    if fname == "" then
+      local ok, f = pcall (utils.fontpicker, win_font, win_font_size, 0)
+      if not ok or type (f) ~= "table" then return end   -- cancelled
+      win_font = f.name or win_font
+      win_font_size = tonumber (f.size) or win_font_size
+    else
+      win_font = fname
+    end
+    save_map ()
+    MM_FontApply ()
+    note ("List window font: @x048" .. win_font .. " " .. win_font_size .. "@w.")
+    return
+  end
   if arg == "window" then
     win_mode = not win_mode
     save_map ()
