@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="5.3"
+   version="5.5"
    >
 </plugin>
 
@@ -46,6 +46,7 @@ WHAT IT DOES
     vale     Sundered Vale, the Maze of Tunnels   1079 to 1116
     gallows  Gallows Hill, the fog                4384 to 4391
     goldrush Gold Rush, the deep shaft in the mine 15043 to 15048
+    dunoir   Mount duNoir, flying over the lava   14281 to 14288
     sahu     Sahuagin, four doors up to the princes 34600 to 34613
 
 COMMANDS
@@ -146,6 +147,23 @@ ONE MODE, AND HOW A RUN STOPS
   utils.fontpicker (as SnD and the mapper do), mm font <name> and
   mm fontsize <n> set it by hand; saved as winfont/winfontsize, and an open
   window is rebuilt with the new font.
+
+  A RESET STOPS BELIEVING THE AREA TABLE (5.5). Walks to Prosper's side
+  rooms looped for 881 moves when a repop had moved which maze room their
+  "up" hangs off: the map was corrected by walking it, and every reset
+  seeded the stale link straight back. stall_reset () now marks every
+  seeded link bad for the rest of the run (walked.badseed, skipped by
+  seed ()), and record () marks one that contradicts itself. Harness knob
+  layout.stale_seeds models the moved links: 45/48 before, 48/48 after,
+  and 51/51 either way when the table is right (scratchpad
+  test_staleseed.py). A time limit was NOT added - the 30-move reset is
+  that limit already; the trouble was what the reset put back.
+
+  MOUNT DUNOIR (5.4). Six lava rooms shuffle (14282-14287). The alcove
+  14281 (list room) goes north into them, and Burning Tunnel 14288 gives
+  real exits - west back into the lava, south onwards out of it - so both
+  are seeded and the south exit is a leaf. You get in from the oasis 14301
+  with "say bhazhat" (entrance run). No mmout.
 
   GOLD RUSH (5.2). Four shaft rooms shuffle (15044-15047). Crack room,
   15048, is not a maze room - GMCP gives its real exits, north to 15044
@@ -475,7 +493,7 @@ WHEN EDITING
 
 <aliases>
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|gallows|goldrush|mm)(?:\s+(.*))?$"
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|gallows|goldrush|dunoir|mm)(?:\s+(.*))?$"
     script="mm_command" name="mm_command"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -485,7 +503,7 @@ WHEN EDITING
        either the end of the line or a space, so "mm1" falls through it.
        Digits only, which is what keeps this off mmo, mmout and mmr. -->
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|gallows|goldrush|mm)(\d+)$"
+    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|gallows|goldrush|dunoir|mm)(\d+)$"
     script="mm_command" name="mm_number"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -2557,6 +2575,60 @@ local AREAS = {
     mobs = {
     },
   },
+  {
+    key = "dunoir", cmd = "dunoir", label = "Mount duNoir",
+    zone = "dunoir",
+    lo = 14281, hi = 14288,
+    roomname = {
+      [14281] = "A small alcove",
+      [14282] = "Flying over Lava",
+      [14283] = "Flying over Lava",
+      [14284] = "Flying over Lava",
+      [14285] = "Flying over Lava",
+      [14286] = "Flying over Lava",
+      [14287] = "Flying over Lava",
+      [14288] = "Burning Tunnel",
+    },
+    -- The lava shuffles.  The alcove you arrive in and the tunnel you are
+    -- heading for both give real exit numbers, so those links are known.
+    maze = { [14282]=true, [14283]=true, [14284]=true, [14285]=true,
+             [14286]=true, [14287]=true },
+    seed = { {14281,"n",14282}, {14288,"w",14287}, },
+    exitdirs = {
+      [14281] = { "n" },
+      [14282] = { "e", "n", "s", "w" },
+      [14283] = { "d", "e", "n", "s", "w" },
+      [14284] = { "e", "n", "s", "w" },
+      [14285] = { "e", "n", "s", "w" },
+      [14286] = { "e", "n", "s", "w" },
+      [14287] = { "e", "n", "s", "w" },
+      [14288] = { "s", "w" },
+    },
+    -- South out of the Burning Tunnel carries on into the rest of duNoir.
+    leaves = { {14288,"s"}, },
+    auto = { [14281]=true },
+    entrance = { goto_room = 14301, run = "say bhazhat" },
+    bridges = {  },
+    sections = {  },
+    outlabel = "the way through",
+    -- No mmout: the tunnel is the way on, and it is what you came for.
+    outs = {  },
+    places = {
+      { room = 14288, how = "walk there", label = "Burning Tunnel" },
+    },
+    late = {  },
+    noroute = {  },
+    ranged = false,
+    uses_where = false,
+    levels = {},
+    keywords = {},
+    roomdesc = {
+    },
+    range = {
+    },
+    mobs = {
+    },
+  },
 }
 
 local BYKEY, BYCMD, BYZONE, ROOM2AREA = {}, {}, {}, {}
@@ -2649,7 +2721,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "5.3"
+local VERSION  = "5.5"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -2897,8 +2969,17 @@ local function seed ()
   -- sweep strands us a level away from the mob.  Crossings are made
   -- deliberately, through A.bridges, and nowhere else.
   seeded_link = {}
+  -- A SEEDED LINK THAT THIS RUN HAS PROVED WRONG IS NOT PUT BACK.  The
+  -- area table says which maze room Moriarty's is up from, and a repop
+  -- moves it.  Walking it corrects the map - but a reset re-seeded the
+  -- stale belief, so the walk went back to the same room, went up, landed
+  -- somewhere else, reset, and round again.  walked.badseed remembers
+  -- them for this run only: the next run trusts the table again, because
+  -- by then the maze may well have shuffled back.
+  seeded_link = {}
   for _, e in ipairs (A.seed) do
-    if not (A.sections and A.sections[e[1]] and A.sections[e[3]]
+    if not (walked.badseed and walked.badseed[e[1] .. "," .. e[2]])
+       and not (A.sections and A.sections[e[1]] and A.sections[e[3]]
             and A.sections[e[1]] ~= A.sections[e[3]]) then
       link (e[1], e[2], e[3])
       seeded_link[e[1] .. "," .. e[2]] = true
@@ -3708,6 +3789,20 @@ end
 -- about that.
 local STALL_MOVES = 30
 local function stall_reset ()
+  -- GOING IN CIRCLES MEANS THE BELIEVED LINKS ARE SUSPECT, not just the
+  -- one we happened to catch out.  Prosper's side rooms hang off "up" from
+  -- a maze room and a repop moves them; re-seeding the table's version
+  -- after every reset sent the walk back to the same room to go up again,
+  -- for 881 moves.  Dropping them all for the rest of the run took walks
+  -- to those four rooms from 45/48 to 48/48 when the table is stale, and
+  -- costs nothing when it is right (51/51 either way).  The next run
+  -- trusts the table again - by then the maze may have shuffled back.
+  if A then
+    walked.badseed = walked.badseed or {}
+    for _, e in ipairs (A.seed) do
+      walked.badseed[e[1] .. "," .. e[2]] = true
+    end
+  end
   for k in pairs (edges) do edges[k] = nil end
   for k in pairs (exits) do exits[k] = nil end
   seed ()
@@ -4233,6 +4328,13 @@ local function record (from, dir, to)
   edges[from] = edges[from] or {}
   local old = edges[from][dir]
   if old and old ~= to then
+    -- Believed from the area table and it went somewhere else: stop
+    -- seeding it for the rest of this run (see seed ()).
+    if seeded_link[from .. "," .. dir] then
+      walked.badseed = walked.badseed or {}
+      walked.badseed[from .. "," .. dir] = true
+      seeded_link[from .. "," .. dir] = nil
+    end
     reshuffled (from)
     edges[from] = edges[from] or {}
   end
