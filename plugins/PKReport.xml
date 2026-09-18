@@ -1,0 +1,341 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="PKReport"
+   author="Eric"
+   id="2323d15a8164b7c9be3612a4"
+   language="Lua"
+   purpose="Reports PK attacks with your room to chosen channels; makes others' reports clickable"
+   date_written="2026-09-18"
+   requires="4.59"
+   version="1.2"
+   save_state="y"
+   >
+</plugin>
+
+<!--
+MAINTAINER NOTES (added 2026-09-18)
+====================================================================
+WHAT IT DOES
+  When someone attacks you in PK, Aardwolf prints
+    ** You can take revenge on <name> for 3 hours.
+  PKReport turns that into a report:
+    PK Alert: <name> has attacked me in Area - <area> pkvnum[<room number>]
+  coloured red alert, cyan (x045) attacker, green (x048) area and room.
+  and sends it to any of spouse, group and clan channels that are
+  switched on. With every channel off (the default) it is only echoed
+  on your own screen.
+
+  It also works in reverse: any line you receive containing
+  "pkvnum[12345]" is redrawn as a clickable link that runs
+  "mapper goto 12345", so groupmates running this plugin can click the
+  report to walk to you. People without the plugin just see the text.
+
+COMMANDS
+  pkr                  help, including which channels are on
+  pkr spo on|off       spouse channel
+  pkr gt on|off        group channel
+  pkr clan on|off      clan channel
+  pkr all off          switch every channel off
+  pkr test             build a report for your current room, local echo only
+
+HOW IT WORKS
+  Room number comes from GMCP room.info "num", read through gmcphelper's
+  gmcp() function at the moment the revenge line arrives. The area keyword
+  comes from room.info "zone"; the full area name is looked up in the
+  stock mapper's sqlite db (areas table, uid = zone) and falls back to the
+  keyword if the db or the row is missing. Unmappable rooms report num -1;
+  those reports go out without a room number, so nobody gets a broken link.
+
+  The same attacker is reported at most once per COOLDOWN seconds (30), in
+  case the revenge line repeats during one fight.
+
+  The receiving trigger omits the original line and redraws each style run
+  of it as a Hyperlink, so the line keeps its original colours. It matches
+  the LAST "pkvnum[digits]" on the line (v1.1 sent pkvnum(digits), which
+  is still accepted). pkvnum is the marker (since v1.1,
+  when it replaced a bare "(digits)"), so any line carrying it becomes a
+  link, whoever or whatever sent it. keep_evaluating is on, so channel capture plugins still see
+  the line.
+
+  Channel commands are "spo", "gt" and "clan", sent as "<cmd> <message>".
+
+DATA AND STATE
+  save_state is "y". Variables spo, gt, clan hold "1" or "0", and SaveState
+  is called after each change so a force closed client keeps them.
+
+WHEN EDITING
+  * The report text must keep "pkvnum[number]", or other players' copies
+    of the plugin stop turning it into a link.
+  * Colour codes (@R, @x045, @x048, @w) are sent in the channel message; the
+    receiving trigger matches the plain text, so they do not matter to it.
+    esc() doubles any @ in the attacker or area name so it cannot be read
+    as a colour code.
+-->
+
+<triggers>
+
+  <!-- Aardwolf's PK notice, fired on you when someone attacks you. -->
+  <trigger
+     enabled="y"
+     match="^\*\* You can take revenge on (?P&lt;who&gt;.+?) for \d+ hours?\.$"
+     regexp="y"
+     script="onRevenge"
+     keep_evaluating="y"
+     sequence="100"
+     >
+  </trigger>
+
+  <!-- Any line with pkvnum[12345] (or the v1.1 form pkvnum(12345)), from anyone's copy of the plugin (including
+       your own channel echo): redraw the whole line as a mapper goto link.
+       The leading .* makes it take the LAST pkvnum on the line. -->
+  <trigger
+     enabled="y"
+     match="^.*pkvnum[\[(](?P&lt;room&gt;\d+)[\])]"
+     regexp="y"
+     script="onReportLine"
+     omit_from_output="y"
+     keep_evaluating="y"
+     sequence="100"
+     >
+  </trigger>
+
+</triggers>
+
+<aliases>
+  <alias script="aliasHelp"    match="^pkr$" enabled="y" regexp="y" sequence="100"></alias>
+  <alias script="aliasChannel" match="^pkr\s+(?P&lt;chan&gt;spo|gt|clan|all)\s+(?P&lt;state&gt;on|off)$" enabled="y" regexp="y" ignore_case="y" sequence="100"></alias>
+  <alias script="aliasTest"    match="^pkr\s+test$" enabled="y" regexp="y" ignore_case="y" sequence="100"></alias>
+  <alias script="aliasHelp"    match="^pkr\s+help$" enabled="y" regexp="y" ignore_case="y" sequence="100"></alias>
+</aliases>
+
+<script>
+<![CDATA[
+
+pcall (require, "gmcphelper")
+
+local CLR_TAG  = "#875FFF"   -- x099
+local CLR_NAME = "#00D7FF"   -- x045
+local CLR_MSG  = "#FFFFFF"   -- W
+local CLR_HI   = "#00FF87"   -- x048
+local CLR_OFF  = "#808080"
+local CLR_PK   = "#FF0000"
+
+local TAG       = "PKReport"
+local MAPPER_ID = "b6eae87ccedd84f510b74714"
+local COOLDOWN  = 30         -- seconds between reports on the same attacker
+
+-- channel key -> command sent to the MUD, in display order
+local CHANNELS = {
+  { key = "spo",  cmd = "spo",  label = "spouse" },
+  { key = "gt",   cmd = "gt",   label = "group"  },
+  { key = "clan", cmd = "clan", label = "clan"   },
+}
+
+local gOn       = {}
+local gLastSent = {}         -- [attacker lowercased] = os.time()
+
+local function echo (msg)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ", CLR_MSG, "", msg)
+end
+
+local function loadSettings ()
+  for _, c in ipairs (CHANNELS) do
+    gOn [c.key] = (GetVariable (c.key) == "1")
+  end
+end
+
+local function saveSettings ()
+  for _, c in ipairs (CHANNELS) do
+    SetVariable (c.key, gOn [c.key] and "1" or "0")
+  end
+  SaveState ()
+end
+
+local function activeList ()
+  local t = {}
+  for _, c in ipairs (CHANNELS) do
+    if gOn [c.key] then t [#t + 1] = c.key end
+  end
+  return t
+end
+
+-- ---------------------------------------------------------------
+-- Where am I
+-- ---------------------------------------------------------------
+local function roomInfo ()
+  if type (gmcp) ~= "function" then return nil end
+  local ok, info = pcall (gmcp, "room.info")
+  if ok and type (info) == "table" then return info end
+  return nil
+end
+
+local function mapperDbPath ()
+  if not IsPluginInstalled (MAPPER_ID) then return nil end
+  local db_name = GetPluginVariable (MAPPER_ID, "db_name")
+  if not db_name or db_name == "" then
+    db_name = (WorldName () or ""):gsub ("[^%w%s()_-]", ""):gsub ("^%s+", ""):gsub ("%s+$", "")
+  end
+  if db_name == "" then return nil end
+  return GetInfo (66) .. db_name .. ".db"
+end
+
+local function areaName (zone)
+  if not zone or zone == "" then return "unknown area" end
+  local path = mapperDbPath ()
+  local name
+  if path and sqlite3 then
+    local ok = pcall (function ()
+      local db = sqlite3.open (path)
+      if not db then return end
+      local sql = "SELECT name FROM areas WHERE uid = '" .. zone:gsub ("'", "''") .. "' LIMIT 1"
+      for row in db:nrows (sql) do name = row.name end
+      db:close ()
+    end)
+  end
+  if name and name ~= "" then return name end
+  return zone
+end
+
+-- Aardwolf colour codes start with @; double any @ in names so they print literally.
+local function esc (s) return (tostring (s):gsub ("@", "@@")) end
+
+local function buildReport ()
+  local info = roomInfo ()
+  local num  = info and tonumber (info.num)
+  if not (num and num > 0) then num = nil end
+  return areaName (info and info.zone), num
+end
+
+-- Local copy of the report, same colours as the channel version,
+-- with pkvnum[...] clickable.
+local function echoReport (who, area, num)
+  ColourTell (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_PK, "", "PK Alert: ", CLR_NAME, "", who,
+              CLR_MSG, "", " has attacked me in Area - ", CLR_HI, "", area)
+  if num then
+    ColourTell (CLR_HI, "", " ")
+    Hyperlink ("mapper goto " .. num, "pkvnum[" .. num .. "]",
+               "Click to run: mapper goto " .. num, CLR_HI, "", false)
+  end
+  print ("")
+end
+
+-- Channel version:  @R red alert, @x045 cyan attacker, @x048 green area + room.
+local function channelText (who, area, num)
+  local t = "@RPK Alert: @x045" .. esc (who) .. "@w has attacked me in Area - @x048" .. esc (area)
+  if num then t = t .. " pkvnum[" .. num .. "]" end
+  return t .. "@w"
+end
+
+local function sendReport (who, area, num)
+  local chans = activeList ()
+  if #chans == 0 then
+    echoReport (who, area, num)
+    return
+  end
+  local msg = channelText (who, area, num)
+  for _, c in ipairs (CHANNELS) do
+    if gOn [c.key] then
+      Send (c.cmd .. " " .. msg)
+    end
+  end
+  echo ("Sent to: " .. table.concat (chans, ", "))
+end
+
+-- ---------------------------------------------------------------
+-- Triggers
+-- ---------------------------------------------------------------
+function onRevenge (name, line, wildcards)
+  local who = wildcards.who or "Someone"
+  local key = who:lower ()
+  local now = os.time ()
+  if gLastSent [key] and now - gLastSent [key] < COOLDOWN then return end
+  gLastSent [key] = now
+  local area, num = buildReport ()
+  sendReport (who, area, num)
+end
+
+-- Redraw a received report line as one big link, keeping its colours.
+function onReportLine (name, line, wildcards, styles)
+  local num  = wildcards.room
+  local cmd  = "mapper goto " .. num
+  local hint = "Click to run: " .. cmd
+  for _, s in ipairs (styles) do
+    Hyperlink (cmd, s.text, hint,
+               RGBColourToName (s.textcolour), RGBColourToName (s.backcolour), false)
+  end
+  print ("")
+end
+
+-- ---------------------------------------------------------------
+-- Aliases
+-- ---------------------------------------------------------------
+function aliasHelp ()
+  print ("")
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", string.format ("v%.1f", GetPluginInfo (GetPluginID (), 19)) .. " help")
+  ColourNote (CLR_MSG, "", "  Reports a PK attack with your area and room number.")
+  ColourNote (CLR_MSG, "", "  Other players' reports become a clickable mapper goto link.")
+  print ("")
+  ColourNote (CLR_MSG, "", "  Channels:")
+  for _, c in ipairs (CHANNELS) do
+    ColourNote (CLR_HI, "", string.format ("    %-6s", c.key),
+                CLR_MSG, "", string.format ("%-8s", c.label),
+                gOn [c.key] and CLR_HI or CLR_OFF, "", gOn [c.key] and "ON" or "off")
+  end
+  if #activeList () == 0 then
+    ColourNote (CLR_OFF, "", "    (all off: reports are a local echo only)")
+  end
+  print ("")
+  local function line (l, r) ColourNote (CLR_HI, "", string.format ("  %-22s", l), CLR_MSG, "", r) end
+  line ("pkr spo on|off",  "spouse channel")
+  line ("pkr gt on|off",   "group channel")
+  line ("pkr clan on|off", "clan channel")
+  line ("pkr all off",     "switch every channel off")
+  line ("pkr test",        "preview a report for this room (local only)")
+  line ("pkr",             "this help")
+  print ("")
+end
+
+function aliasChannel (name, line, wildcards)
+  local chan  = wildcards.chan:lower ()
+  local state = (wildcards.state:lower () == "on")
+  if chan == "all" then
+    if state then
+      echo ("Use pkr spo on, pkr gt on, pkr clan on one at a time.")
+      return
+    end
+    for _, c in ipairs (CHANNELS) do gOn [c.key] = false end
+    saveSettings ()
+    echo ("All channels off. Reports will be a local echo only.")
+    return
+  end
+  gOn [chan] = state
+  saveSettings ()
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", "Channel ", CLR_HI, "", chan, CLR_MSG, "", " is now ",
+              state and CLR_HI or CLR_OFF, "", state and "ON" or "off")
+end
+
+function aliasTest ()
+  local area, num = buildReport ()
+  echoReport ("Testplayer", area, num)
+  if not num then
+    echo ("No room number here (unmappable room or GMCP not ready yet).")
+  end
+end
+
+function OnPluginInstall ()
+  loadSettings ()
+  local chans = activeList ()
+  echo (string.format ("v%.1f", GetPluginInfo (GetPluginID (), 19)) .. " loaded. Channels: "
+        .. (#chans > 0 and table.concat (chans, ", ") or "none (local echo)")
+        .. ". Type pkr for help.")
+end
+
+]]>
+</script>
+</muclient>
