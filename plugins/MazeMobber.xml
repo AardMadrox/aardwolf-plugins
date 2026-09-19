@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="5.5"
+   version="5.6"
    >
 </plugin>
 
@@ -147,6 +147,13 @@ ONE MODE, AND HOW A RUN STOPS
   utils.fontpicker (as SnD and the mapper do), mm font <name> and
   mm fontsize <n> set it by hand; saved as winfont/winfontsize, and an open
   window is rebuilt with the new font.
+
+  NO 30-MOVE RESET IN THE GAUNTLET, THE NENUKON OR HELEGEAR (5.6).
+  NO_STALL_RESET lists them. In game Helegear went round the same four sea
+  rooms, resetting every thirty moves and forgetting which exits it had
+  tried, and never reached the Dive Room. The harness never reproduced it
+  (48/48 on every build, 4.2 included - its sea is too easy), so this is
+  Eric's call from the live log rather than a measured fix.
 
   A RESET STOPS BELIEVING THE AREA TABLE (5.5). Walks to Prosper's side
   rooms looped for 881 moves when a repop had moved which maze room their
@@ -2721,7 +2728,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "5.5"
+local VERSION  = "5.6"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3788,6 +3795,9 @@ end
 -- it has not found it in ten seconds, reset and try again": thirty moves is
 -- about that.
 local STALL_MOVES = 30
+-- Areas the reset is not used in (see advance ()): big and fully shuffled,
+-- where a long stretch without a new room is just exploring.
+local NO_STALL_RESET = { gauntlet = true, nenukon = true, helegear = true }
 local function stall_reset ()
   -- GOING IN CIRCLES MEANS THE BELIEVED LINKS ARE SUSPECT, not just the
   -- one we happened to catch out.  Prosper's side rooms hang off "up" from
@@ -3835,7 +3845,14 @@ function advance ()
   -- every room in 8 runs of 12 to 1, because a hunt that has already seen
   -- every room goes thirty moves without a new one by design, and each
   -- reset threw away map it still needed.
-  if phase == "goto" and NAME[cur]
+  -- Not in the big, fully shuffling areas (5.6).  There, exploring the far
+  -- side legitimately goes thirty moves without a new room, and each reset
+  -- threw away which exits had been tried - Helegear went round the same
+  -- four sea rooms, resetting every thirty moves, and never reached the
+  -- Dive Room.  Eric's call: the reset stays for the small areas it was
+  -- made for (Prosper and the like), and these three explore as they did
+  -- before 4.3.
+  if phase == "goto" and NAME[cur] and not NO_STALL_RESET[A.key]
      and walked.n - (walked.lastnew or 0) >= STALL_MOVES then
     stall_reset ()
   end
