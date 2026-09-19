@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="5.6"
+   version="5.7"
    >
 </plugin>
 
@@ -147,6 +147,16 @@ ONE MODE, AND HOW A RUN STOPS
   utils.fontpicker (as SnD and the mapper do), mm font <name> and
   mm fontsize <n> set it by hand; saved as winfont/winfontsize, and an open
   window is rebuilt with the new font.
+
+  OUR OWN "look" IS NOT A MOVE LANDING (5.7). A noscan hunt starts with a
+  look, and the MUD answers it with room GMCP too. When that GMCP landed
+  after the first move went out, it was taken as the move arriving back in
+  the same room - the Gardens gate became a dead end, "going round once
+  more" x3, a map wipe and a second north that walked past the serious
+  faerie in 26016. look_room / MM_LookEcho swallow that one GMCP. Harness
+  knob sim.look_gmcp_late (delivers it after the move is sent and lets
+  the plugin's timers run before the move lands) reproduces it:
+  scratchpad test_gwill_first.py, 0/12 before.
 
   NO 30-MOVE RESET IN THE GAUNTLET, THE NENUKON OR HELEGEAR (5.6).
   NO_STALL_RESET lists them. In game Helegear went round the same four sea
@@ -2728,7 +2738,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "5.6"
+local VERSION  = "5.7"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3275,6 +3285,21 @@ local recovers    = 0      -- times we have climbed back in this run
 local journey     = nil    -- a second leg to run once we cross over
 local awaiting_leg = false -- crossed over, waiting to land
 local menu_on_arrival = false -- walked in from outside; show the list
+-- THE ROOM GMCP THAT ANSWERS OUR OWN "look" IS NOT AN ARRIVAL (5.7).  A
+-- noscan hunt starts with a look, and the MUD answers it with room.info as
+-- well as the room.  In the Gardens that GMCP landed after the first move
+-- had gone out, and was taken as that move landing: "north led back into
+-- the gate", so the gate became a dead end, three "going round once more",
+-- a map wipe and a second north - which carried us past the serious faerie
+-- in 26016 while the first north was still arriving.  look_room is set as
+-- the look goes out; the next room.info for that same room is swallowed.
+local look_room = nil
+function MM_LookEcho (num)
+  if not look_room then return false end
+  local mine = (num == look_room)
+  look_room = nil
+  return mine
+end
 -- A way in other than A.entrance, for this walk only (Prosper's Sea
 -- Witch).  Cleared at the start of every mm / mmout command.
 local entry_override = nil
@@ -5253,6 +5278,9 @@ function OnPluginBroadcast (msg, id, bname, text)
   end
   absorb_room ()
   MM_WinAreaCheck (num, ri.zone)
+  -- the answer to our own "look", not a move landing (a global: this
+  -- handler is already near Lua's 60-upvalue limit)
+  if MM_LookEcho (num) then return end
 
   -- Just come in: show the list without being asked.  Only when we have
   -- arrived from outside, so sweeping through these rooms stays quiet.
@@ -5668,6 +5696,8 @@ function begin (kind, tgt, mobname, noscan, wide_search)
       end
       -- Nothing has printed this room for us, so ask for it once.  Without
       -- this, a noscan mob standing in the room you start in gets missed.
+      -- Its room GMCP is not an arrival - see look_room.
+      look_room = cur
       SendNoEcho ("look")
       begin_room ()
     end
