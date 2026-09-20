@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="5.7"
+   version="5.8"
    >
 </plugin>
 
@@ -147,6 +147,14 @@ ONE MODE, AND HOW A RUN STOPS
   utils.fontpicker (as SnD and the mapper do), mm font <name> and
   mm fontsize <n> set it by hand; saved as winfont/winfontsize, and an open
   window is rebuilt with the new font.
+
+  AREAS CAN BE SWITCHED OFF ONE BY ONE (5.8). area_off, saved as `off`.
+  mm areas lists them all with their state; each row's link is
+  "mm toggle <key>". mm off / mm on take an area word or default to the one
+  you are standing in - and mm on has to work INSIDE a switched-off area,
+  which is why these are handled before the area is worked out. A
+  switched-off area shows no list on arrival, is left out of area_rows (),
+  and answers mm, its own word and mmout with a line saying so.
 
   OUR OWN "look" IS NOT A MOVE LANDING (5.7). A noscan hunt starts with a
   look, and the MUD answers it with room GMCP too. When that GMCP landed
@@ -2738,7 +2746,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "5.7"
+local VERSION  = "5.8"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3064,6 +3072,10 @@ local move_wait = 25
 -- area, and only the ones switched OFF are in here, so the table stays
 -- empty for anyone who never touches it.
 local no_auto = {}
+-- Areas switched off altogether (mm off / mm areas).  MazeMobber does
+-- nothing in one of these: no list on arrival, and its commands say so
+-- rather than walking.  Only the ones switched OFF are in here.
+local area_off = {}
 -- Show the list in a miniwindow instead of the main window (mm window).
 -- Saved with everything else.  On unless you have turned it off (4.7).
 local win_mode = true
@@ -3078,8 +3090,13 @@ local function save_map ()
   for k, v in pairs (no_auto) do
     if v then na[#na + 1] = string.format ("[%q]=true", k) end
   end
+  local ao = {}
+  for k, v in pairs (area_off) do
+    if v then ao[#ao + 1] = string.format ("[%q]=true", k) end
+  end
   f:write ("return {\n  wait = " .. move_wait ..
            ",\n  no_auto = {" .. table.concat (na, ",") .. "}" ..
+           ",\n  off = {" .. table.concat (ao, ",") .. "}" ..
            ",\n  win = " .. tostring (win_mode) ..
            ",\n  winx = " .. (tonumber (GetVariable ("mw_MazeMobber_list_windowx")) or "nil") ..
            ",\n  winy = " .. (tonumber (GetVariable ("mw_MazeMobber_list_windowy")) or "nil") ..
@@ -3149,6 +3166,10 @@ local function load_map ()
   no_auto = {}
   for k, v in pairs (t.no_auto or {}) do
     if v then no_auto[k] = true end
+  end
+  area_off = {}
+  for k, v in pairs (t.off or {}) do
+    if v then area_off[k] = true end
   end
   if t.win == nil then win_mode = true else win_mode = t.win and true or false end
   -- Where the list window was dragged to.  movewindow reads these.
@@ -5419,7 +5440,7 @@ function OnPluginBroadcast (msg, id, bname, text)
   local here_area = ROOM2AREA[num]
   auto_debug (here_area, num)
   if here_area and here_area.auto[num] and not no_auto[here_area.key]
-     and not pending then
+     and not area_off[here_area.key] and not pending then
     -- Show it whenever YOU arrive here, and never while this plugin is
     -- the one doing the walking - a sweep passing back through an auto
     -- room would otherwise reprint the list every lap.
@@ -5735,6 +5756,11 @@ function mm_out (name, line, wildcards)
     note ("You are not in any maze I know - nothing to walk out of.")
     return
   end
+  if area_off[area.key] then
+    warn (area.label .. " is switched off - @x048mm on " .. area.cmd ..
+          "@w to use it again.")
+    return
+  end
   if running and out_walk and A and A.key == area.key then
     note ("Already walking you out.")
     return
@@ -6026,13 +6052,28 @@ function win_open (rows)
   return true
 end
 
+-- Every area and whether it is switched on, for mm areas.  Clicking a row
+-- toggles that area: the link is the command anyone could type.
+function areas_rows ()
+  local rows = { title = "MazeMobber areas - click one to switch it off or on:" }
+  for i, a in ipairs (AREAS) do
+    local on = not area_off[a.key]
+    rows[#rows + 1] = { n = i, label = a.label,
+                        tip = (on and "Switch off " or "Switch on ") .. a.label,
+                        cmd = "mm toggle " .. a.key,
+                        colour = on and CLR_MSG or CLR_TAG, pad = 34,
+                        tail = (on and "on " or "off") .. "   " .. a.cmd }
+  end
+  return rows
+end
+
 -- Every area this works in, for mm from outside all of them.  Clicking one
 -- sends its command, which walks you to its way in and puts its list up.
 function area_rows ()
   local rows = { title = "MazeMobber works in these areas - click one to go there:" }
   local n = 0
   for _, a in ipairs (AREAS) do
-    for _, w in ipairs (a.ways_in or { {} }) do
+    for _, w in ipairs ((not area_off[a.key]) and (a.ways_in or { {} }) or {}) do
       n = n + 1
       local label = w.label or a.label
       local cmd = a.cmd .. (w.arg and (" " .. w.arg) or "")
@@ -6169,6 +6210,8 @@ local function show_help ()
     "mmr              the same thing, shorter",
     "mmout @wor @x048mmo@w     walk back out of here",
     "mm list          stop this area putting its list up on arrival",
+    "mm areas         every area, click one to switch it off or on",
+    "mm off / mm on   switch this area off or back on (mm off gaunt too)",
     "mm window        window off: the list prints here instead (again: back on)",
     "mm win           open the list window",
     "mm font          pick the list window's font (or mm font <name>)",
@@ -6261,6 +6304,57 @@ function mm_command (name, line, wildcards)
     note ("List window font: @x048" .. win_font .. " " .. win_font_size .. "@w.")
     return
   end
+  -- The areas and their switches.  Before the area is worked out: it is a
+  -- setting, and it has to work from anywhere - including inside an area
+  -- that is switched off.
+  if arg == "areas" then
+    menu_chat (areas_rows ())
+    return
+  end
+
+  local which = arg:match ("^toggle%s+(%w+)$")
+  if which then
+    local a = BYKEY[which] or BYCMD[which]
+    if not a then
+      warn ("No area called @x048" .. which .. "@w.")
+      return
+    end
+    area_off[a.key] = (not area_off[a.key]) or nil
+    save_map ()
+    note (a.label .. " is now @x048" .. (area_off[a.key] and "off" or "on") .. "@w.")
+    menu_chat (areas_rows ())
+    return
+  end
+
+  local onoff, named = arg:match ("^(o[nf]f?)%s*(%w*)$")
+  if onoff == "on" or onoff == "off" then
+    local a = (named ~= "") and (BYCMD[named] or BYKEY[named]) or nil
+    if named ~= "" and not a then
+      warn ("No area called @x048" .. named .. "@w - type @x048mm areas@w for the list.")
+      return
+    end
+    if not a then
+      -- the one you are standing in
+      a = ROOM2AREA[cur]
+      if not a then
+        local ri = gmcp ("room.info")
+        local zone = (type (ri) == "table") and ri.zone or nil
+        a = zone and BYZONE[zone] or nil
+      end
+      if not a then
+        warn ("You are not in any maze I know - name one, like @x048mm " ..
+              onoff .. " gaunt@w, or see @x048mm areas@w.")
+        return
+      end
+    end
+    area_off[a.key] = (onoff == "off") or nil
+    save_map ()
+    note (a.label .. " is now @x048" .. (onoff == "off" and "off" or "on") ..
+          "@w" .. ((onoff == "off") and " - @x048mm on " .. a.cmd ..
+          "@w switches it back." or "."))
+    return
+  end
+
   if arg == "window" then
     win_mode = not win_mode
     save_map ()
@@ -6308,6 +6402,13 @@ function mm_command (name, line, wildcards)
             cmd_list ("@w, @x048") .. "@w by name to be taken to one.")
       return
     end
+  end
+
+  -- Switched off: MazeMobber does nothing here.
+  if area_off[area.key] then
+    warn (area.label .. " is switched off - @x048mm on " .. area.cmd ..
+          "@w to use it again, or @x048mm areas@w for all of them.")
+    return
   end
 
   if running and A and A.key ~= area.key then stop () end
