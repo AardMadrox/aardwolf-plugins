@@ -1,0 +1,1040 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="BlootReport"
+   author="Eric"
+   id="52a281ef822b900b88e9bebb"
+   language="Lua"
+   purpose="Tracks all bloot tiers: per-tier on/off, stats window with keep/unkeep/report, tally to channel"
+   save_state="y"
+   date_written="2026-09-18"
+   requires="4.73"
+   version="1.6"
+   >
+<description trim="y">
+<![CDATA[
+BlootReport - type "blootreport help" for the full help.
+]]>
+</description>
+</plugin>
+
+<!--
+MAINTAINER NOTES (added 2026-09-18)
+
+WHAT IT DOES
+  Watches for bonus loot (bloot) of every tier coming off a corpse. Every
+  tier is counted in the tally. Each tier is ON or OFF (v1.3, gCfg.off):
+  ON tiers are handled as below; OFF tiers are only counted, never kept and
+  never windowed. Polished, Enhanced and Burnished default OFF.
+  For an ON tier it keeps the item, finds its object id, runs "id ID" silently and pops a miniwindow
+  holding that item's stats with three buttons:
+    KEEP    put ID BAG, counts as Kept, closes the window
+    UNKEEP  unkeep ID, closes the window
+    REPORT  rid ID CHANNEL (Nok3 report identify plugin), window stays open
+  The title bar close button just dismisses the item (it stays keep flagged).
+  Several drops at once queue up and open one after another.
+  Tally "Sparkling Kept 1/5" is ONLY ever sent to a channel, by
+  "blootreport CHANNEL". Eric asked for no local tally and no list window.
+
+  TIER COLOURS (v1.3): tier names always print the way Eric's blootx chart
+  does, lower case: (word) with green brackets for polished to brilliant,
+  red for radiant to eternal, yellow for legendary to divine, the word white,
+  and godly as ((godly)) with white brackets and a red word. Everything
+  else stays in the standard theme. See tierSegs and TIER_BRACKET.
+
+  SHARD EXCEPTION (v1.2, Eric's request): "a jagged shard of obsidian" at
+  Shiny or any higher tier is auto kept AND put in the bag, with no window,
+  just an echo, and counts as kept. This ignores the on/off toggles (Eric
+  called them super valuable). Below Shiny a shard is an ordinary item.
+  Matched on the normalised item name, see AUTO_BAG and SHARD_MIN.
+
+COMMANDS
+  blootreport CHANNEL (anything that is not a subcommand is treated as a
+  channel and the tally is sent as "CHANNEL text", typos are Eric's problem),
+  blootreport idchan CHANNEL or off, blootreport bag KEYWORD,
+  blootreport tiers (clickable on/off list), blootreport on/off TIER or all,
+  blootreport reset, blootreport debug, blootreport help.
+  Bare "blootreport" prints the help.
+  "blootr" is a short form of "blootreport" for every command (v1.4); the
+  aliases match (?:blootreport|blootr), so the wildcard numbers are unchanged.
+
+HOW IT WORKS
+  The loot trigger is Eric's old world trigger with the item text captured.
+  About one second after the last bloot line, one silent "invdata" is sent.
+  Header, body and footer triggers (omit_from_output) are only enabled while
+  that reply is expected. Each unresolved item is matched to an invdata row by
+  normalised name (colour codes and all parenthesised bits stripped, both
+  sides), preferring rows whose name carries the tier word, then the highest
+  object id (newest). Ids already claimed by another item are skipped.
+  Once resolved it sends "keep ID". If no id is found it falls back to the
+  tier word as a keyword, which is what the old world trigger did.
+  Stats come from Capture.untagged_output("id ID") in wrapped_captures, which
+  gags the reply. Combat lines landing inside the capture are swept up too,
+  so trimToIdBox keeps only the first dashed border line through the last
+  (v1.5). The captured style runs are drawn in the window as is.
+  Window font is Consolas 12 forced bold and fit_contents (1000, 600), both
+  copied from MarketWatch (v1.5). Position (v1.6, Eric's request): always
+  opens at 0, 0, the far upper left corner. The remembered movewindow
+  position is deleted before every create, so a drag lasts only until the
+  next item pops up.
+  Items are id'd one at a time (gIdBusy) so captures never overlap.
+  Window is themed_miniwindows ThemedTextWindow with TextRect hyperlinks, the
+  same pattern as MarketWatch. Closing from a button hides first, destroys on
+  a 0.2s timer, and opens the next queued item after that, because tearing a
+  window down inside its own hotspot callback leaves dead hotspots.
+
+DATA AND STATE
+  SetVariable "cfg" (bag, idchan, debug, off = set of lower case OFF tiers) and "tally" (per tier got and kept).
+  The queue is not saved; a reload drops any open window.
+  Kept means "put in the bag with KEEP".
+
+WHEN EDITING
+  The world trigger in Aardwolf.mcl (keep %1 on the same line) must be removed
+  or it double keeps, possibly a different item, by keyword.
+  Unverified at time of writing: that keep, unkeep and put accept an object
+  id, and whether the invdata name field carries the bloot tier word.
+  Eric confirmed "id ITEMNUMBER" works.
+  Tier order follows Eric's blootx chart, lowest first: Polished, Enhanced,
+  Burnished, Shiny, Vibrant, Sparkling ... Mythical, Fabled, Divine, Godly.
+  The local screen colours for @G @R @Y are plain bright green, red and
+  yellow hex values, not read from the client palette.
+-->
+
+<triggers>
+  <trigger
+   name="br_loot"
+   enabled="y"
+   keep_evaluating="y"
+   match="^You get \(?\((Polished|Enhanced|Burnished|Shiny|Vibrant|Sparkling|Gleaming|Shimmering|Dazzling|Brilliant|Radiant|Wondrous|Majestic|Exalted|Eternal|Legendary|Epic|Mythical|Divine|Fabled|Godly)\)\)? (.*) from the (?:\w+ )?(?:corpse|torso) of .*\.$"
+   regexp="y"
+   ignore_case="y"
+   script="BR_LootTrig"
+   sequence="100"
+  >
+  </trigger>
+
+  <trigger
+   name="br_inv_start"
+   enabled="n"
+   keep_evaluating="y"
+   match="^\{invdata\}$"
+   regexp="y"
+   omit_from_output="y"
+   script="BR_InvStart"
+   sequence="100"
+  >
+  </trigger>
+
+  <trigger
+   name="br_inv_line"
+   enabled="n"
+   keep_evaluating="y"
+   match="^(\d+),(.*)$"
+   regexp="y"
+   omit_from_output="y"
+   script="BR_InvLine"
+   sequence="100"
+  >
+  </trigger>
+
+  <trigger
+   name="br_inv_end"
+   enabled="n"
+   keep_evaluating="y"
+   match="^\{/invdata\}$"
+   regexp="y"
+   omit_from_output="y"
+   script="BR_InvEnd"
+   sequence="100"
+  >
+  </trigger>
+</triggers>
+
+<aliases>
+  <alias match="^(?:blootreport|blootr)(?: +help)? *$" enabled="y" regexp="y" ignore_case="y"
+         sequence="100" script="BR_Cmd_Help"></alias>
+  <alias match="^(?:blootreport|blootr) (reset|debug) *$" enabled="y" regexp="y" ignore_case="y"
+         sequence="100" script="BR_Cmd_Simple"></alias>
+  <alias match="^(?:blootreport|blootr) tiers *$" enabled="y" regexp="y" ignore_case="y"
+         sequence="100" script="BR_Cmd_Tiers"></alias>
+  <alias match="^(?:blootreport|blootr) (on|off) +(.+?) *$" enabled="y" regexp="y" ignore_case="y"
+         sequence="100" script="BR_Cmd_Toggle"></alias>
+  <alias match="^(?:blootreport|blootr) bag(?: +(.+?))? *$" enabled="y" regexp="y" ignore_case="y"
+         sequence="100" script="BR_Cmd_Bag"></alias>
+  <alias match="^(?:blootreport|blootr) idchan(?: +(.+?))? *$" enabled="y" regexp="y" ignore_case="y"
+         sequence="100" script="BR_Cmd_IdChan"></alias>
+  <alias match="^(?:blootreport|blootr) +(.+?) *$" enabled="y" regexp="y" ignore_case="y"
+         sequence="200" script="BR_Cmd_Channel"></alias>
+</aliases>
+
+<script>
+<![CDATA[
+
+require "serialize"
+
+local gHaveWin     = pcall (require, "themed_miniwindows")
+local gHaveCapture = pcall (require, "wrapped_captures")
+
+-- =====================================================================
+-- Colours / echo helpers  (standard theme)
+-- =====================================================================
+local CLR_TAG  = "#875FFF"   -- x099  brackets, muted detail
+local CLR_NAME = "#00D7FF"   -- x045  plugin name, attention
+local CLR_MSG  = "#FFFFFF"   -- W     message text
+local CLR_HI   = "#00FF87"   -- x048  values, commands, buttons
+
+-- bloot tier bracket colours, from Eric's blootx chart
+local CLR_BG = "#00FF00"     -- @G
+local CLR_BR = "#FF0000"     -- @R
+local CLR_BY = "#FFFF00"     -- @Y
+
+-- every colour above as an Aardwolf colour code, for channel output
+local CODE = {
+  [CLR_TAG]  = "@x099",
+  [CLR_NAME] = "@x045",
+  [CLR_MSG]  = "@W",
+  [CLR_HI]   = "@x048",
+  [CLR_BG]   = "@G",
+  [CLR_BR]   = "@R",
+  [CLR_BY]   = "@Y",
+}
+
+local TAG = "BlootReport"
+
+local function echo (msg)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", msg)
+end
+
+local function echoHi (msg, hi, tail)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", msg, CLR_HI, "", hi, CLR_MSG, "", tail or "")
+end
+
+local function warn (msg)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_NAME, "", msg)
+end
+
+local function helpLine (left, right)
+  ColourNote (CLR_HI, "", string.format ("  %-28s", left), CLR_MSG, "", right)
+end
+
+local function helpHead (text)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", text, CLR_TAG, "", "]")
+end
+
+local gCfg
+
+local function dbg (msg)
+  if gCfg and gCfg.debug then
+    ColourNote (CLR_TAG, "", "[blootreport] " .. msg)
+  end
+end
+
+local function trim (s)
+  return (tostring (s or ""):gsub ("^%s+", ""):gsub ("%s+$", ""))
+end
+
+-- =====================================================================
+-- Tiers, lowest first.  Order after Mythical follows Eric's blootx chart.
+-- =====================================================================
+local TIERS = { "Polished", "Enhanced", "Burnished", "Shiny", "Vibrant", "Sparkling", "Gleaming", "Shimmering", "Dazzling", "Brilliant",
+                "Radiant", "Wondrous", "Majestic", "Exalted", "Eternal",
+                "Legendary", "Epic", "Mythical", "Fabled", "Divine", "Godly" }
+
+local TIER_BY_LOWER, TIER_RANK = {}, {}
+for i, t in ipairs (TIERS) do TIER_BY_LOWER [t:lower ()] = t TIER_RANK [t] = i end
+
+-- tiers that start OFF: counted in the tally, never kept, no window
+local DEFAULT_OFF = { polished = true, enhanced = true, burnished = true }
+
+-- lowest tier the AUTO_BAG shard rule applies to
+local SHARD_MIN = TIER_RANK ["Shiny"]
+
+-- bracket colour per tier (godly is special, see tierSegs)
+local TIER_BRACKET = {}
+for i, t in ipairs (TIERS) do
+  if i <= TIER_RANK ["Brilliant"] then TIER_BRACKET [t] = CLR_BG
+  elseif i <= TIER_RANK ["Eternal"] then TIER_BRACKET [t] = CLR_BR
+  else TIER_BRACKET [t] = CLR_BY end
+end
+
+-- A tier name as coloured segments { text, colour }, exactly as the chart:
+-- @G(@Wsparkling@G)  @R(@Wradiant@R)  @Y(@Wepic@Y)  ((@Rgodly@W))
+local function tierSegs (tier)
+  local word = tier:lower ()
+  if tier == "Godly" then
+    return { { "((", CLR_MSG }, { word, CLR_BR }, { "))", CLR_MSG } }
+  end
+  local b = TIER_BRACKET [tier] or CLR_TAG
+  return { { "(", b }, { word, CLR_MSG }, { ")", b } }
+end
+
+-- Print { text, colour } segments as one line, [BlootReport] prefix optional
+local function noteSegs (segs, prefix)
+  local args = {}
+  if prefix then
+    for _, a in ipairs { CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] " } do
+      args [#args + 1] = a
+    end
+  end
+  for _, sg in ipairs (segs) do
+    args [#args + 1] = sg [2]
+    args [#args + 1] = ""
+    args [#args + 1] = sg [1]
+  end
+  ColourNote (unpack (args))
+end
+
+local function joinSegs (...)
+  local out = {}
+  for _, list in ipairs { ... } do
+    for _, sg in ipairs (list) do out [#out + 1] = sg end
+  end
+  return out
+end
+
+-- Items that are always kept and put straight in the bag, no window.
+-- Keys are normalised names (lower case, colour codes stripped).
+local AUTO_BAG = {
+  ["a jagged shard of obsidian"] = true,
+}
+
+-- =====================================================================
+-- State
+-- =====================================================================
+local RID_ID        = "a5b534a09df80b4093cabbfd"   -- Nok3_Report_Identify
+local RESOLVE_DELAY = 1      -- seconds after the last bloot line
+local INV_TIMEOUT   = 8      -- seconds to wait for the invdata reply
+local ID_TIMEOUT    = 10     -- seconds to wait for the id reply
+
+gCfg = { bag = "lootbag", idchan = "", debug = false, off = {} }
+for k in pairs (DEFAULT_OFF) do gCfg.off [k] = true end
+
+local function tierOn (tier)
+  return not gCfg.off [tier:lower ()]
+end
+local gTally  = {}   -- [tier] = { got = n, kept = n }
+local gSeq    = 0
+
+-- An item moves through: gPending (waiting for its object id)
+--   -> gToId (waiting for its stats) -> gShowQ (waiting for the window)
+--   -> gCurrent (in the window) -> gone
+local gPending = {}
+local gToId    = {}
+local gShowQ   = {}
+local gCurrent = nil
+
+local gResolveQueued = false
+local gInvWaiting    = false
+local gInvRows       = {}
+local gInvToken      = 0
+local gIdBusy        = false
+
+local function loadVar (name, default)
+  local s = GetVariable (name)
+  if not s or s == "" then return default end
+  local f = loadstring ("return " .. s)
+  if not f then return default end
+  local ok, v = pcall (f)
+  if ok and type (v) == "table" then return v end
+  return default
+end
+
+local function saveAll ()
+  SetVariable ("cfg",   serialize.save_simple (gCfg))
+  SetVariable ("tally", serialize.save_simple (gTally))
+end
+
+local function tallyFor (tier)
+  if not gTally [tier] then gTally [tier] = { got = 0, kept = 0 } end
+  return gTally [tier]
+end
+
+-- What to call the item in a game command: its object id when known,
+-- otherwise the tier word as a keyword (what the old world trigger did).
+local function ref (it)
+  return it.objid or it.tier:lower ()
+end
+
+-- =====================================================================
+-- Tally, channel only
+-- =====================================================================
+local function tallyChannelText ()
+  local segs = { { "[", CLR_TAG }, { TAG, CLR_NAME }, { "] ", CLR_TAG } }
+  local totGot, totKept, any = 0, 0, false
+  for _, tier in ipairs (TIERS) do
+    local t = gTally [tier]
+    if t and t.got > 0 then
+      if any then segs [#segs + 1] = { ", ", CLR_TAG } end
+      any = true
+      for _, sg in ipairs (tierSegs (tier)) do segs [#segs + 1] = sg end
+      segs [#segs + 1] = { " Kept ", CLR_TAG }
+      segs [#segs + 1] = { t.kept .. "/" .. t.got, CLR_HI }
+      totGot  = totGot + t.got
+      totKept = totKept + t.kept
+    end
+  end
+  if not any then
+    segs [#segs + 1] = { "No bloot tracked yet.", CLR_MSG }
+  else
+    segs [#segs + 1] = { " | ", CLR_TAG }
+    segs [#segs + 1] = { "Total", CLR_MSG }
+    segs [#segs + 1] = { " Kept ", CLR_TAG }
+    segs [#segs + 1] = { totKept .. "/" .. totGot, CLR_HI }
+  end
+  local out, last = {}, nil
+  for _, s in ipairs (segs) do
+    if s [2] ~= last then out [#out + 1] = CODE [s [2]] last = s [2] end
+    out [#out + 1] = (s [1]:gsub ("@", "@@"))   -- a literal @ is a colour code
+  end
+  out [#out + 1] = "@w"
+  return table.concat (out)
+end
+
+-- =====================================================================
+-- Stats window: one item at a time
+-- =====================================================================
+local WIN_ID   = "BlootReport_win"
+local WIN_FONT      = "Consolas"   -- same as MarketWatch's pop-up
+local WIN_FONT_SIZE = 12
+local gWin     = nil
+local gClosing = false
+local showNext
+
+local gColCache = {}
+local function col (hex)
+  if not gColCache [hex] then gColCache [hex] = ColourNameToRGB (hex) end
+  return gColCache [hex]
+end
+
+-- One line of style runs plus its hyperlinks.  Positions count visible text.
+local function winLine (segs)
+  local styles, links, pos = {}, {}, 1
+  for _, s in ipairs (segs) do
+    if s.text ~= "" then
+      styles [#styles + 1] = { text = s.text, textcolour = col (s.colour or CLR_MSG) }
+      if s.code then
+        links [#links + 1] = { start = pos, stop = pos + #s.text - 1,
+                               text = s.code, label = s.tip }
+      end
+      pos = pos + #s.text
+    end
+  end
+  return styles, links
+end
+
+local function add (segs)
+  local s, l = winLine (segs)
+  gWin:add_text (s, false, l)
+end
+
+local function button (label, code, tip, colour)
+  return { text = "[ " .. label .. " ]", colour = colour or CLR_HI, code = code, tip = tip }
+end
+
+function BR_WinDestroy ()
+  local w = gWin
+  gWin = nil
+  if w then pcall (function () w:delete (true) end) end
+  pcall (WindowDelete, WIN_ID)
+  pcall (Repaint)
+end
+
+-- Hide now (safe inside a hotspot callback), destroy once the callback has
+-- returned, then bring up the next queued item.
+local function closeWindow ()
+  gCurrent = nil
+  gClosing = true
+  pcall (WindowShow, WIN_ID, false)
+  pcall (Repaint)
+  DoAfterSpecial (0.2, "BR_WinDestroy ()", sendto.script)
+  DoAfterSpecial (0.4, "BR_ShowNext ()", sendto.script)
+end
+
+local function buildWindow ()
+  local it = gCurrent
+  if not it then return end
+  if not gHaveWin then
+    warn ("miniwindow library unavailable - " .. it.tier .. " " .. it.name .. " kept.")
+    gCurrent = nil
+    return
+  end
+
+  -- a new item always gets a fresh window, since the title is set at creation
+  if gWin then BR_WinDestroy () end
+
+  local title = "BlootReport - " .. it.tier:lower ()
+  if #gShowQ > 0 then title = title .. "  (" .. #gShowQ .. " more waiting)" end
+
+  -- v1.6: always pop up in the far upper left corner.  movewindow would
+  -- reopen it wherever it was last dragged, so forget that every time and
+  -- let the default (0, 0) apply.
+  for _, k in ipairs { "_windowx", "_windowy", "_windowflags" } do
+    DeleteVariable ("mw_" .. WIN_ID .. k)
+  end
+
+  local ok, w = pcall (ThemedTextWindow,
+    WIN_ID,
+    0, 0,            -- left, top: far upper left corner (v1.6)
+    620, 200,        -- default width, height (fit_contents resizes it)
+    title,
+    "center",        -- title alignment
+    true,            -- is_temporary: title bar close button
+    true,            -- resizeable
+    true,            -- text_scrollable
+    false,           -- text_selectable
+    false,           -- text_copyable
+    false,           -- url_hyperlinks (ours are explicit)
+    false,           -- autowrap off: the id box is fixed width
+    WIN_FONT, WIN_FONT_SIZE,   -- title font, same as MarketWatch
+    WIN_FONT, WIN_FONT_SIZE,   -- text font
+    200,             -- max lines
+    nil,             -- padding
+    true,            -- defer showing until drawn
+    false, nil,
+    "Close (item stays kept)")
+  if not ok or not w then
+    gHaveWin = false
+    warn ("miniwindow unavailable: " .. tostring (w))
+    gCurrent = nil
+    return
+  end
+  gWin = w
+  -- bold everything, as MarketWatch does: a style's own bold flag only draws
+  -- when the world's show bold option is on, so use TextRect's bold font
+  if gWin.textrect and gWin.textrect.font_bold then
+    gWin.textrect.font = gWin.textrect.font_bold
+  end
+  local prior = gWin.do_on_delete
+  gWin.do_on_delete = function (self)
+    if prior then prior (self) end
+    gWin = nil
+    -- the close button: dismiss this item and move on
+    if not gClosing and gCurrent then
+      gCurrent = nil
+      DoAfterSpecial (0.3, "BR_ShowNext ()", sendto.script)
+    end
+  end
+
+  gWin:clear (false)
+  local head = {}
+  for _, sg in ipairs (tierSegs (it.tier)) do
+    head [#head + 1] = { text = sg [1], colour = sg [2] }
+  end
+  head [#head + 1] = { text = " " .. it.name, colour = CLR_MSG }
+  head [#head + 1] = { text = "  " .. (it.objid and ("#" .. it.objid) or "no item number"), colour = CLR_TAG }
+  add (head)
+  add { { text = " " } }
+
+  if it.stats and #it.stats > 0 then
+    for _, line in ipairs (it.stats) do
+      if #line > 0 then gWin:add_text (line, false) else add { { text = " " } } end
+    end
+  else
+    add { { text = it.statsProblem or "No stats available.", colour = CLR_NAME } }
+  end
+
+  add { { text = " " } }
+  add {
+    button ("KEEP",   "BR_Act(\"keep\")",   "Put it in " .. gCfg.bag .. " and close"),
+    { text = "  " },
+    button ("UNKEEP", "BR_Act(\"unkeep\")", "Unkeep it and close", CLR_NAME),
+    { text = "  " },
+    button ("REPORT", "BR_Act(\"report\")",
+            gCfg.idchan ~= "" and ("Report it to " .. gCfg.idchan .. " (stays open)")
+                               or "No report channel set - see blootreport help"),
+  }
+  if it.note then add { { text = it.note, colour = CLR_TAG } } end
+
+  pcall (function () gWin:fit_contents (1000, 600) end)
+  gWin:draw ()
+  gWin:show ()
+  pcall (Repaint)
+end
+
+showNext = function ()
+  gClosing = false
+  if gCurrent then return end
+  gCurrent = table.remove (gShowQ, 1)
+  if gCurrent then buildWindow () end
+end
+
+function BR_ShowNext ()
+  showNext ()
+end
+
+-- =====================================================================
+-- Loot trigger
+-- =====================================================================
+local norm
+
+function BR_LootTrig (name, line, wc)
+  local tier  = TIER_BY_LOWER [tostring (wc [1]):lower ()]
+  if not tier then return end
+  local iname = trim (wc [2])
+  local auto  = (AUTO_BAG [norm (iname)] and TIER_RANK [tier] >= SHARD_MIN) or false
+
+  -- every tier is counted, on or off
+  local t = tallyFor (tier)
+  t.got = t.got + 1
+  saveAll ()
+
+  if not auto and not tierOn (tier) then
+    dbg ("loot (tier off, counted only): " .. tier .. " / " .. iname)
+    return
+  end
+
+  gSeq = gSeq + 1
+  local it = { seq = gSeq, tier = tier, name = iname, auto = auto, tallied = true }
+  gPending [#gPending + 1] = it
+  dbg ("loot: " .. it.tier .. " / " .. it.name)
+  if not gResolveQueued then
+    gResolveQueued = true
+    DoAfterSpecial (RESOLVE_DELAY, "BR_Resolve ()", sendto.script)
+  end
+end
+
+-- =====================================================================
+-- Finding the object id: one silent invdata
+-- =====================================================================
+local function stripCodes (s)
+  s = tostring (s or "")
+  s = s:gsub ("@@", "\1")
+  s = s:gsub ("@[xX]%d%d?%d?", "")
+  s = s:gsub ("@.", "")
+  s = s:gsub ("\1", "@")
+  return s
+end
+
+norm = function (s)
+  s = stripCodes (s):lower ()
+  s = s:gsub ("%b()", " ")
+  s = s:gsub ("[^%w']", " ")
+  s = s:gsub ("%s+", " ")
+  return trim (s)
+end
+
+local claimed = {}   -- object ids already given to an item this session
+
+local startIds
+
+function BR_Resolve ()
+  gResolveQueued = false
+  if #gPending == 0 then return end
+  if gInvWaiting then
+    gResolveQueued = true
+    DoAfterSpecial (RESOLVE_DELAY, "BR_Resolve ()", sendto.script)
+    return
+  end
+  gInvWaiting = true
+  gInvRows    = {}
+  gInvToken   = gInvToken + 1
+  EnableTrigger ("br_inv_start", true)
+  SendNoEcho ("invdata")
+  DoAfterSpecial (INV_TIMEOUT, "BR_InvTimeout (" .. gInvToken .. ")", sendto.script)
+  dbg ("invdata sent")
+end
+
+function BR_InvStart ()
+  EnableTrigger ("br_inv_start", false)
+  EnableTrigger ("br_inv_line", true)
+  EnableTrigger ("br_inv_end", true)
+end
+
+function BR_InvLine (name, line, wc)
+  -- id,flags,name,level,type,unique,wearloc,timer  -  the name may hold commas
+  local f = {}
+  for field in (line .. ","):gmatch ("([^,]*),") do f [#f + 1] = field end
+  if #f < 8 then return end
+  local nm = table.concat (f, ",", 3, #f - 5)
+  gInvRows [#gInvRows + 1] = { id = f [1], raw = stripCodes (nm):lower (), key = norm (nm) }
+end
+
+local function applyResolution (found)
+  local batch = gPending
+  gPending = {}
+  for _, it in ipairs (batch) do          -- oldest first
+    local best
+    if found then
+      local want  = norm (it.name)
+      local tierw = "(" .. it.tier:lower () .. ")"
+      local function consider (loose)
+        for _, r in ipairs (gInvRows) do
+          if not claimed [r.id] then
+            local hit = (r.key == want)
+            if loose and not hit and #want >= 4 and #r.key >= 4 then
+              hit = (r.key:find (want, 1, true) or want:find (r.key, 1, true)) and true
+            end
+            if hit then
+              local score = (r.raw:find (tierw, 1, true) and 1e12 or 0) + (tonumber (r.id) or 0)
+              if not best or score > best.score then best = { id = r.id, score = score } end
+            end
+          end
+        end
+      end
+      consider (false)
+      if not best then consider (true) end
+    end
+    if best then
+      it.objid = best.id
+      claimed [best.id] = true
+      dbg ("resolved " .. it.name .. " -> " .. best.id)
+    else
+      dbg ("no invdata match for " .. it.name)
+      it.note = "Could not find its item number - buttons use the keyword '" .. it.tier:lower () .. "'."
+    end
+    SendNoEcho ("keep " .. ref (it))
+    if it.auto then
+      -- shard exception: straight into the bag, no window
+      Send ("put " .. ref (it) .. " " .. gCfg.bag)
+      if it.tallied then
+        local t = tallyFor (it.tier)
+        t.kept = t.kept + 1
+        saveAll ()
+      end
+      noteSegs (joinSegs (tierSegs (it.tier),
+                          { { " " .. it.name .. " kept and put in ", CLR_MSG },
+                            { gCfg.bag, CLR_HI }, { ".", CLR_MSG } }), true)
+    else
+      gToId [#gToId + 1] = it
+    end
+  end
+  startIds ()
+end
+
+function BR_InvEnd ()
+  EnableTrigger ("br_inv_line", false)
+  EnableTrigger ("br_inv_end", false)
+  gInvWaiting = false
+  dbg ("invdata rows: " .. #gInvRows)
+  applyResolution (true)
+end
+
+function BR_InvTimeout (token)
+  if token ~= gInvToken or not gInvWaiting then return end
+  EnableTrigger ("br_inv_start", false)
+  EnableTrigger ("br_inv_line", false)
+  EnableTrigger ("br_inv_end", false)
+  gInvWaiting = false
+  warn ("no invdata reply - keeping by keyword instead.")
+  applyResolution (false)
+end
+
+-- =====================================================================
+-- Stats: silent "id <number>", one item at a time
+-- =====================================================================
+local gIdItem = nil
+
+local function queueForWindow (it)
+  gShowQ [#gShowQ + 1] = it
+  if not gCurrent and not gClosing then showNext () end
+end
+
+local function idDone ()
+  gIdBusy = false
+  gIdItem = nil
+  startIds ()
+end
+
+-- The capture brackets "id" with echo tags, and combat lines that arrive in
+-- between get swept up too.  Keep only the id box itself: the first dashed
+-- border line through the last one.  With fewer than two borders, keep all.
+local function styleLineText (line)
+  local t = {}
+  for _, run in ipairs (line or {}) do t [#t + 1] = run.text or "" end
+  return table.concat (t)
+end
+
+local function isBorder (text)
+  return text:find ("^%s*%+?%-%-%-%-%-+%+?%s*$") ~= nil
+end
+
+local function trimToIdBox (lines)
+  local first, last
+  for i, line in ipairs (lines) do
+    if isBorder (styleLineText (line)) then
+      first = first or i
+      last  = i
+    end
+  end
+  if not first or first == last then return lines end
+  local out = {}
+  for i = first, last do out [#out + 1] = lines [i] end
+  return out
+end
+
+function BR_IdCaptured (lines)
+  local it = gIdItem
+  if not it then return end
+  it.stats = trimToIdBox (lines or {})
+  dbg ("id captured " .. #it.stats .. " lines")
+  queueForWindow (it)
+  idDone ()
+end
+
+function BR_IdTimeout ()
+  local it = gIdItem
+  if not it then return end
+  it.statsProblem = "The id command did not answer in time."
+  queueForWindow (it)
+  idDone ()
+end
+
+startIds = function ()
+  if gIdBusy then return end
+  local it = table.remove (gToId, 1)
+  if not it then return end
+  if not gHaveCapture then
+    it.statsProblem = "wrapped_captures.lua is not available - cannot read stats silently."
+    queueForWindow (it)
+    return startIds ()
+  end
+  gIdBusy = true
+  gIdItem = it
+  local ok, err = pcall (Capture.untagged_output, "id " .. ref (it),
+                         true, true, true, BR_IdCaptured, false,
+                         BR_IdTimeout, ID_TIMEOUT)
+  if not ok then
+    it.statsProblem = "capture failed: " .. tostring (err)
+    queueForWindow (it)
+    idDone ()
+  end
+end
+
+-- =====================================================================
+-- Window buttons
+-- =====================================================================
+local function ridAvailable ()
+  return IsPluginInstalled (RID_ID) and GetPluginInfo (RID_ID, 17)
+end
+
+function BR_Act (action)
+  local it = gCurrent
+  if not it then return end
+  local r = ref (it)
+
+  if action == "keep" then
+    Send ("put " .. r .. " " .. gCfg.bag)
+    local t = tallyFor (it.tier)
+    t.kept = t.kept + 1
+    saveAll ()
+    closeWindow ()
+
+  elseif action == "unkeep" then
+    Send ("unkeep " .. r)
+    closeWindow ()
+
+  elseif action == "report" then
+    if gCfg.idchan == "" then
+      warn ("no report channel set. Use: blootreport idchan <channel>")
+      return
+    end
+    if not it.objid then
+      warn ("no item number for that item, so it cannot be reported.")
+      return
+    end
+    if not ridAvailable () then
+      warn ("the Report Identify (rid) plugin is not loaded, so REPORT cannot send.")
+      return
+    end
+    Execute ("rid " .. it.objid .. " " .. gCfg.idchan)
+  end
+end
+
+-- =====================================================================
+-- Commands
+-- =====================================================================
+function BR_Cmd_Help ()
+  local v = GetPluginInfo (GetPluginID (), 19) or "?"
+  helpHead (TAG .. " v" .. v .. " help")
+  noteSegs (joinSegs ({ { "  Tracks bonus loot (bloot) of every tier, from ", CLR_MSG } },
+                      tierSegs ("Polished"), { { " up to ", CLR_MSG } },
+                      tierSegs ("Godly"), { { ".", CLR_MSG } }))
+  ColourNote (CLR_MSG, "", "  Each tier is ", CLR_HI, "", "on", CLR_MSG, "", " or ", CLR_NAME, "", "off",
+              CLR_MSG, "", ". Every tier is counted in the tally, but")
+  ColourNote (CLR_MSG, "", "  off tiers are never kept and never pop up a window.")
+  noteSegs (joinSegs ({ { "  ", CLR_MSG } }, tierSegs ("Polished"), { { " ", CLR_MSG } },
+                      tierSegs ("Enhanced"), { { " and ", CLR_MSG } }, tierSegs ("Burnished"),
+                      { { " start off. See ", CLR_MSG }, { "blootreport tiers", CLR_HI },
+                        { ".", CLR_MSG } }))
+  ColourNote (CLR_MSG, "", "")
+  helpHead ("Automatic")
+  ColourNote (CLR_MSG, "", "  Every item of an ON tier you get from a corpse is kept (",
+              CLR_HI, "", "keep <number>", CLR_MSG, "", "), then")
+  ColourNote (CLR_MSG, "", "  its stats (", CLR_HI, "", "id <number>",
+              CLR_MSG, "", ") open in a window. Several drops queue up.")
+  ColourNote (CLR_MSG, "", "")
+  noteSegs (joinSegs ({ { "  Exception: ", CLR_MSG }, { "a jagged shard of obsidian", CLR_HI },
+                        { " at ", CLR_MSG } }, tierSegs ("Shiny"),
+                      { { " or any higher tier", CLR_MSG } }))
+  ColourNote (CLR_MSG, "", "  is kept and put straight in your bag, no window, even if")
+  ColourNote (CLR_MSG, "", "  that tier is turned off.")
+  ColourNote (CLR_MSG, "", "")
+  helpHead ("Window buttons")
+  helpLine ("[ KEEP ]",     "put it in your bag, counts as Kept, closes")
+  helpLine ("[ UNKEEP ]",   "unkeep it, closes")
+  helpLine ("[ REPORT ]",   "send its id to your report channel (uses rid),")
+  helpLine ("",             "window stays open")
+  helpLine ("close button", "close without choosing, item stays kept")
+  ColourNote (CLR_MSG, "", "")
+  helpHead ("Commands")
+  helpLine ("blootreport <channel>",     "send the tally to a channel, e.g.")
+  helpLine ("",                          "blootreport spo / gt / tell bob")
+  helpLine ("blootreport tiers",         "list every tier as on/off (click to flip)")
+  helpLine ("blootreport on <tier>",     "keep + window for that tier, e.g. on shiny")
+  helpLine ("blootreport off <tier>",    "count only, no keep, no window")
+  helpLine ("",                          "all works too: blootreport on all")
+  helpLine ("blootreport idchan <chan>", "set the channel REPORT sends to")
+  helpLine ("blootreport idchan off",    "clear the report channel")
+  helpLine ("blootreport bag <keyword>", "bag the KEEP button uses")
+  helpLine ("blootreport reset",         "zero the tally")
+  helpLine ("blootreport debug",         "toggle debug messages")
+  helpLine ("blootreport help",          "this help")
+  ColourNote (CLR_MSG, "", "  Every command also works with ", CLR_HI, "", "blootr",
+              CLR_MSG, "", " in place of ", CLR_HI, "", "blootreport",
+              CLR_MSG, "", ", e.g. ", CLR_HI, "", "blootr spo", CLR_MSG, "", ".")
+  ColourNote (CLR_MSG, "", "")
+  helpHead ("Current settings")
+  helpLine ("report channel", gCfg.idchan ~= "" and gCfg.idchan or "none - REPORT will not send")
+  helpLine ("bag",            gCfg.bag)
+  local offs = {}
+  for _, tier in ipairs (TIERS) do
+    if not tierOn (tier) then
+      if #offs > 0 then offs [#offs + 1] = { ", ", CLR_TAG } end
+      for _, sg in ipairs (tierSegs (tier)) do offs [#offs + 1] = sg end
+    end
+  end
+  if #offs == 0 then offs = { { "none", CLR_MSG } } end
+  noteSegs (joinSegs ({ { string.format ("  %-28s", "tiers off"), CLR_HI } }, offs))
+  helpLine ("rid plugin",     ridAvailable () and "loaded" or "NOT loaded - REPORT needs it")
+  ColourNote (CLR_MSG, "", "")
+  noteSegs (joinSegs ({ { "  Tally reads like ", CLR_MSG } }, tierSegs ("Sparkling"),
+                      { { " Kept ", CLR_TAG }, { "1/5", CLR_HI },
+                        { " = 5 looted, 1 put in the bag with KEEP.", CLR_MSG } }))
+end
+
+function BR_Cmd_Channel (name, line, wc)
+  local chan = trim (wc [1])
+  if chan == "" then BR_Cmd_Help () return end
+  -- whatever you typed goes in front, typos and all
+  SendNoEcho (chan .. " " .. tallyChannelText ())
+end
+
+function BR_Cmd_Simple (name, line, wc)
+  local what = tostring (wc [1]):lower ()
+  if what == "reset" then
+    gTally = {}
+    saveAll ()
+    echo ("tally reset.")
+  elseif what == "debug" then
+    gCfg.debug = not gCfg.debug
+    saveAll ()
+    echoHi ("debug is now ", gCfg.debug and "ON" or "OFF", ".")
+  end
+end
+
+function BR_Cmd_Tiers ()
+  helpHead (TAG .. " tiers  (click ON / OFF to flip)")
+  for _, tier in ipairs (TIERS) do
+    local on = tierOn (tier)
+    local t  = gTally [tier] or { got = 0, kept = 0 }
+    ColourTell (CLR_MSG, "", "  ")
+    local width = 0
+    for _, sg in ipairs (tierSegs (tier)) do
+      ColourTell (sg [2], "", sg [1])
+      width = width + #sg [1]
+    end
+    ColourTell (CLR_MSG, "", string.rep (" ", math.max (1, 15 - width)))
+    Hyperlink ("blootreport " .. (on and "off " or "on ") .. tier:lower (),
+               on and "[ ON  ]" or "[ OFF ]",
+               "Click to turn " .. tier:lower () .. (on and " off" or " on"),
+               on and CLR_HI or CLR_NAME, "", false)
+    ColourNote (CLR_TAG, "", "  Kept ", CLR_HI, "", t.kept .. "/" .. t.got)
+  end
+end
+
+function BR_Cmd_Toggle (name, line, wc)
+  local mode = tostring (wc [1]):lower ()
+  local what = trim (wc [2]):lower ()
+  local list = {}
+  if what == "all" then
+    for _, tier in ipairs (TIERS) do list [#list + 1] = tier end
+  elseif TIER_BY_LOWER [what] then
+    list [1] = TIER_BY_LOWER [what]
+  else
+    warn ("no bloot tier called '" .. what .. "'. Type blootreport tiers to see them.")
+    return
+  end
+  for _, tier in ipairs (list) do
+    gCfg.off [tier:lower ()] = (mode == "off") or nil
+  end
+  saveAll ()
+  local who = (what == "all") and { { "All tiers", CLR_MSG } } or tierSegs (list [1])
+  noteSegs (joinSegs (who, { { " now ", CLR_MSG },
+                             { mode == "on" and "ON" or "OFF", CLR_HI },
+                             { mode == "on" and " - kept and shown in the window."
+                                             or " - counted in the tally only.", CLR_MSG } }), true)
+end
+
+function BR_Cmd_Bag (name, line, wc)
+  local bag = trim (wc [1])
+  if bag ~= "" then
+    gCfg.bag = bag
+    saveAll ()
+  end
+  echoHi ("KEEP puts items in: ", gCfg.bag, "")
+end
+
+function BR_Cmd_IdChan (name, line, wc)
+  local chan = trim (wc [1])
+  if chan:lower () == "off" or chan:lower () == "none" then
+    gCfg.idchan = ""
+    saveAll ()
+  elseif chan ~= "" then
+    gCfg.idchan = chan
+    saveAll ()
+  end
+  if gCfg.idchan == "" then
+    echoHi ("REPORT channel: ", "none", " - REPORT will not send until you set one.")
+  else
+    echoHi ("REPORT channel: ", gCfg.idchan, "")
+  end
+end
+
+-- =====================================================================
+-- Plugin callbacks
+-- =====================================================================
+function OnPluginInstall ()
+  local c = loadVar ("cfg", {})
+  if type (c.bag) == "string" and c.bag ~= "" then gCfg.bag = c.bag end
+  if type (c.idchan) == "string" then gCfg.idchan = c.idchan end
+  gCfg.debug = c.debug and true or false
+  if type (c.off) == "table" then
+    gCfg.off = {}
+    for k, v in pairs (c.off) do if v then gCfg.off [tostring (k):lower ()] = true end end
+  end
+  gTally = loadVar ("tally", {})
+  local v = GetPluginInfo (GetPluginID (), 19) or "?"
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", "v" .. v .. " loaded. Type ", CLR_HI, "", "blootreport help",
+              CLR_MSG, "", " for commands.")
+end
+
+function OnPluginSaveState ()
+  saveAll ()
+end
+
+function OnPluginClose ()
+  BR_WinDestroy ()
+end
+
+function OnPluginDisable ()
+  BR_WinDestroy ()
+end
+
+]]>
+</script>
+</muclient>

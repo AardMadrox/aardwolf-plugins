@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="5.8"
+   version="5.9"
    >
 </plugin>
 
@@ -389,6 +389,18 @@ ARCHITECTURE
   walks on. A walk also no longer gives up after three map wipes - only
   if a wipe comes round with not one move made since the last. Walks only:
   see the comment where it is called.
+
+  WALKS TO PROSPER'S SIDE ROOMS AIM AT THE ROOM BELOW (5.9). Stalwart's was
+  still being missed: the walk was looking for 28264 itself and only used
+  the seeded up link if the map happened to route through it, and the
+  first stall reset marked that link bad for the rest of the run. A.climb
+  names the maze room under each side room (28263, 28254, 28252, 28261).
+  begin () sets climb_below from it, advance () walks to that room by the
+  ordinary search and, standing in it, sends u directly - past the wall
+  check, which was refusing u whenever that room's exit line had not
+  arrived. stall_reset () no longer distrusts the climb link. Three ups
+  from the room below that do not land on the target and the plan is
+  dropped for the old search. Not tested in game.
 
   PROSPER'S FOUR SIDE ROOMS HANG OFF FIXED EXITS and are seeded: down from
   each is resolved in the mapper, and up into each was proved across ten
@@ -1284,6 +1296,9 @@ local AREAS = {
     -- The four side rooms of the theatre hang off fixed exits.  Down from
     -- each is resolved in the mapper; up into each has been proved across
     -- separate repops.  Without these the walk had to stumble onto "up".
+    -- Side room -> the maze room it hangs off.  A walk to a side room aims
+    -- at THIS room and then just goes up (see climb_below in advance ()).
+    climb = { [28264] = 28263, [28265] = 28254, [28266] = 28252, [28267] = 28261 },
     seed = { {28252,"u",28266}, {28254,"u",28265}, {28261,"u",28267}, {28263,"u",28264},
              {28264,"d",28263}, {28265,"d",28254}, {28266,"d",28252}, {28267,"d",28261},
              {28268,"e",28271}, {28269,"u",28278}, {28270,"u",28279}, {28271,"n",28272}, {28271,"u",28280}, {28271,"w",28268}, {28272,"e",28275}, {28272,"s",28271}, {28273,"e",28276}, {28274,"n",28275}, {28275,"n",28276}, {28275,"s",28274}, {28275,"u",28284}, {28275,"w",28272}, {28276,"s",28275}, {28276,"w",28273}, {28277,"e",28280}, {28277,"n",28278}, {28277,"u",28286}, {28278,"d",28269}, {28278,"s",28277}, {28279,"d",28270}, {28279,"u",28288}, {28280,"d",28271}, {28280,"u",28289}, {28280,"w",28277}, {28281,"n",28295}, {28282,"s",28281}, {28282,"u",28291}, {28283,"n",28284}, {28283,"u",28292}, {28285,"s",28284}, {28285,"u",28294}, {28286,"d",28277}, {28286,"n",28287}, {28287,"n",28288}, {28287,"s",28286}, {28288,"d",28279}, {28288,"e",28291}, {28288,"s",28287}, {28289,"d",28280}, {28289,"e",28292}, {28290,"e",28293}, {28291,"d",28282}, {28291,"w",28288}, {28292,"d",28283}, {28292,"w",28289}, {28293,"n",28294}, {28293,"w",28290}, {28294,"d",28285}, {28294,"s",28293}, {28295,"s",28281} },
@@ -2746,7 +2761,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "5.8"
+local VERSION  = "5.9"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3273,6 +3288,7 @@ end
 local running   = false
 local phase     = nil      -- "travel" | "sweep" | "goto"
 local target    = nil      -- vnum, for a goto
+local climb_below = nil    -- goto a side room: the maze room under it; reach that, go up
 local want      = nil      -- normalised mob name, for a hunt
 local want_desc = nil      -- phrase to look for in the room listing
 local want_show = nil      -- how to print it
@@ -3564,6 +3580,7 @@ function move (dir)
   -- Cross the direction off and pick again.
   local have = exits[cur]
   if A and A.maze[cur] and have and not have[dir]
+     and not (dir == "u" and climb_below and cur == climb_below)
      and not (A.doors and A.doors[cur] and A.doors[cur][dir]) then
     edges[cur] = edges[cur] or {}
     edges[cur][dir] = -1
@@ -3856,7 +3873,11 @@ local function stall_reset ()
   if A then
     walked.badseed = walked.badseed or {}
     for _, e in ipairs (A.seed) do
-      walked.badseed[e[1] .. "," .. e[2]] = true
+      -- The climb link is not a belief any more, it is the plan: a reset
+      -- must not drop it or the walk never tries "up" where it belongs.
+      if not (climb_below and e[1] == climb_below and e[2] == "u") then
+        walked.badseed[e[1] .. "," .. e[2]] = true
+      end
     end
   end
   for k in pairs (edges) do edges[k] = nil end
@@ -3982,6 +4003,29 @@ function advance ()
       stop ("Arrived: @x048" .. (NAME[cur] or cur) .. "@w  (@x048" .. cur .. "@w)")
       remind_out ()
       return
+    end
+    -- A SIDE ROOM IS REACHED BY FINDING THE ROOM UNDER IT AND GOING UP.
+    -- Prosper's four up rooms hang off one fixed maze room each, so the
+    -- whole job is "get to the room below".  Standing in it, send u - not
+    -- a guess off the map, and not subject to the wall check - and if the
+    -- up lands anywhere but the target, the route back down is walked
+    -- again.  Three ups from the room below that get nowhere and the
+    -- plan is dropped, so the old search takes over rather than looping.
+    if climb_below then
+      if cur == climb_below then
+        walked.climbs = (walked.climbs or 0) + 1
+        if walked.climbs > 3 then
+          climb_below = nil
+          note ("Going up from @x048" .. (NAME[cur] or cur) ..
+                "@w is not working - searching for it the long way.")
+        else
+          move ("u")
+          return
+        end
+      else
+        local cp = bfs (cur, function (v) return v == climb_below end)
+        if cp and cp[1] then move (cp[1]) return end
+      end
     end
     local path = bfs (cur, function (v) return v == target end)
     if path and path[1] then move (path[1]) return end
@@ -5625,6 +5669,7 @@ function begin (kind, tgt, mobname, noscan, wide_search)
   running   = true
   pending   = nil
   target    = (kind == "goto") and tgt or nil
+  climb_below = (kind == "goto" and A and A.climb and A.climb[tgt]) or nil
   noscan_mode = noscan and true or false
   resyncing   = false
   stalls      = 0
