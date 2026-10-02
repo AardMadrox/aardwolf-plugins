@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-09-18"
    requires="4.73"
-   version="1.6"
+   version="1.7"
    >
 <description trim="y">
 <![CDATA[
@@ -53,6 +53,7 @@ COMMANDS
   blootreport CHANNEL (anything that is not a subcommand is treated as a
   channel and the tally is sent as "CHANNEL text", typos are Eric's problem),
   blootreport idchan CHANNEL or off, blootreport bag KEYWORD,
+  blootreport identify [on|off] (v1.7, see IDENTIFY SPELL below),
   blootreport tiers (clickable on/off list), blootreport on/off TIER or all,
   blootreport reset, blootreport debug, blootreport help.
   Bare "blootreport" prints the help.
@@ -84,8 +85,18 @@ HOW IT WORKS
   a 0.2s timer, and opens the next queued item after that, because tearing a
   window down inside its own hotspot callback leaves dead hotspots.
 
+IDENTIFY SPELL (v1.7)
+  Stats normally come from the "id ID" command, which needs the Identify
+  wish. For players without it, "blootreport identify on" (gCfg.spellid,
+  default off, saved with cfg) makes the stats capture run "c identify ID"
+  instead. Nothing else changes: same capture, same window. A failed cast
+  (no mana, lost concentration, spell not known) returns no id box, so the
+  window gets a note saying so. See idCommand. Unverified at time of
+  writing: that "c identify" accepts an object id, and that the spell reply
+  uses the same dashed box that trimToIdBox looks for.
+
 DATA AND STATE
-  SetVariable "cfg" (bag, idchan, debug, off = set of lower case OFF tiers) and "tally" (per tier got and kept).
+  SetVariable "cfg" (bag, idchan, debug, spellid, off = set of lower case OFF tiers) and "tally" (per tier got and kept).
   The queue is not saved; a reload drops any open window.
   Kept means "put in the bag with KEEP".
 
@@ -164,6 +175,8 @@ WHEN EDITING
          sequence="100" script="BR_Cmd_Bag"></alias>
   <alias match="^(?:blootreport|blootr) idchan(?: +(.+?))? *$" enabled="y" regexp="y" ignore_case="y"
          sequence="100" script="BR_Cmd_IdChan"></alias>
+  <alias match="^(?:blootreport|blootr) identify(?: +(on|off))? *$" enabled="y" regexp="y" ignore_case="y"
+         sequence="100" script="BR_Cmd_Identify"></alias>
   <alias match="^(?:blootreport|blootr) +(.+?) *$" enabled="y" regexp="y" ignore_case="y"
          sequence="200" script="BR_Cmd_Channel"></alias>
 </aliases>
@@ -310,7 +323,7 @@ local RESOLVE_DELAY = 1      -- seconds after the last bloot line
 local INV_TIMEOUT   = 8      -- seconds to wait for the invdata reply
 local ID_TIMEOUT    = 10     -- seconds to wait for the id reply
 
-gCfg = { bag = "lootbag", idchan = "", debug = false, off = {} }
+gCfg = { bag = "lootbag", idchan = "", debug = false, spellid = false, off = {} }
 for k in pairs (DEFAULT_OFF) do gCfg.off [k] = true end
 
 local function tierOn (tier)
@@ -728,6 +741,13 @@ end
 -- =====================================================================
 local gIdItem = nil
 
+-- The command that produces the stats box: the id command (needs the
+-- Identify wish) or, with "blootreport identify on", the identify spell.
+local function idCommand (it)
+  if gCfg.spellid then return "c identify " .. ref (it) end
+  return "id " .. ref (it)
+end
+
 local function queueForWindow (it)
   gShowQ [#gShowQ + 1] = it
   if not gCurrent and not gClosing then showNext () end
@@ -769,7 +789,18 @@ end
 function BR_IdCaptured (lines)
   local it = gIdItem
   if not it then return end
-  it.stats = trimToIdBox (lines or {})
+  lines = lines or {}
+  it.stats = trimToIdBox (lines)
+  if gCfg.spellid then
+    local box = false
+    for _, line in ipairs (lines) do
+      if isBorder (styleLineText (line)) then box = true break end
+    end
+    if not box then
+      it.note = (it.note and (it.note .. " ") or "") ..
+        "No id box came back - the identify spell may have failed (mana, concentration, or you do not know it)."
+    end
+  end
   dbg ("id captured " .. #it.stats .. " lines")
   queueForWindow (it)
   idDone ()
@@ -778,7 +809,7 @@ end
 function BR_IdTimeout ()
   local it = gIdItem
   if not it then return end
-  it.statsProblem = "The id command did not answer in time."
+  it.statsProblem = gCfg.spellid and "The identify spell did not answer in time." or "The id command did not answer in time."
   queueForWindow (it)
   idDone ()
 end
@@ -794,7 +825,7 @@ startIds = function ()
   end
   gIdBusy = true
   gIdItem = it
-  local ok, err = pcall (Capture.untagged_output, "id " .. ref (it),
+  local ok, err = pcall (Capture.untagged_output, idCommand (it),
                          true, true, true, BR_IdCaptured, false,
                          BR_IdTimeout, ID_TIMEOUT)
   if not ok then
@@ -873,6 +904,14 @@ function BR_Cmd_Help ()
   ColourNote (CLR_MSG, "", "  is kept and put straight in your bag, no window, even if")
   ColourNote (CLR_MSG, "", "  that tier is turned off.")
   ColourNote (CLR_MSG, "", "")
+  helpHead ("Identify spell")
+  ColourNote (CLR_MSG, "", "  Stats normally come from the ", CLR_HI, "", "id", CLR_MSG, "",
+              " command, which needs the Identify wish.")
+  ColourNote (CLR_MSG, "", "  No wish? Turn on the spell instead: ", CLR_HI, "", "blootreport identify on")
+  ColourNote (CLR_MSG, "", "  Stats are then read from ", CLR_HI, "", "c identify <number>",
+              CLR_MSG, "", ". It costs mana and can")
+  ColourNote (CLR_MSG, "", "  fail, and the window will say so. Off by default.")
+  ColourNote (CLR_MSG, "", "")
   helpHead ("Window buttons")
   helpLine ("[ KEEP ]",     "put it in your bag, counts as Kept, closes")
   helpLine ("[ UNKEEP ]",   "unkeep it, closes")
@@ -889,6 +928,8 @@ function BR_Cmd_Help ()
   helpLine ("",                          "all works too: blootreport on all")
   helpLine ("blootreport idchan <chan>", "set the channel REPORT sends to")
   helpLine ("blootreport idchan off",    "clear the report channel")
+  helpLine ("blootreport identify", "toggle the identify spell for stats")
+  helpLine ("",                          "(no Identify wish). on / off works too")
   helpLine ("blootreport bag <keyword>", "bag the KEEP button uses")
   helpLine ("blootreport reset",         "zero the tally")
   helpLine ("blootreport debug",         "toggle debug messages")
@@ -900,6 +941,7 @@ function BR_Cmd_Help ()
   helpHead ("Current settings")
   helpLine ("report channel", gCfg.idchan ~= "" and gCfg.idchan or "none - REPORT will not send")
   helpLine ("bag",            gCfg.bag)
+  helpLine ("stats from",     gCfg.spellid and "c identify (spell)" or "id (wish)")
   local offs = {}
   for _, tier in ipairs (TIERS) do
     if not tierOn (tier) then
@@ -1004,6 +1046,19 @@ function BR_Cmd_IdChan (name, line, wc)
   end
 end
 
+function BR_Cmd_Identify (name, line, wc)
+  local mode = trim (wc [1]):lower ()
+  if mode == "on" then gCfg.spellid = true
+  elseif mode == "off" then gCfg.spellid = false
+  else gCfg.spellid = not gCfg.spellid end
+  saveAll ()
+  if gCfg.spellid then
+    echoHi ("Stats now come from ", "c identify <number>", " (the spell). Costs mana and can fail.")
+  else
+    echoHi ("Stats now come from ", "id <number>", " (needs the Identify wish).")
+  end
+end
+
 -- =====================================================================
 -- Plugin callbacks
 -- =====================================================================
@@ -1012,6 +1067,7 @@ function OnPluginInstall ()
   if type (c.bag) == "string" and c.bag ~= "" then gCfg.bag = c.bag end
   if type (c.idchan) == "string" then gCfg.idchan = c.idchan end
   gCfg.debug = c.debug and true or false
+  gCfg.spellid = c.spellid and true or false
   if type (c.off) == "table" then
     gCfg.off = {}
     for k, v in pairs (c.off) do if v then gCfg.off [tostring (k):lower ()] = true end end
