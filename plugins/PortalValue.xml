@@ -19,16 +19,20 @@
           keyword "trivia" / Found at "A Bad Trip" => trivia;  else => gameload
         'restrung' tracked separately. Portals catalog automatically when you 'id'
         one, or in bulk via 'portaldex scan'.
+        Scans look for take/get portal commands in the mapper; if your portals use a
+        different command, set it with 'portaldex cmd <word>' (v3.9).
 
-     3. IS THIS ROOM WORTH A PORTAL? (part of pv, v3.6):
+     3. IS THIS ROOM WORTH A PORTAL? (part of pv, v3.8):
         The pv output ends with a "Worth it" line: what a portal in this room
         would do to your travel time to the cp, quest and gq mobs you actually
         kill in this area. It shows the average walk and the worst walk, before
         and after, because a room can cut a big total and still leave the far
-        end of the area untouched. Kill weights come from Search_and_Destroy's
+        end of the area untouched, and a room has to save real steps rather than
+        just a big share of a small area. Kill weights come from Search_and_Destroy's
         SnDdb.db if it is installed; without it every mapped room is weighted
-        equally and the line says so. Type pvworth after buying or selling
-        portals to rebuild the model.
+        equally and the line says so. Rooms the mapper has flagged noportal or
+        norecall say so instead of recommending a portal you cannot place.
+        Type pvworth after buying or selling portals to rebuild the model.
 
      Data: the catalog lives in its own file PortalDex_data.lua (in the world
      folder); pv history lives in plugin state. Kept separate on purpose.
@@ -51,7 +55,7 @@
    purpose="Find the closest saved portal + speedwalk to your room, and catalog your portals by type."
    date_written="2026-06-27"
    requires="4.73"
-   version="3.6"
+   version="3.9"
 >
 </plugin>
 
@@ -112,13 +116,40 @@ HOW THE "WORTH IT" LINE WORKS  (added 2026-09-11; reworked in v3.6)
   average walk before and after, the worst walk before and after, and the raw
   steps saved.
 
-  THE SCORE is 0.75 times the percent of walking saved plus 0.25 times the
-  percent knocked off the worst walk. The tail term is the point: total steps
-  saved alone picks the room that shortens the half of the area you were
+  THE SHAPE SCORE is 0.75 times the percent of walking saved plus 0.25 times
+  the percent knocked off the worst walk. The tail term is the point: total
+  steps saved alone picks the room that shortens the half of the area you were
   already close to. In testing on Ketu it ranked 35139 (avg 7.4 to 4.8, worst
   20 to 11) above 35128 (avg 7.4 to 4.1, worst 20 to 9), which is backwards.
-  good at 15 and up, ok at 5, poor below that, none at zero saving, nodata
-  when the area has no recorded kills.
+
+  THE ABSOLUTE FLOOR (v3.8) is the other half, and it has to come FIRST.
+  A percentage is scale blind: a small area happily reports "29% less walking"
+  for a few hundred steps, which is exactly the profile of a portal you would
+  sell again later. So pw_build also prices every portal you already carry,
+  map wide, the same way the sell-or-keep question is decided: what that portal
+  uniquely saves, the weight it is nearest to times (d2 minus d1). Sorted, that
+  gives floor_val at the bottom quarter and mid_val at the median. A candidate
+  under floor_val is "You can skip this one." no matter how good its share
+  looks, and "good" has to clear mid_val as well as scoring 15.
+
+  Worked example: Fire Swamp room 34779 saves 556 steps, 29 percent of the
+  walking in that area, and used to read "would make a good portal". The whole
+  area only holds about 1,900 steps of walking, so 29 percent of it is less
+  than a median portal is worth. It now reads skip, and nothing in Fire Swamp
+  scores better than ok.
+
+  Verdicts: good, ok, skip, none at zero saving, nodata when the area has no
+  recorded kills.
+
+  NOPORTAL ROOMS (v3.7): pw_build also reads the mapper's own norecall and
+  noportal room flags, storing only the rooms that carry one, which is a
+  handful per area rather than a second copy of the map. The line still shows
+  the numbers, because knowing a spot would be great is useful, but the
+  verdict is replaced: noportal says outright that you cannot put a portal
+  there, norecall says a portal almost certainly cannot land. Both are needed.
+  In Eternal Autumn the eight rooms behind the oak are all nosum; four carry
+  noportal and four only norecall, so trusting noportal alone would still have
+  recommended half of them.
 
   pv_worth_lines is deliberately a GLOBAL because pv_show_record is defined
   EARLIER in the file than this block; a local would not be in scope there,
@@ -237,6 +268,7 @@ WHEN EDITING
   <alias match="^portaldex rooms$"   enabled="y" regexp="y" ignore_case="y" script="pd_rooms"    sequence="90"></alias>
   <alias match="^portaldex speed ?(.*)$" enabled="y" regexp="y" ignore_case="y" script="pd_speed_cmd" sequence="85"></alias>
   <alias match="^portaldex bag ?(.*)$"   enabled="y" regexp="y" ignore_case="y" script="pd_bag_cmd"   sequence="85"></alias>
+  <alias match="^portaldex cmd ?(.*)$"   enabled="y" regexp="y" ignore_case="y" script="pd_cmd_cmd"   sequence="85"></alias>
   <alias match="^portaldex auto ?(.*)$"  enabled="y" regexp="y" ignore_case="y" script="pd_auto_cmd"  sequence="85"></alias>
   <alias match="^portaldex scan ?(.*)$"  enabled="y" regexp="y" ignore_case="y" script="pd_scan"      sequence="80"></alias>
 </aliases>
@@ -322,7 +354,7 @@ local MAPPER_ID = "b6eae87ccedd84f510b74714"
 local GMCP_ID   = "3e7dedbe37e44942dd46d264"
 
 -- theme colours
-local VERSION = "3.6"   -- keep in step with the version= attribute above
+local VERSION = "3.9"   -- keep in step with the version= attribute above
 
 local C = { hdr="@x099", val="@x045", num="@W", ok="@x048", bad="@R" }
 
@@ -408,6 +440,7 @@ end
 -- catalog[idnumber] = { id, name, kw, ptype, restrung, leads, found, level, t, refs }
 catalog = catalog or {}
 pd_bag = pd_bag or ""                          -- portal container keyword
+pd_cmd = pd_cmd or ""                          -- custom portal command (besides take/get)
 if pd_auto == nil then pd_auto = true end      -- catalog-as-you-go on/off
 scan_active = false                            -- a scan is running?
 scan_queue = scan_queue or {}
@@ -424,7 +457,7 @@ local function pd_save()
    local tmp  = path .. ".tmp"
    local f = io.open(tmp, "w")
    if not f then return end
-   f:write("return " .. serialize.save_simple({ catalog = catalog, bag = pd_bag, auto = pd_auto, speed = pd_speed }))
+   f:write("return " .. serialize.save_simple({ catalog = catalog, bag = pd_bag, cmd = pd_cmd, auto = pd_auto, speed = pd_speed }))
    f:close()
    os.remove(path)
    os.rename(tmp, path)
@@ -445,6 +478,7 @@ local function pd_load()
    if data then
       if type(data.catalog) == "table" then catalog = data.catalog end
       pd_bag = data.bag or pd_bag
+      pd_cmd = data.cmd or pd_cmd
       if data.auto ~= nil then pd_auto = data.auto end
       if tonumber(data.speed) then pd_speed = tonumber(data.speed) end
    end
@@ -673,16 +707,51 @@ function pd_bag_cmd(name, line, wc)
    echo(C.hdr.."[PortalDex] Portal container set to "..C.val..esc(pd_bag)..C.hdr..". Scans will take/put using this bag.")
 end
 
+-- Custom portal command: an extra verb (besides take/get) that scans look for in
+-- the mapper's saved portal exits, in the form  <verb> <item> [container].
+function pd_cmd_cmd(name, line, wc)
+   local arg = (wc and wc[1] or ""):gsub("^%s+",""):gsub("%s+$","")
+   if arg == "" then
+      if pd_cmd == "" then echo(C.hdr.."[PortalDex] No custom portal command set; scans look for "..C.val.."take"..C.hdr.."/"..C.val.."get"..C.hdr.." only.")
+      else echo(C.hdr.."[PortalDex] Custom portal command: "..C.val..esc(pd_cmd)..C.hdr.." (scans look for it as well as take/get).") end
+      echo(C.hdr.."Set with "..C.ok.."portaldex cmd <word>"..C.hdr..", clear with "..C.ok.."portaldex cmd none"..C.hdr..".")
+      return
+   end
+   if arg:lower() == "none" or arg:lower() == "clear" then
+      pd_cmd = ""; pd_save()
+      echo(C.hdr.."[PortalDex] Custom portal command cleared; scans look for take/get only.")
+      return
+   end
+   pd_cmd = arg; pd_save()
+   echo(C.hdr.."[PortalDex] Custom portal command set to "..C.val..esc(pd_cmd)..C.hdr..". Scans now look for "
+       ..C.val..esc(pd_cmd)..C.hdr.." <item> [container] as well as take/get.")
+end
+
 -- Pull the item reference (and container) from a portal command: the LAST visible
--- id number or keyword used in a take/get (dungeon portals take a first-room portal,
+-- id number or keyword used in a take/get/custom command (dungeon portals take a first-room portal,
 -- nod, then take the real one). Normal portals have one take, so last == only.
 local function extract_ref(cmd)
    cmd = cmd or ""
+   -- verbs to look for: take, get, plus the custom command if one is set.
+   -- Each verb becomes a case-insensitive Lua pattern (punctuation escaped).
+   local verbs = { "take", "get" }
+   if pd_cmd and pd_cmd ~= "" then verbs[#verbs+1] = pd_cmd end
+   local pats = {}
+   for _, v in ipairs(verbs) do
+      local p = v:gsub("^%s+",""):gsub("%s+$","")
+      p = p:gsub("[^%w%s]", "%%%0")
+      p = p:gsub("%a", function(c) return "["..c:lower()..c:upper().."]" end)
+      p = p:gsub("%s+", "%%s+")
+      pats[#pats+1] = p
+   end
    local lastref, lastcont
    for seg in (cmd .. ";"):gmatch("([^;]*);") do
-      local ref, cont = seg:match("^%s*[tT]ake%s+([^%s;]+)%s+([^%s;]+)")
-      if not ref then ref, cont = seg:match("^%s*[gG]et%s+([^%s;]+)%s+([^%s;]+)") end
-      if not ref then ref = seg:match("^%s*[tT]ake%s+([^%s;]+)") or seg:match("^%s*[gG]et%s+([^%s;]+)") end
+      local ref, cont
+      for _, p in ipairs(pats) do
+         ref, cont = seg:match("^%s*"..p.."%s+([^%s;]+)%s+([^%s;]+)")
+         if not ref then ref = seg:match("^%s*"..p.."%s+([^%s;]+)") end
+         if ref then break end
+      end
       if ref then lastref, lastcont = ref, cont end
    end
    return lastref, lastcont
@@ -871,7 +940,7 @@ function pd_scan(name, line, wc)
       echo(C.hdr.."[PortalDex] Resuming scan — "..C.num..#scan_queue..C.hdr.." left. "..C.ok.."portaldex scan stop"..C.hdr.." to pause.")
    else
       scan_queue = load_portal_refs()
-      if #scan_queue == 0 then echo(C.hdr.."[PortalDex] Found no take/get portal commands in the mapper to scan.") return end
+      if #scan_queue == 0 then echo(C.hdr.."[PortalDex] Found no take/get"..((pd_cmd ~= "") and ("/"..esc(pd_cmd)) or "").." portal commands in the mapper to scan."..((pd_cmd == "") and (" Use "..C.ok.."portaldex cmd <word>"..C.hdr.." if your portals use a different command.") or "")) return end
       echo(C.hdr.."[PortalDex] Scanning "..C.num..#scan_queue..C.hdr.." saved portals (take/id/put, ~"..pd_speed.."s each). "..C.ok.."portaldex scan stop"..C.hdr.." to pause.")
    end
    scan_active = true
@@ -1031,35 +1100,56 @@ local function pw_build(dbpath)
    for row in db:nrows("SELECT uid, area FROM rooms") do
       area_of[tostring(row.uid)] = row.area or "?"
    end
+   -- rooms a portal cannot land in. Only the flagged ones are stored, which is
+   -- a handful of rooms per area rather than a second copy of the whole map.
+   local flags = {}
+   for row in db:nrows("SELECT uid, norecall, noportal FROM rooms WHERE norecall=1 OR noportal=1") do
+      flags[tostring(row.uid)] = { nr = (tonumber(row.norecall) or 0) == 1,
+                                   np = (tonumber(row.noportal) or 0) == 1 }
+   end
    for row in db:nrows("SELECT fromuid AS f, touid AS t FROM exits WHERE fromuid NOT IN ('*','**')") do
       local f = tostring(row.f)
       local b = fadj[f]; if not b then b = {}; fadj[f] = b end
       b[#b+1] = tostring(row.t)
    end
 
-   -- every room a portal can drop you into
+   -- one label per distinct portal command, so two portals landing in one room
+   -- stay distinct and a chained route counts once
    local seeds, seen = {}, {}
-   for row in db:nrows("SELECT touid AS t FROM exits WHERE fromuid IN ('*','**')") do
-      local uid = tostring(row.t)
-      if not seen[uid] then seen[uid] = true; seeds[#seeds+1] = uid end
+   for row in db:nrows("SELECT touid AS t, dir AS d FROM exits WHERE fromuid IN ('*','**')") do
+      local cmd = tostring(row.d)
+      seen[cmd] = true
+      seeds[#seeds+1] = { uid = tostring(row.t), lab = cmd }
    end
    db:close()
    if next(seen) == nil then return nil, "no portals saved in the mapper yet" end
 
-   -- nearest-portal BFS from every portal landing at once (unit edges, so a
-   -- plain FIFO queue keeps distances in order; no heap needed)
-   local d1 = {}
+   -- Nearest AND second-nearest DISTINCT portal, from every landing at once.
+   -- The second pass is what lets us price the portals already carried: what a
+   -- portal uniquely saves is the weight it is nearest to times (d2 - d1).
+   -- Unit edges, so a plain FIFO queue keeps distances in order; no heap.
+   local d1, l1, d2 = {}, {}, {}
    local q, head = {}, 1
    for _, s in ipairs(seeds) do
-      if d1[s] == nil then d1[s] = 0; q[#q+1] = s end
+      local u = s.uid
+      if d1[u] == nil then
+         d1[u] = 0; l1[u] = s.lab; q[#q+1] = { u, s.lab, 0 }
+      elseif d2[u] == nil and l1[u] ~= s.lab then
+         d2[u] = 0; q[#q+1] = { u, s.lab, 0 }
+      end
    end
    while head <= #q do
-      local u = q[head]; head = head + 1
-      local nb, d = fadj[u], d1[u]
+      local it = q[head]; head = head + 1
+      local u, lab, d = it[1], it[2], it[3]
+      local nb = fadj[u]
       if nb then
          for i = 1, #nb do
-            local v = nb[i]
-            if d1[v] == nil then d1[v] = d + 1; q[#q+1] = v end
+            local v, nd = nb[i], d + 1
+            if d1[v] == nil then
+               d1[v] = nd; l1[v] = lab; q[#q+1] = { v, lab, nd }
+            elseif d2[v] == nil and l1[v] ~= lab then
+               d2[v] = nd; q[#q+1] = { v, lab, nd }
+            end
          end
       end
    end
@@ -1103,12 +1193,31 @@ local function pw_build(dbpath)
       end
    end
 
-   local nport = 0
-   for _ in pairs(seen) do nport = nport + 1 end
+   -- What each portal you already carry uniquely saves, map wide. This is the
+   -- same figure that decides whether a portal is worth its item slot, so it is
+   -- the honest yardstick for a candidate: a room that would land in the bottom
+   -- quarter of this list is a room you would be selling again later.
+   local marg = {}
+   for r, k in pairs(kills) do
+      local a = d1[r]
+      if a then
+         local b = d2[r] or (a + 30)   -- nothing else reaches it: assume a long detour
+         marg[l1[r]] = (marg[l1[r]] or 0) + k * (b - a)
+      end
+   end
+   local ranked, nport = {}, 0
+   for cmd in pairs(seen) do
+      nport = nport + 1
+      ranked[#ranked+1] = marg[cmd] or 0
+   end
+   table.sort(ranked)
+   local floor_val = (nport > 0) and ranked[math.ceil(nport / 4)] or 0
+   local mid_val   = (nport > 0) and ranked[math.ceil(nport / 2)] or 0
 
-   return { built = true, fadj = fadj, d1 = d1, kills = kills, area_of = area_of,
+   return { built = true, fadj = fadj, d1 = d1, kills = kills, area_of = area_of, flags = flags,
             kills_by_area = kills_by_area, total_by_area = total_by_area,
             weight_by_area = weight_by_area, worst_by_area = worst_by_area,
+            floor_val = floor_val, mid_val = mid_val,
             nport = nport, weighted = weighted }
 end
 
@@ -1135,7 +1244,9 @@ local function pw_evaluate(T, area, dbpath)
 
    local targets = m.kills_by_area[area]
    if not targets then
-      return { area = area, save = 0, pct = 0, weighted = m.weighted, verdict = "nodata" }
+      local f = m.flags[T] or {}
+      return { area = area, save = 0, pct = 0, weighted = m.weighted, verdict = "nodata",
+               noportal = f.np, norecall = f.nr }
    end
 
    local dT, q, head = { [T] = 0 }, { T }, 1
@@ -1182,15 +1293,24 @@ local function pw_evaluate(T, area, dbpath)
    -- yet another portal -- but only once the pool is big enough for a median to
    -- mean anything; with two portals, "beats the median" just means "beats the
    -- worse of the two", which would wave almost anything through.
+   -- A percentage alone is scale blind: a small area can hand you "29% less
+   -- walking" for a few hundred steps, which is exactly the profile of a portal
+   -- you would later sell. So the absolute saving has to clear the bottom
+   -- quarter of what your existing portals are worth before the share matters,
+   -- and "good" has to clear the median as well.
    local verdict
-   if save <= 0     then verdict = "none"
-   elseif score >= 15 then verdict = "good"
-   elseif score >= 5  then verdict = "ok"
-   else                    verdict = "poor" end
+   if save <= 0                       then verdict = "none"
+   elseif save < m.floor_val          then verdict = "skip"
+   elseif score >= 15 and save >= m.mid_val then verdict = "good"
+   elseif score >= 5                  then verdict = "ok"
+   else                                    verdict = "skip" end
 
+   local f = m.flags[T] or {}
    return { area = area, save = save, pct = pct, score = score, tailpct = tailpct,
+            floor_val = m.floor_val,
             cur_avg = cur_avg, new_avg = new_avg, cur_worst = worst, new_worst = new_worst,
-            weighted = m.weighted, verdict = verdict }
+            weighted = m.weighted, verdict = verdict,
+            noportal = f.np, norecall = f.nr }
 end
 
 function pv_worth_lines(r)
@@ -1201,17 +1321,22 @@ function pv_worth_lines(r)
    if not r.w_verdict then return end
    if r.w_verdict == "nodata" then
       pv_echo(C.hdr .. "Worth it    : " .. C.val .. "no kills recorded in " .. C.val .. esc(r.w_area or "?")
-              .. C.hdr .. " yet, so there is nothing to weigh a portal against.")
+              .. C.hdr .. " yet, so there is nothing to weigh a portal against."
+              .. (r.w_noportal and (C.bad .. "  (and it is flagged noportal)") or ""))
       return
    end
 
    local tag
-   if r.w_verdict == "good" then
+   if r.w_noportal then
+      tag = C.bad .. "This room is flagged noportal, so you cannot put a portal here."
+   elseif r.w_norecall then
+      tag = C.bad .. "This room is flagged norecall; a portal almost certainly cannot land here."
+   elseif r.w_verdict == "good" then
       tag = C.ok .. "This room would make a good portal for you."
    elseif r.w_verdict == "ok" then
       tag = C.val .. "Some help, but not a lot; worth a slot only if you come here often."
-   elseif r.w_verdict == "poor" then
-      tag = C.bad .. "Not worth a portal slot."
+   elseif r.w_verdict == "skip" then
+      tag = C.bad .. "You can skip this one."
    else
       tag = C.bad .. "Saves you nothing here; you can already get to these mobs as fast."
    end
@@ -1409,6 +1534,7 @@ local function compute_for_room(T, channel)
       rec.w_cur_avg, rec.w_new_avg = wv.cur_avg, wv.new_avg
       rec.w_cur_worst, rec.w_new_worst = wv.cur_worst, wv.new_worst
       rec.w_verdict, rec.w_weighted, rec.w_area = wv.verdict, wv.weighted, wv.area
+      rec.w_noportal, rec.w_norecall = wv.noportal, wv.norecall
    else
       rec.w_msg = wwhy
    end
@@ -1534,12 +1660,13 @@ function pv_help_all()
    pv_echo(C.hdr .. "  portaldex missing  " .. C.val .. "- mapper portals not yet catalogued")
    pv_echo(C.hdr .. "  portaldex rooms    " .. C.val .. "- refresh landing room numbers from the mapper")
    pv_echo(C.hdr .. "  portaldex bag <kw> " .. C.val .. "- set portal container keyword (used by scan)")
+   pv_echo(C.hdr .. "  portaldex cmd <word>  " .. C.val .. "- custom portal command for scans to look for besides take/get (cmd none = clear)")
    pv_echo(C.hdr .. "  portaldex auto on|off " .. C.val .. "- catalog-as-you-go toggle")
    pv_echo(C.hdr .. "  portaldex speed <s>   " .. C.val .. "- scan pacing (seconds per portal)")
    pv_echo(C.hdr .. "  portaldex remove <id|name> " .. C.val .. "- remove one portal from the catalog")
    pv_echo(C.hdr .. "  portaldex clear    " .. C.val .. "- wipe the catalog")
    pv_echo(C.hdr .. "Portals also catalog automatically whenever you " .. C.ok .. "id" .. C.hdr .. " one.")
-   pv_echo(C.bad .. "Scan uses the LAST item id/keyword in each mapper portal command.")
+   pv_echo(C.bad .. "Scan uses the LAST item id/keyword in each mapper portal command (take/get, or your custom command).")
 end
 
 -- ===== lifecycle (does both halves) =====
