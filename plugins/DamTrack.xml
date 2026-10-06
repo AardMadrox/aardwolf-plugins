@@ -1,0 +1,951 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="DamTrack"
+   author="Eric"
+   id="d4a7c1e95b3f4a6e8c20f1b7"
+   language="Lua"
+   purpose="Average melee and spell damage per round, by area, with separate 201 and 1-200 lists"
+   save_state="y"
+   date_written="2026-10-04 00:00:00"
+   requires="4.73"
+   version="1.0"
+>
+<description trim="y">
+<![CDATA[
+DamTrack v1.0
+Average melee and spell damage per round, per area, with level 201 and
+levels 1-200 kept as two separate lists.
+Type 'damtrack help' for commands.
+]]>
+</description>
+</plugin>
+
+<!-- ================================================================== -->
+<!-- TRIGGERS                                                           -->
+<!-- ================================================================== -->
+<triggers>
+  <!-- Any of YOUR damage lines: "Your slash massacres X. [1234]", "[4] Your fireball ... [5400]".
+       Verb detection and melee/spell split happen in Lua. -->
+  <trigger match="^\*?(?:\[\d+\] )?\*?Your .+[.!] \[\d+\]\*?$"
+    script="OnSelfDamage" enabled="y" group="damtrack" regexp="y" sequence="50"
+    keep_evaluating="y"></trigger>
+
+  <!-- Sea King's Dominion epic run boundaries (the same two lines SKDEpic keys off).
+       Everything between them is ignored so the epic does not skew your numbers. -->
+  <trigger match="^Spectre of the Deep says 'Best to avoid his attention completely if you are able, lest you draw his ire\.'$"
+    script="SkdRunBegin" enabled="y" group="damtrack" regexp="y" sequence="40"
+    keep_evaluating="y"></trigger>
+  <trigger match="^Spectre of the Deep says, &quot;A parting gift - at least until the brat gets up again\.&quot;$"
+    script="SkdRunEnd" enabled="y" group="damtrack" regexp="y" sequence="40"
+    keep_evaluating="y"></trigger>
+</triggers>
+
+<!-- ================================================================== -->
+<!-- ALIASES                                                            -->
+<!-- ================================================================== -->
+<aliases>
+  <alias match="^damtrack(?:\s+(.*?))?\s*$" regexp="y" enabled="y" ignore_case="y"
+    script="CmdDamTrack" sequence="100"></alias>
+  <alias match="^damtrackarea(?:\s+(.*?))?\s*$" regexp="y" enabled="y" ignore_case="y"
+    script="CmdDamTrackArea" sequence="100"></alias>
+</aliases>
+
+<!-- ================================================================== -->
+<!-- SCRIPT                                                             -->
+<!-- ================================================================== -->
+<script>
+<![CDATA[
+
+-- =============================================================================
+-- SETTINGS
+-- =============================================================================
+local ROUND_GAP       = 1.0      -- seconds of silence between your damage lines that ends a round
+local SKILLS_COUNT_AS = "melee"  -- kick/bash/backstab etc: "melee" or "spell"
+local SAVE_DELAY      = 5        -- seconds after the first unsaved change before writing the file
+local MAX_RECORDS     = 10       -- finished side tracks kept for "damtrack records"
+local COMBAT_STATE    = 8        -- GMCP char.status state that means you are fighting
+local DPS_GRACE       = 1.0      -- seconds after combat ends that damage still counts (killing blow)
+
+local HIGH, LOW = "201", "1-200" -- the two separate lists
+local CHANNELS = { spo = true, gt = true, ft = true, clan = true, say = true }
+local CHANNEL_LIST = "spo, gt, ft, clan, say"
+
+-- =============================================================================
+-- STATE
+-- =============================================================================
+local stats = { [HIGH] = {}, [LOW] = {} }   -- stats[bracket][areakey] = {name, rounds, melee, spell}
+local level = 0
+local track = nil               -- running side track: { start = os.time(), stats = {...} }
+local records = {}              -- finished side tracks, newest first: { start, stop, stats }
+local area_key, area_name = "unknown", "Unknown"
+local loaded_name = nil
+local round = nil
+local round_id = 0
+local save_armed = false
+local dirty = false
+local debug_on = false
+local in_combat = false      -- GMCP state == COMBAT_STATE
+local seg_start = 0          -- when the current stretch of combat time began
+local combat_end = -1000     -- when state 8 last ended
+local skd_run = false        -- inside a Sea King's Dominion epic run: nothing is tracked
+
+local function Now()
+   if utils and utils.timer then return utils.timer() end
+   return os.time()
+end
+
+-- =============================================================================
+-- COLOUR ECHO  (@x099 @x045 @x048 @W)
+-- =============================================================================
+local STD16 = {
+   [0] = "#000000", "#800000", "#008000", "#808000", "#000080", "#800080", "#008080", "#C0C0C0",
+   "#808080", "#FF0000", "#00FF00", "#FFFF00", "#0000FF", "#FF00FF", "#00FFFF", "#FFFFFF" }
+local CUBE = { 0, 95, 135, 175, 215, 255 }
+
+local function XtermHex(n)
+   if n > 255 then n = 255 end
+   if n < 16 then return STD16[n] end
+   if n >= 232 then
+      local g = 8 + (n - 232) * 10
+      return string.format("#%02X%02X%02X", g, g, g)
+   end
+   n = n - 16
+   local r = CUBE[math.floor(n / 36) + 1]
+   local g = CUBE[math.floor((n % 36) / 6) + 1]
+   local b = CUBE[(n % 6) + 1]
+   return string.format("#%02X%02X%02X", r, g, b)
+end
+
+local function Echo(msg)
+   local color = "#FFFFFF"
+   local i = 1
+   while i <= #msg do
+      if msg:sub(i, i) == "@" then
+         local x = msg:match("^x(%d%d%d)", i + 1)
+         if x then
+            color = XtermHex(tonumber(x)); i = i + 5
+         elseif msg:sub(i + 1, i + 1) == "W" then
+            color = "#FFFFFF"; i = i + 2
+         elseif msg:sub(i + 1, i + 1) == "@" then
+            ColourTell(color, "", "@"); i = i + 2
+         else
+            ColourTell(color, "", "@"); i = i + 1
+         end
+      else
+         local j = msg:find("@", i, true) or (#msg + 1)
+         ColourTell(color, "", msg:sub(i, j - 1))
+         i = j
+      end
+   end
+   Note("")
+end
+
+local TAG = "@x099[@x045DamTrack@x099]@W "
+
+-- =============================================================================
+-- FORMATTING
+-- =============================================================================
+local function Commas(n)
+   local s = string.format("%.0f", n)
+   local sign, int = s:match("^(-?)(%d+)$")
+   if not int then return s end
+   local r = int:reverse()
+   r = r:gsub("(%d%d%d)", "%1,")
+   r = r:reverse()
+   r = r:gsub("^,", "")
+   return sign .. r
+end
+
+local function Title(s)
+   return (s:gsub("(%a)([%w']*)", function(a, b) return a:upper() .. b end))
+end
+
+local function Round0(x) return math.floor(x + 0.5) end
+
+-- avg melee, melee %, avg spell, spell %  (nil when there is nothing to show)
+local function Parts(rec)
+   if not rec or rec.rounds <= 0 then return nil end
+   local tot = rec.melee + rec.spell
+   if tot <= 0 then return nil end
+   local pm = Round0(rec.melee / tot * 100)
+   return Commas(Round0(rec.melee / rec.rounds)), pm,
+          Commas(Round0(rec.spell / rec.rounds)), 100 - pm
+end
+
+-- damage per second of combat time (state 8) as a number, or nil when there is none yet
+local function DpsValue(rec)
+   if not rec or not rec.secs or rec.secs <= 0 then return nil end
+   local d = rec.cm + rec.cs
+   if d <= 0 then return nil end
+   return d / rec.secs
+end
+
+local function Dps(rec)
+   local v = DpsValue(rec)
+   if not v then return nil end
+   return Commas(Round0(v))
+end
+
+-- "2h 15m", "3d 4h", "45m", "30s"
+local function Dur(s)
+   s = math.max(0, math.floor(s))
+   local d = math.floor(s / 86400)
+   local h = math.floor((s % 86400) / 3600)
+   local m = math.floor((s % 3600) / 60)
+   if d > 0 then return d .. "d " .. h .. "h" end
+   if h > 0 then return h .. "h " .. m .. "m" end
+   if m > 0 then return m .. "m" end
+   return s .. "s"
+end
+
+-- "Oct 05" (adds the year when it is not this year)
+local function DateStr(t)
+   local s = os.date("%b %d", t)
+   if os.date("%Y", t) ~= os.date("%Y") then s = s .. " " .. os.date("%Y", t) end
+   return s
+end
+
+-- coloured "12,665 avg melee (50%) 12,665 avg spell (50%) | 1,200 dps", or nil with no data
+local function InfoPart(rec)
+   local am, pm, as, ps = Parts(rec)
+   local dps = Dps(rec)
+   if not am and not dps then return nil end
+   local s = ""
+   if am then
+      s = "@x048" .. am .. " @Wavg melee @x099(@x048" .. pm .. "%@x099) @x048"
+         .. as .. " @Wavg spell @x099(@x048" .. ps .. "%@x099)"
+   end
+   if dps then
+      s = s .. (am and " @W| " or "") .. "@x048" .. dps .. " @Wdps"
+   end
+   return s
+end
+
+-- Channel report with colour codes (Aardwolf channels expand @x codes for everyone).
+-- With a side track running the line gets a Track part (info | how long | since date)
+-- in front of the Lifetime part.
+local function ReportText(areaname, rec, trec)
+   local head = "@x045DamTrack@x099: "
+   if areaname then head = head .. "@x048" .. areaname .. "@x099: " end
+   local life = InfoPart(rec)
+   if not track then return head .. (life or "@Wno data") .. "@w" end
+   return head .. "@x045Track@x099: " .. (InfoPart(trec) or "@Wno data")
+      .. " @W| @x048" .. Dur(os.time() - track.start) .. " @Wsince @x048" .. DateStr(track.start)
+      .. " @W| @x045Lifetime@x099: " .. (life or "@Wno data") .. "@w"
+end
+
+-- =============================================================================
+-- DAMAGE LINE PARSING  (ported from the Cirrus approach)
+-- =============================================================================
+local DAMAGE_VERBS = {}
+for _, v in ipairs({
+   "tickles","bruises","scratches","grazes","nicks","scars","hits","injures",
+   "wounds","mauls","maims","mangles","mars","decimates","devastates","rends",
+   "incinerates","lacerates","obliterates","massacres","disembowels","extirpates",
+   "eradicates","dismembers","mutilates","blasts","demolishes","shreds","destroys",
+   "pulverizes","vaporizes","atomizes","asphyxiates","ravages","fissures",
+   "liquidates","evaporates","sunders","wastes","cremates","annihilates","implodes",
+   "exterminates","shatters","slaughters","ruptures","nukes","glaciates","meteorites",
+   "supernovas","damages","misses",
+   "tears into",
+   "does unspeakable things to","does unthinkable things to",
+   "does unimaginable things to","does unbelievable things to",
+}) do DAMAGE_VERBS[v] = true end
+
+-- Weapon-swing damage nouns: these are melee.
+local MELEE = {}
+for _, v in ipairs({
+   "acidic bite","digestion","slime","air","beating","blast","charge","crush","hit","pound",
+   "punch","slap","smash","suction","thwack","chill","freezing bite","earth","shock",
+   "shocking bite","friction","wrath","flame","flaming bite","divine power","light","magic",
+   "mental energy","mind force","decaying touch","life drain","bite","chomp","peck","pierce",
+   "scratch","stab","sting","thrust","chop","claw","cleave","grep","slash","slice","whip",
+   "shadow","wail","water blast",
+}) do MELEE[v] = true end
+
+-- Physical skills; they land in SKILLS_COUNT_AS.
+local SKILLS = {}
+for _, v in ipairs({
+   "bash","bodycheck","uppercut","kicked dirt","hammering blow","sap","kick","stunning blow",
+   "stomp","gouge","mighty assault","scalp","spinning blade","backstab","spiralling force",
+   "counter strike",
+}) do SKILLS[v] = true end
+
+-- Not your own damage output
+local IGNORE = { ["group's combined attack"] = true }
+
+local function StripDecor(text)
+   local s = text:gsub("[%-%=<>%*%[%]:\\%+%.]+", " ")
+   s = s:gsub("%s+", " ")
+   s = s:gsub("^ ", "")
+   s = s:gsub(" $", "")
+   return s
+end
+
+local function StripCombatLine(line)
+   local s = line:gsub("^%*", "")
+   s = s:gsub("^%[%d+%] ", "")
+   s = s:gsub("^%b[] ", "")
+   s = s:gsub("^%b[] ", "")
+   s = s:gsub("^%b[] ", "")
+   s = s:gsub("^%*", "")
+   s = s:gsub("%s*%[%d+%]%*?$", "")
+   return s
+end
+
+-- The attack name is everything before the EARLIEST whole-word damage verb.
+local function ExtractAttackName(text)
+   local lower = StripDecor(text):lower()
+   local stripped = StripDecor(text)
+   local best_pos, best_len = nil, 0
+   for verb in pairs(DAMAGE_VERBS) do
+      local from = 1
+      while true do
+         local s, e = lower:find(verb, from, true)
+         if not s then break end
+         local before_ok = s > 1 and not lower:sub(s - 1, s - 1):match("%a")
+         local after_ok = not lower:sub(e + 1, e + 1):match("%a")
+         if before_ok and after_ok then
+            if not best_pos or s < best_pos or (s == best_pos and #verb > best_len) then
+               best_pos, best_len = s, #verb
+            end
+            break
+         end
+         from = s + 1
+      end
+   end
+   if not best_pos then return nil end
+   local before = stripped:sub(1, best_pos - 1):match("^(.-)%s+$")
+   if before and #before > 0 then return before end
+   return nil
+end
+
+local function Classify(attack)
+   local a = attack:lower()
+   if IGNORE[a] then return nil end
+   if MELEE[a] then return "melee" end
+   if SKILLS[a] then return SKILLS_COUNT_AS end
+   return "spell"
+end
+
+-- =============================================================================
+-- LEVEL / AREA  (GMCP, handled directly like the other plugins)
+-- =============================================================================
+local function CurrentBracket()
+   if level <= 0 then return nil end
+   return level >= 201 and HIGH or LOW
+end
+
+local function NewStats() return { [HIGH] = {}, [LOW] = {} } end
+
+local function RecIn(st, bracket, key, name)
+   local areas = st[bracket]
+   local rec = areas[key]
+   if not rec then
+      rec = { name = name, rounds = 0, melee = 0, spell = 0, secs = 0, cm = 0, cs = 0 }
+      areas[key] = rec
+   end
+   return rec
+end
+
+local function AreaRecord(bracket, key, name)
+   return RecIn(stats, bracket, key, name)
+end
+
+-- Every figure goes to lifetime, and also to the side track when one is running.
+local function Credit(bracket, key, name, rounds, melee, spell, secs, cm, cs)
+   local function add(rec)
+      rec.rounds = rec.rounds + rounds
+      rec.melee  = rec.melee  + melee
+      rec.spell  = rec.spell  + spell
+      rec.secs   = rec.secs   + secs
+      rec.cm     = rec.cm     + cm
+      rec.cs     = rec.cs     + cs
+   end
+   add(RecIn(stats, bracket, key, name))
+   if track then add(RecIn(track.stats, bracket, key, name)) end
+end
+
+local function MergeStats(dst, src)
+   for b, areas in pairs(src) do
+      if dst[b] then
+         for k, r in pairs(areas) do
+            local d = RecIn(dst, b, k, r.name)
+            d.rounds = d.rounds + r.rounds
+            d.melee  = d.melee  + r.melee
+            d.spell  = d.spell  + r.spell
+            d.secs   = d.secs   + r.secs
+            d.cm     = d.cm     + r.cm
+            d.cs     = d.cs     + r.cs
+         end
+      end
+   end
+end
+
+-- =============================================================================
+-- PERSISTENCE  (file on disk in GetInfo(66), one file per character)
+-- =============================================================================
+local function DataPath(name)
+   local safe = (name or "unknown"):gsub("[^%w_%-]", "_")
+   return GetInfo(66) .. "DamTrack_" .. safe .. ".dat"
+end
+
+local function WriteStats(f, prefix, st)
+   for bracket, areas in pairs(st) do
+      for key, rec in pairs(areas) do
+         f:write(string.format("%s%s\t%s\t%s\t%.0f\t%.0f\t%.0f\t%.3f\t%.0f\t%.0f\n",
+            prefix, bracket, key, rec.name, rec.rounds, rec.melee, rec.spell, rec.secs, rec.cm, rec.cs))
+      end
+   end
+end
+
+local function SaveData()
+   if not dirty then return end
+   local path = DataPath(loaded_name)
+   local f = io.open(path, "w")
+   if not f then
+      Echo(TAG .. "@x048Could not write @W" .. path)
+      return
+   end
+   f:write("DAMTRACK 2\n")
+   WriteStats(f, "", stats)                              -- lifetime: first field is the level list
+   if track then
+      f:write(string.format("TRACK\t%.0f\n", track.start))
+      WriteStats(f, "TD\t", track.stats)
+   end
+   for i, r in ipairs(records) do
+      f:write(string.format("REC\t%d\t%.0f\t%.0f\n", i, r.start, r.stop))
+      WriteStats(f, "RD\t" .. i .. "\t", r.stats)
+   end
+   f:close()
+   dirty = false
+end
+
+-- stats fields start at index i: bracket, key, name, rounds, melee, spell, secs, cm, cs
+local function AddFromFields(st, fields, i)
+   local b, k, n = fields[i], fields[i + 1], fields[i + 2]
+   local r, m, s = tonumber(fields[i + 3]), tonumber(fields[i + 4]), tonumber(fields[i + 5])
+   if not (b and st[b] and k and r and m and s) then return end
+   local rec = RecIn(st, b, k, n or k)
+   rec.rounds = rec.rounds + r
+   rec.melee  = rec.melee  + m
+   rec.spell  = rec.spell  + s
+   rec.secs   = rec.secs   + (tonumber(fields[i + 6]) or 0)
+   rec.cm     = rec.cm     + (tonumber(fields[i + 7]) or 0)
+   rec.cs     = rec.cs     + (tonumber(fields[i + 8]) or 0)
+end
+
+local function MergeFile(path)
+   local f = io.open(path, "r")
+   if not f then return end
+   local ftrack_start, ftrack = nil, NewStats()
+   local frecs = {}
+   for ln in f:lines() do
+      local fields = {}
+      for fld in (ln .. "\t"):gmatch("([^\t]*)\t") do fields[#fields + 1] = fld end
+      local tag = fields[1]
+      if tag == "TRACK" then
+         ftrack_start = tonumber(fields[2])
+      elseif tag == "TD" then
+         AddFromFields(ftrack, fields, 2)
+      elseif tag == "REC" then
+         local idx = tonumber(fields[2])
+         if idx then
+            frecs[idx] = frecs[idx] or { stats = NewStats() }
+            frecs[idx].start = tonumber(fields[3])
+            frecs[idx].stop  = tonumber(fields[4])
+         end
+      elseif tag == "RD" then
+         local idx = tonumber(fields[2])
+         if idx then
+            frecs[idx] = frecs[idx] or { stats = NewStats() }
+            AddFromFields(frecs[idx].stats, fields, 3)
+         end
+      else
+         AddFromFields(stats, fields, 1)                 -- lifetime line (the header is skipped here)
+      end
+   end
+   f:close()
+   if ftrack_start and ftrack_start > 0 then
+      if not track then
+         track = { start = ftrack_start, stats = ftrack }
+      else
+         MergeStats(track.stats, ftrack)
+         if ftrack_start < track.start then track.start = ftrack_start end
+      end
+   end
+   if #records == 0 then
+      local idxs = {}
+      for idx in pairs(frecs) do idxs[#idxs + 1] = idx end
+      table.sort(idxs)
+      for _, idx in ipairs(idxs) do
+         local r = frecs[idx]
+         if r.start and r.stop and #records < MAX_RECORDS then records[#records + 1] = r end
+      end
+   end
+end
+
+local function ArmSave()
+   if save_armed then return end
+   save_armed = true
+   DoAfterSpecial(SAVE_DELAY, "DamTrackSave()", 12)
+end
+
+-- Adds the combat time since the last flush to the area/level you are in now.
+-- Called whenever the context changes (area, level, leaving combat) and before reports/saves.
+local function FlushCombatTime()
+   if not in_combat then return end
+   local t = Now()
+   local bracket = CurrentBracket()
+   if bracket and t > seg_start and not skd_run then
+      Credit(bracket, area_key, area_name, 0, 0, 0, t - seg_start, 0, 0)
+      dirty = true
+      ArmSave()
+   end
+   seg_start = t
+end
+
+function DamTrackSave()
+   save_armed = false
+   FlushCombatTime()
+   SaveData()
+end
+
+-- =============================================================================
+-- ROUND ENGINE
+-- A round = all your damage lines that arrive together. A gap of ROUND_GAP
+-- seconds ends it; a generation-counted timer closes the last one.
+-- Level bracket and area are taken when the round starts.
+-- =============================================================================
+local function CloseRound()
+   if not round then return end
+   local r = round
+   round = nil
+   -- Only rounds with BOTH a melee line and a spell line count; anything else is skipped.
+   if r.melee <= 0 or r.spell <= 0 then return end
+   local bracket = r.bracket or CurrentBracket()
+   if not bracket then return end   -- level never became known: drop it
+   Credit(bracket, r.key, r.name, 1, r.melee, r.spell, 0, 0, 0)
+   dirty = true
+   ArmSave()
+end
+
+-- Begin/end of the SKD epic. Anything already counted stays; from the begin line
+-- until the end line no damage, rounds or combat time are recorded.
+function SkdRunBegin()
+   if skd_run then return end
+   CloseRound()
+   FlushCombatTime()
+   skd_run = true
+   Echo(TAG .. "@WSea King's Dominion epic started - @x048not tracking @Wuntil it ends.")
+end
+
+function SkdRunEnd()
+   if not skd_run then return end
+   skd_run = false
+   seg_start = Now()     -- the run's time is not combat time for the stats
+   round = nil
+   Echo(TAG .. "@WSea King's Dominion epic finished - @x048tracking again@W.")
+end
+
+function DamTrackFinalize(id)
+   if not round or round.id ~= id then return end
+   local quiet = Now() - round.last
+   if quiet >= ROUND_GAP then
+      CloseRound()
+   else
+      DoAfterSpecial(ROUND_GAP - quiet + 0.1, "DamTrackFinalize(" .. id .. ")", 12)
+   end
+end
+
+local function AddDamage(kind, dmg)
+   local t = Now()
+   if round and (t - round.last) > ROUND_GAP then CloseRound() end
+   if not round then
+      round_id = round_id + 1
+      round = { id = round_id, melee = 0, spell = 0, last = t,
+                bracket = CurrentBracket(), key = area_key, name = area_name }
+      DoAfterSpecial(ROUND_GAP + 0.25, "DamTrackFinalize(" .. round_id .. ")", 12)
+   end
+   round[kind] = round[kind] + dmg
+   round.last = t
+end
+
+-- Damage for the per-second figure: only while GMCP says you are in combat
+-- (plus DPS_GRACE after it ends, so the killing blow is not lost).
+local function CountDps(kind, dmg)
+   local bracket = CurrentBracket()
+   if not bracket then return end
+   if not in_combat and (Now() - combat_end) > DPS_GRACE then return end
+   Credit(bracket, area_key, area_name, 0, 0, 0, 0, kind == "melee" and dmg or 0, kind == "melee" and 0 or dmg)
+   dirty = true
+   ArmSave()
+end
+
+function OnSelfDamage(name, line, wildcards)
+   if skd_run then return end
+   local damage = tonumber(line:match("%[(%d+)%]%*?$")) or 0
+   if damage <= 0 then return end
+   local clean = StripCombatLine(line)
+   local lower = clean:lower()
+   if lower:find("healed by ", 1, true) or lower:find(" heals ", 1, true) then return end
+   local body = clean:match("^Your (.+)[%.!]$")
+   if not body then return end
+   local attack = ExtractAttackName(body)
+   if not attack then return end
+   local kind = Classify(attack)
+   if not kind then return end
+   AddDamage(kind, damage)
+   CountDps(kind, damage)
+   if debug_on then
+      Echo(TAG .. "@x045" .. kind .. "@W: " .. attack .. " @x048" .. Commas(damage))
+   end
+end
+
+-- =============================================================================
+-- GMCP
+-- =============================================================================
+local function OnCharName(nm)
+   if loaded_name == nm then return end
+   loaded_name = nm
+   MergeFile(DataPath(nm))
+   dirty = true
+   ArmSave()
+end
+
+function OnPluginTelnetSubnegotiation(opt, data)
+   if opt ~= 201 or type(data) ~= "string" then return end
+   local msg, payload = data:match("^([%w%._]+)%s*(.*)$")
+   if not msg then return end
+   if msg == "char.status" or msg == "char.base" then
+      local lv = tonumber(payload:match('"level"%s*:%s*"?(%d+)'))
+      if lv and lv > 0 then
+         if lv ~= level then FlushCombatTime() end   -- close out time under the old level list
+         level = lv
+      end
+      if msg == "char.status" then
+         local st = tonumber(payload:match('"state"%s*:%s*"?(%d+)'))
+         if st then
+            if st == COMBAT_STATE then
+               if not in_combat then in_combat = true; seg_start = Now() end
+            elseif in_combat then
+               FlushCombatTime()
+               in_combat = false
+               combat_end = Now()
+            end
+         end
+      end
+      if msg == "char.base" then
+         local nm = payload:match('"name"%s*:%s*"([^"]+)"')
+         if nm then OnCharName(nm) end
+      end
+   elseif msg == "room.info" then
+      local z = payload:match('"zone"%s*:%s*"([^"]*)"')
+      if z and z ~= "" then
+         if z:lower() ~= area_key then FlushCombatTime() end   -- close out time in the old area
+         area_key, area_name = z:lower(), Title(z)
+      end
+   end
+end
+
+-- =============================================================================
+-- REPORTING
+-- =============================================================================
+local function SumStats(st, bracket)
+   local sum = { rounds = 0, melee = 0, spell = 0, secs = 0, cm = 0, cs = 0 }
+   for _, rec in pairs(st[bracket]) do
+      sum.rounds = sum.rounds + rec.rounds
+      sum.melee  = sum.melee  + rec.melee
+      sum.spell  = sum.spell  + rec.spell
+      sum.secs   = sum.secs   + rec.secs
+      sum.cm     = sum.cm     + rec.cm
+      sum.cs     = sum.cs     + rec.cs
+   end
+   return sum
+end
+
+local function GlobalRecord(bracket)
+   return SumStats(stats, bracket)
+end
+
+-- exact key first, then best prefix match, then best substring match
+local function FindIn(areas, kw)
+   kw = kw:lower()
+   if areas[kw] then return areas[kw] end
+   local best, best_rank
+   for key, rec in pairs(areas) do
+      local rank
+      if key:sub(1, #kw) == kw then rank = 2
+      elseif key:find(kw, 1, true) then rank = 3 end
+      if rank and (not best or rank < best_rank or (rank == best_rank and rec.rounds > best.rounds)) then
+         best, best_rank = rec, rank
+      end
+   end
+   return best
+end
+
+local function FindArea(bracket, kw)
+   return FindIn(stats[bracket], kw)
+end
+
+-- one coloured local line
+local function ShowLine(label, rec, is_current)
+   local am, pm, as, ps = Parts(rec)
+   local dps = Dps(rec)
+   local line = TAG .. "@x045" .. label .. "@W: "
+   if am then
+      line = line .. "@x048" .. am .. " @Wavg melee @x099(@x048" .. pm .. "%@x099) @W| @x048"
+         .. as .. " @Wavg spell @x099(@x048" .. ps .. "%@x099) @W| @x048"
+         .. Commas(rec.rounds) .. " @Wrounds"
+   end
+   if dps then
+      line = line .. (am and " @W| " or "") .. "@x048" .. dps .. " @Wdps"
+   end
+   if not am and not dps then line = line .. "@Wno data" end
+   if is_current then line = line .. " @x099<- current" end
+   Echo(line)
+end
+
+local function ShowTrackHeader()
+   Echo(TAG .. "@x045Track@W running @x048" .. Dur(os.time() - track.start)
+      .. " @Wsince @x048" .. DateStr(track.start))
+end
+
+local function ShowGlobal()
+   FlushCombatTime()
+   local cur = CurrentBracket()
+   local lp = ""
+   if track then
+      ShowTrackHeader()
+      ShowLine("Track Level " .. HIGH, SumStats(track.stats, HIGH), cur == HIGH)
+      ShowLine("Track Level " .. LOW,  SumStats(track.stats, LOW),  cur == LOW)
+      lp = "Lifetime "
+   end
+   ShowLine(lp .. "Level " .. HIGH, GlobalRecord(HIGH), cur == HIGH)
+   ShowLine(lp .. "Level " .. LOW,  GlobalRecord(LOW),  cur == LOW)
+end
+
+local function ShowArea(kw)
+   FlushCombatTime()
+   local cur = CurrentBracket()
+   if track then ShowTrackHeader() end
+   for _, b in ipairs({ HIGH, LOW }) do
+      local rec = FindArea(b, kw)
+      local trec = track and FindIn(track.stats[b], kw)
+      local nm = (rec and rec.name) or (trec and trec.name) or Title(kw)
+      if track then ShowLine("Track Level " .. b .. " " .. nm, trec, cur == b) end
+      ShowLine((track and "Lifetime " or "") .. "Level " .. b .. " " .. nm, rec, cur == b)
+   end
+end
+
+local function ShowHelp()
+   Echo(TAG .. "@x048Average damage per round, melee vs spell")
+   Echo("@x045damtrack @W- show averages and damage per second for both level lists")
+   Echo("@x045damtrack @x048<chan> @W- report global numbers (@x048" .. CHANNEL_LIST .. "@W)")
+   Echo("@x045damtrackarea @x048<area> @W- show one area (matches the start of the area keyword)")
+   Echo("@x045damtrackarea @x048<area> <chan> @W- report that area only; no data shows as no data")
+   Echo("@x045damtrack @x048<area> [chan] @W- same as damtrackarea")
+   Echo("@x045damtrack areas @W- areas with dps data, lowest dps to highest, with avg melee/spell and %")
+   Echo("@x045damtrack start @W- begin a fresh side track; lifetime keeps tallying and reports show both")
+   Echo("@x045damtrack stop @W- end the side track and save it (last " .. MAX_RECORDS .. " are kept)")
+   Echo("@x045damtrack records @W- show the saved side tracks, newest first")
+   Echo("@x099Damage per second @Wcounts only time spent in combat (GMCP state @x048" .. COMBAT_STATE .. "@W).")
+   Echo("@x099Sea King's Dominion epic@W: tracking pauses from the Spectre's first line to its parting line. @x045damtrack skd @Wtoggles that by hand.")
+   Echo("@x045damtrack debug @W- toggle echo of each tracked hit and how it was classed")
+   Echo("@x045damtrack reset confirm @W- wipe lifetime data (side tracks and saved records are kept)")
+   Echo("@x099Level @x048201 @Wand @x048" .. LOW .. " @Ware tracked as two separate lists; reports use the one matching your current level.")
+end
+
+local function NoLevel()
+   Echo(TAG .. "@WYour level has not been detected yet (it arrives over GMCP). Fight or move and try again.")
+end
+
+-- "<area> [chan]": local view without a channel, report with one
+local function AreaCommand(arg)
+   local kw, chan = arg:match("^(%S+)%s*(%S*)$")
+   if not kw or CHANNELS[kw] then
+      Echo(TAG .. "@WUsage: @x045damtrackarea @x048<area> [chan]@W, e.g. @x045damtrackarea gelidus gt")
+      return
+   end
+   if chan == "" then
+      ShowArea(kw)
+      return
+   end
+   if not CHANNELS[chan] then
+      Echo(TAG .. "@x048" .. chan .. " @Wis not a channel here (@x048" .. CHANNEL_LIST .. "@W).")
+      return
+   end
+   local bracket = CurrentBracket()
+   if not bracket then NoLevel() return end
+   FlushCombatTime()
+   local rec = FindArea(bracket, kw)
+   local trec = track and FindIn(track.stats[bracket], kw)
+   local nm = (rec and rec.name) or (trec and trec.name) or Title(kw)
+   Execute(chan .. " " .. ReportText(nm, rec, trec))
+end
+
+-- areas with data, lowest dps first so the best ones end up nearest your prompt
+local function ShowAreas()
+   FlushCombatTime()
+   local any = false
+   for _, b in ipairs({ HIGH, LOW }) do
+      local list = {}
+      for key, rec in pairs(stats[b]) do
+         local v = DpsValue(rec)
+         if v then list[#list + 1] = { key = key, dps = v, rec = rec } end   -- areas with no dps yet are left out
+      end
+      if #list > 0 then
+         any = true
+         table.sort(list, function(a, c)
+            if a.dps ~= c.dps then return a.dps < c.dps end
+            return a.key < c.key
+         end)
+         Echo(TAG .. "@x045Level " .. b .. "@W areas, lowest to highest dps:")
+         for _, e in ipairs(list) do
+            local line = "  @x048" .. e.key .. "@W: @x099" .. Commas(Round0(e.dps)) .. " @Wdps"
+            local am, pm, as, ps = Parts(e.rec)
+            if am then
+               line = line .. " @W| @x099" .. am .. " @Wavg melee (@x099" .. pm .. "%@W) @x099"
+                  .. as .. " @Wavg spell (@x099" .. ps .. "%@W)"
+            end
+            Echo(line)
+         end
+      end
+   end
+   if not any then Echo(TAG .. "@WNo areas with dps data yet.") end
+end
+
+local function TrackStart()
+   if track then
+      Echo(TAG .. "@WA track is already running (@x048" .. Dur(os.time() - track.start)
+         .. " @Wsince @x048" .. DateStr(track.start) .. "@W). Use @x045damtrack stop @Wfirst.")
+      return
+   end
+   CloseRound()          -- anything before now belongs to lifetime only
+   FlushCombatTime()
+   track = { start = os.time(), stats = NewStats() }
+   dirty = true
+   SaveData()
+   Echo(TAG .. "@WTrack started. Lifetime keeps tallying; reports now show both.")
+end
+
+local function TrackStop()
+   if not track then
+      Echo(TAG .. "@WNo track is running. Use @x045damtrack start@W.")
+      return
+   end
+   CloseRound()
+   FlushCombatTime()
+   local rec = { start = track.start, stop = os.time(), stats = track.stats }
+   table.insert(records, 1, rec)
+   while #records > MAX_RECORDS do table.remove(records) end
+   track = nil
+   dirty = true
+   SaveData()
+   Echo(TAG .. "@WTrack stopped after @x048" .. Dur(rec.stop - rec.start)
+      .. " @W(since @x048" .. DateStr(rec.start) .. "@W). Saved as @x048#1@W, see @x045damtrack records@W.")
+   for _, b in ipairs({ HIGH, LOW }) do
+      local s = SumStats(rec.stats, b)
+      if Parts(s) or Dps(s) then ShowLine("Track Level " .. b, s, false) end
+   end
+end
+
+local function ShowRecords()
+   if #records == 0 then
+      Echo(TAG .. "@WNo saved tracks yet. @x045damtrack start @Wthen @x045damtrack stop @Wto make one.")
+      return
+   end
+   Echo(TAG .. "@x045Saved tracks@W, newest first (last @x048" .. MAX_RECORDS .. "@W kept):")
+   for i, r in ipairs(records) do
+      Echo("@x099#@x048" .. i .. "@W: @x045" .. DateStr(r.start) .. " @Wto @x045" .. DateStr(r.stop)
+         .. " @W(@x048" .. Dur(r.stop - r.start) .. "@W)")
+      local shown = false
+      for _, b in ipairs({ HIGH, LOW }) do
+         local s = SumStats(r.stats, b)
+         if Parts(s) or Dps(s) then ShowLine("  Level " .. b, s, false); shown = true end
+      end
+      if not shown then Echo("  @Wno data") end
+   end
+end
+
+function CmdDamTrack(name, line, wildcards)
+   local arg = (wildcards[1] or ""):lower()
+   if arg == "" then
+      ShowGlobal()
+   elseif arg == "help" or arg == "?" then
+      ShowHelp()
+   elseif arg == "debug" then
+      debug_on = not debug_on
+      Echo(TAG .. "@WHit debug is now @x048" .. (debug_on and "on" or "off"))
+   elseif arg == "areas" then
+      ShowAreas()
+   elseif arg == "start" then
+      TrackStart()
+   elseif arg == "stop" then
+      TrackStop()
+   elseif arg == "records" then
+      ShowRecords()
+   elseif arg == "skd" then
+      -- manual override if a begin/end line was missed (reload mid-run, death, etc.)
+      if skd_run then SkdRunEnd() else SkdRunBegin() end
+   elseif arg == "reset" then
+      Echo(TAG .. "@WThis erases your lifetime data (side tracks are kept). Type @x045damtrack reset confirm @Wto go ahead.")
+   elseif arg == "reset confirm" then
+      stats = { [HIGH] = {}, [LOW] = {} }
+      round = nil
+      dirty = true
+      SaveData()
+      Echo(TAG .. "@WLifetime data cleared.")
+   elseif CHANNELS[arg] then
+      local bracket = CurrentBracket()
+      if not bracket then NoLevel() return end
+      FlushCombatTime()
+      Execute(arg .. " " .. ReportText(nil, GlobalRecord(bracket), track and SumStats(track.stats, bracket)))
+   else
+      -- anything else is an area keyword: "damtrack blackclaw" or "damtrack blackclaw spo"
+      AreaCommand(arg)
+   end
+end
+
+function CmdDamTrackArea(name, line, wildcards)
+   AreaCommand((wildcards[1] or ""):lower())
+end
+
+-- =============================================================================
+-- LIFECYCLE
+-- =============================================================================
+function OnPluginInstall()
+   Echo(TAG .. "@Wloaded. Type @x045damtrack help @Wfor commands.")
+   -- Installed mid-session: ask Aardwolf to resend char info so name and level arrive.
+   if IsConnected() then SendNoEcho("protocol gmcp sendchar") end
+end
+
+function OnPluginSaveState()
+   CloseRound()
+   FlushCombatTime()
+   SaveData()
+end
+
+function OnPluginClose()
+   CloseRound()
+   FlushCombatTime()
+   SaveData()
+end
+
+function OnPluginDisconnect()
+   CloseRound()
+   FlushCombatTime()
+   in_combat, combat_end, skd_run = false, -1000, false
+   SaveData()
+   stats = { [HIGH] = {}, [LOW] = {} }
+   track, records = nil, {}
+   loaded_name, level = nil, 0
+   area_key, area_name = "unknown", "Unknown"
+   dirty = false
+end
+
+]]>
+</script>
+</muclient>
