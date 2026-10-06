@@ -523,6 +523,12 @@ local function CloseRound()
    if not round then return end
    local r = round
    round = nil
+   if debug_on and r.melee + r.spell > 0 then
+      Echo(TAG .. "@x045round@W: melee line @x048" .. (r.melee > 0 and Commas(r.melee) or "none")
+         .. " @W+ spell line @x048" .. (r.spell > 0 and Commas(r.spell) or "none") .. " @W"
+         .. ((r.melee > 0 and r.spell > 0) and "@x048counted" or "@x099skipped, needs both")
+         .. (r.extra > 0 and (" @W(" .. r.extra .. " extra line" .. (r.extra > 1 and "s" or "") .. " ignored)") or ""))
+   end
    -- Only rounds with BOTH a melee line and a spell line count; anything else is skipped.
    if r.melee <= 0 or r.spell <= 0 then return end
    local bracket = r.bracket or CurrentBracket()
@@ -565,11 +571,18 @@ local function AddDamage(kind, dmg)
    if round and (t - round.last) > ROUND_GAP then CloseRound() end
    if not round then
       round_id = round_id + 1
-      round = { id = round_id, melee = 0, spell = 0, last = t,
+      round = { id = round_id, melee = 0, spell = 0, extra = 0, last = t,
                 bracket = CurrentBracket(), key = area_key, name = area_name }
       DoAfterSpecial(ROUND_GAP + 0.25, "DamTrackFinalize(" .. round_id .. ")", 12)
    end
-   round[kind] = round[kind] + dmg
+   -- A round is ONE melee line and ONE spell line: the first of each in the burst.
+   -- Any further lines in the same burst (procs, extra skills, second spells) are
+   -- not part of the round's figures; they are only counted so debug can show them.
+   if round[kind] > 0 then
+      round.extra = round.extra + 1
+   else
+      round[kind] = dmg
+   end
    round.last = t
 end
 
@@ -751,9 +764,10 @@ local function ShowHelp()
    Echo("@x045damtrack start @W- begin a fresh side track; lifetime keeps tallying and reports show both")
    Echo("@x045damtrack stop @W- end the side track and save it (last " .. MAX_RECORDS .. " are kept)")
    Echo("@x045damtrack records @W- show the saved side tracks, newest first")
-   Echo("@x099Damage per second @Wcounts only time spent in combat (GMCP state @x048" .. COMBAT_STATE .. "@W).")
+   Echo("@x099A round @Wis one melee line plus one spell line (the first of each); rounds missing either are skipped.")
+   Echo("@x099Damage per second @Wcounts only time spent in combat (GMCP state @x048" .. COMBAT_STATE .. "@W), and every damage line in it.")
    Echo("@x099Sea King's Dominion epic@W: tracking pauses from the Spectre's first line to its parting line. @x045damtrack skd @Wtoggles that by hand.")
-   Echo("@x045damtrack debug @W- toggle echo of each tracked hit and how it was classed")
+   Echo("@x045damtrack debug @W- toggle echo of each tracked hit and a summary of every round (lines, totals, counted or skipped)")
    Echo("@x045damtrack reset confirm @W- wipe lifetime data (side tracks and saved records are kept)")
    Echo("@x099Level @x048201 @Wand @x048" .. LOW .. " @Ware tracked as two separate lists; reports use the one matching your current level.")
 end
