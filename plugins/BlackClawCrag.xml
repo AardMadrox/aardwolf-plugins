@@ -33,7 +33,9 @@
 |                     Note: Requires mapper.                                 |
 |                                                                            |
 | bcc report <channel> -- Report statistics to channel supplied.             |
-| bcc spouse       -- Toggles auto-reporting to spouse after each run.       |
+| bcc auto         -- Toggles auto-reporting after each run (bcc spouse too).|
+| bcc channel <ch> -- Sets the channel auto-reports go to (default spouse).  |
+|                     "bcc channel" alone shows the current one.             |
 '----------------------------------------------------------------------------'
 ]]>
 </description>
@@ -45,7 +47,8 @@
   <alias regexp="y" match="^bcc rep(ort)? (?<channel>.*)$" enabled="y" script="reportData"></alias>
   <alias regexp="y" match="^bcc announce$" enabled="y" script="toggleAnnounce" ignore_case="y" sequence="100"></alias>
   <alias regexp="y" match="^bcc find$" enabled="y" script="findEntrance" ignore_case="y" sequence="100"></alias>
-  <alias regexp="y" match="^bcc spouse$" enabled="y" script="toggleSpouse" ignore_case="y" sequence="100"></alias>
+  <alias regexp="y" match="^bcc (spouse|auto)$" enabled="y" script="toggleSpouse" ignore_case="y" sequence="100"></alias>
+  <alias regexp="y" match="^bcc chan(nel)?(?: (?<channel>.+))?$" enabled="y" script="setReportChannel" ignore_case="y" sequence="100"></alias>
 
   <alias regexp="y" match="^bcc window$" enabled="y" script="toggleWindow" ignore_case="y" sequence="100"></alias>
   <alias regexp="y" match="^bcc window reset$" enabled="y" script="ResetWindow" ignore_case="y" sequence="100"></alias>
@@ -97,7 +100,7 @@
    local curRoom = -1
    local announce = tonumber(GetVariable("announce")) or 1
    local spouseReport = tonumber(GetVariable("spouseReport")) or 1
-   local spouseChannel = "spouse"
+   local spouseChannel = GetVariable("reportChannel") or "spouse" --Where the auto report goes
    -- Per-run state for the auto spouse report: the run-end line and the shard
    -- pickup can arrive in either order, so report once both are in (or after
    -- a short fallback if no shard shows up).
@@ -132,12 +135,24 @@
    function toggleSpouse()
       if spouseReport == 1 then
          spouseReport = 0
-         ColourNote("silver", "", "Black Claw auto report to spouse ", "red", "", "DISABLED")
+         ColourNote("silver", "", "Black Claw auto report to " .. spouseChannel .. " ", "red", "", "DISABLED")
       else
          spouseReport = 1
-         ColourNote("silver", "", "Black Claw auto report to spouse ", "lime", "", "ENABLED")
+         ColourNote("silver", "", "Black Claw auto report to " .. spouseChannel .. " ", "lime", "", "ENABLED")
       end
       SetVariable("spouseReport", spouseReport)
+   end
+
+   function setReportChannel(name, line, wildcards)
+      local chan = (wildcards.channel or ""):match("^%s*(.-)%s*$")
+      if chan == "" then
+         ColourNote("silver", "", "Black Claw auto report channel: ", "lime", "", spouseChannel,
+                    "silver", "", " (", spouseReport == 1 and "lime" or "red", "", spouseReport == 1 and "ENABLED" or "DISABLED", "silver", "", ")")
+         return
+      end
+      spouseChannel = chan
+      SetVariable("reportChannel", spouseChannel)
+      ColourNote("silver", "", "Black Claw auto report channel set to ", "lime", "", spouseChannel)
    end
 
    function sendSpouseReport()
@@ -145,7 +160,7 @@
       runEnded = false
       runShard = nil
       if spouseReport == 1 then
-         reportData("spouse", "", { channel = spouseChannel })
+         reportData("autoreport", "", { channel = spouseChannel })
       end
    end
 
