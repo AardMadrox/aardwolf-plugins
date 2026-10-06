@@ -105,6 +105,12 @@ THE LOCAL PATCHES, in the order they appear
      exactly as before. It is applied where the timer STOPS, not at report
      time, because .last is what every later reader uses.
 
+  3a. SESSION/TOTAL COUNT COMMAS (ReportField).
+     Channel reports coloured a value and then ran comma_value over the
+     coloured string, which mangled "@x048" + digits (the 0 and the 48 got
+     split by the comma pass). Now the number is commaed first and coloured
+     after. Marked LOCAL PATCH in ReportField.
+
   3. "dull forget <cp|gq|quest|lvl|pup|dbl|timed>": drop the newest
      history entry of one timer.
      History entries are finished report STRINGS, so a run timed wrong is
@@ -3547,7 +3553,11 @@ WHEN EDITING
 				if (levels > 0) then
 					for key, val in pairs(field) do
 						local lbl = key
-						local val = comma_value(ReportField(val, levels-1, infoOrchannel))
+						-- LOCAL PATCH: build the plain number, comma it, THEN colour it. The inner
+						-- call used to return an already coloured string ("@x048" .. n) in channel
+						-- mode and comma_value chewed the colour code, e.g. "@x0486" became
+						-- "@x0,486", so the colour was lost and the "48" ate into the count.
+						local val = comma_value(ReportField(val, levels-1, nil))
 						
 						if (infoOrchannel == "channel") then
 							reportString = reportString .. spacing .. dispVal(val) .. dispLbl(lbl)
