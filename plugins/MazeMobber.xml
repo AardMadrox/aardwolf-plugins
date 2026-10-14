@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="iso-8859-1"?>
+<?xml version="1.0" encoding="iso-8859-1"?>
 <!DOCTYPE muclient>
 <muclient>
 <plugin
@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="5.9"
+   version="6.0"
    >
 </plugin>
 
@@ -2761,7 +2761,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "5.9"
+local VERSION  = "6.0"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3558,6 +3558,30 @@ local function wander_step ()
   return pick
 end
 
+-- A random real exit from this room: never-walked ones first, never a way
+-- out of the area, a known wall or a level crossing.  A global on purpose -
+-- advance () is at Lua's 60-upvalue limit and a new local would break the
+-- load.
+function MM_RWStep ()
+  local ex = exits[cur]
+  if not ex then return nil end
+  local out = leaves_of[cur]
+  local kn = edges[cur]
+  local fresh, any = {}, {}
+  for _, d in ipairs (DIRS) do
+    local to = kn and kn[d]
+    if ex[d] and not (out and out[d])
+       and not walked["!" .. cur .. "," .. d]
+       and to ~= -1 and to ~= 0 then
+      any[#any + 1] = d
+      if not walked[cur .. "," .. d] then fresh[#fresh + 1] = d end
+    end
+  end
+  local pool = (#fresh > 0) and fresh or any
+  if #pool == 0 then return nil end
+  return pool[math.random (#pool)]
+end
+
 function move (dir)
   -- HUNTING SOMETHING ONLY THE ROOM'S CHARACTER LIST CAN SHOW?  THEN DO
   -- NOT LEAVE UNTIL THAT LIST HAS ARRIVED, or a fair wait for it has gone
@@ -3924,6 +3948,19 @@ function advance ()
     stall_reset ()
   end
 
+  -- HELEGEAR (6.0).  Thirty moves without one new room means the learned
+  -- map is going round in a small cluster (links that contradict get their
+  -- room wiped, which puts the frontier right back next to us).  Stop
+  -- trusting it: for the rest of this walk pick a random real exit, which
+  -- reaches the Dive Room whatever the links do.  Only while the target is
+  -- not yet on a known path (that check comes first below).
+  if phase == "goto" and A.key == "helegear" and NAME[cur] and not walked.rw
+     and walked.n - (walked.lastnew or 0) >= STALL_MOVES then
+    walked.rw = true
+    note ("Going round in circles - switching to a random walk until I land on @x048" ..
+          (NAME[target] or tostring (target)) .. "@w.")
+  end
+
   -- Inside a maze, wait for this room's exit line before choosing a
   -- direction.  Until it arrives the only thing we have is the area's own
   -- table, which for these rooms lists every cardinal - so a decision
@@ -3933,7 +3970,7 @@ function advance ()
   -- Sweeps only.  NO WAIT ON A WALK TO A ROOM OR ON MMOUT - the only delay
   -- this plugin is allowed is the one for noscan mobs.  4.3 put this wait
   -- back on walks and Prosper crawled; do not do that again.
-  if phase ~= "goto" and A.maze[cur]
+  if (phase ~= "goto" or walked.rw) and A.maze[cur]
      and walked.exits_at ~= cur and not walked.exwait then
     walked.exwait = true
     schedule_decision (0.25)
@@ -4029,6 +4066,11 @@ function advance ()
     end
     local path = bfs (cur, function (v) return v == target end)
     if path and path[1] then move (path[1]) return end
+    -- Random-walk fallback (6.0): the map has stopped paying off.
+    if walked.rw then
+      local d = MM_RWStep ()
+      if d then move (d) return end
+    end
   end
 
   -- Never walk straight back where we just came from while some other
@@ -6627,7 +6669,13 @@ function mm_command (name, line, wildcards)
     show_map ()
   elseif arg == "reset" then
     stop ()
-    edges, exits = {}, {}
+    -- Cleared IN PLACE.  edges/exits are the tables inside MAPS[A.key];
+    -- handing the locals fresh ones detached them, so the real map (and the
+    -- file save_map writes) kept the old links, and the next use_area ()
+    -- pointed straight back at them - "mm reset" appeared to do nothing.
+    for k in pairs (edges) do edges[k] = nil end
+    for k in pairs (exits) do exits[k] = nil end
+    learned[A.key] = nil
     seed ()
     save_map ()
     note ("Map forgotten. The next sweep starts from scratch.")
@@ -6645,6 +6693,7 @@ end
 
 function OnPluginInstall ()
   pcall (WindowDelete, "MazeMobber_list")   -- one left over from last session
+  math.randomseed (os.time ())
   load_map ()
   prime_known ()   -- after loading, so real observations win
   load_descs ()
