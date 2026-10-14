@@ -26,6 +26,7 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 | **BlootReport** | Allows you to set what bloot to ID into a mini window. With options to keep, or unkeep. Requires ID wish for now.
 | **BlackClawCrag** | Modified version of Casteil's.
 | **DamTrack** | Simple Damage Tracker, showing % of melee vs spells, also dps, can sort by areas and do fresh tracking sessions.
+| **PortalMapper** | Lets you point to a bag, and then it maps all portals to mapper. Will set up dualweap if no wish, and wearportal if you have wish.
 
 ## Easiest way to install & stay updated: the Plugin Manager
 
