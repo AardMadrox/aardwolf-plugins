@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="6.0"
+   version="6.2"
    >
 </plugin>
 
@@ -617,7 +617,7 @@ WHEN EDITING
        there is no way back to try again.  Only enabled while we are
        waiting on our own "exits". -->
   <trigger
-    match="^ (North|East|South|West|Up|Down)\s+: (.+?)\s*$"
+    match="^\s*(North|East|South|West|Up|Down)\s*:\s*(.+?)\s*$"
     script="mm_exits_line" name="mm_exits_line" group="mm_exits"
     enabled="n" regexp="y" keep_evaluating="y" sequence="45"
   >
@@ -2761,7 +2761,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "6.0"
+local VERSION  = "6.2"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -5041,7 +5041,13 @@ function mm_exits_line (name, line, wildcards)
   -- read fresh every visit - better than any table written down here,
   -- which was already wrong (27912 was guessed at six exits and has
   -- three).  The first line of a listing replaces what we thought.
-  if exits_token == 0 then exits[cur] = {} end
+  if exits_token == 0 then
+    exits[cur] = {}
+    -- The Chamber names every one of its exits uniquely and re-rolls them,
+    -- so nothing learned about it on an earlier visit is worth keeping.
+    -- (The nightmare's names repeat, so its links are left alone.)
+    if A.key == "astral" and cur == 27898 then edges[cur] = {} end
+  end
   exits[cur] = exits[cur] or {}
   exits[cur][d] = true
   local nm = (wildcards[2] or ""):gsub ("%s+$", ""):lower ()
@@ -5061,6 +5067,19 @@ function mm_exits_line (name, line, wildcards)
   -- actually walked would keep pointing us back at a room we have
   -- already been shown is the wrong one.
   if v and not (guess and edges[cur] and edges[cur][d] ~= nil) then
+    -- A unique name says where THIS exit goes, and therefore where no
+    -- other exit of this room goes.  The Chamber re-rolls which exit opens
+    -- on which Passage, and link () only ever sets the one direction it is
+    -- given: a link from the last visit (n = Alizarin) survived next to the
+    -- new one (e = Alizarin), and the router, taking the first direction in
+    -- its list, walked the stale one into the wrong Passage.
+    if not guess and edges[cur] then
+      for d2, to in pairs (edges[cur]) do
+        if d2 ~= d and to == v and not seeded_link[cur .. "," .. d2] then
+          edges[cur][d2] = nil
+        end
+      end
+    end
     link (cur, d, v)
   end
   -- Carry on a fifth of a second after the listing stops, rather than
@@ -6211,8 +6230,18 @@ local function pick (n)
   if p then
     journey, awaiting_leg = nil, false
     -- In the other half of the area?  Cross over first, then carry on.
-    if p.section and A.sections[cur] and A.sections[cur] ~= p.section then
-      local b = A.bridges[A.sections[cur]]
+    -- Standing OUTSIDE the area counts too: you come in at the entrance,
+    -- which is in one particular half, so a place in the other half still
+    -- needs the crossing.  Without this a click on the Boogie Man from
+    -- outside aimed straight at room 27915, walked the Chamber with no
+    -- route, wandered into the Alizarin Passage by luck and sat there with
+    -- "Alas, you cannot go that way" - it never sent "enter aliz".
+    local here = A.sections[cur]
+    if not here and A.entrance and A.entrance.goto_room then
+      here = A.sections[(entry_override or A.entrance).goto_room]
+    end
+    if p.section and here and here ~= p.section then
+      local b = A.bridges[here]
       if not b then
         warn ("I know no way across to " .. (p.label or roomname (p.room)) ..
               " from here.")
