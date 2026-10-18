@@ -27,6 +27,7 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 | **BlackClawCrag** | Modified version of Casteil's.
 | **DamTrack** | Simple Damage Tracker, showing % of melee vs spells, also dps, can sort by areas and do fresh tracking sessions.
 | **PortalMapper** | Lets you point to a bag, and then it maps all portals to mapper. Will set up dualweap if no wish, and wearportal if you have wish.
+| **RankTracker** | Shows your top 100 rankings, shows those around you, and shows top 10 in ranks. Works on channels as well.
 
 ## Easiest way to install & stay updated: the Plugin Manager
 
