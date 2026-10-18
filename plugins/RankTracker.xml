@@ -1,0 +1,641 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<!--
+  RankTracker.xml  -  author Eric
+
+  The name looked up defaults to the character you are logged in as (picked up
+  from GMCP char.base). Any command below can take another player's name.
+
+  yrank / mrank / drank / wrank
+        -> scans the yearly/monthly/daily/weekly ranking categories
+           (1,2,3,4,5,6,16,18), gags the long lists, and echoes every category
+           where the player is in the top 100.
+  yrank <channel> [name]    (also mrank / drank / wrank)
+        -> same, but sends ONE coloured line to that channel, e.g.
+           "spo Yearly - Campaigns #8: Madrox 9274, Mob Kills #3: ..."
+           drank spo Ultimate   -> Ultimate's positions on your spo channel
+        -> use "-" as the channel to echo locally for someone else:
+           drank - Ultimate
+
+  yrt <n> / mrt <n> / drt <n> / wrt <n>   [channel [name]]
+        -> shows ONE category (n) for that period with the player in the middle:
+           2 people above, the player, 2 below. If there is nobody (or only one)
+           above, the window is filled out with people below instead.
+             drt 1                  daily category 1, echoed to you
+             wrt 18 spo             same for weekly 18, one line to spo
+             drt 16 spo Ultimate    Ultimate and the people around him, on spo
+             drt 16 - Ultimate      same, echoed locally
+
+  tyrt <n> / tmrt <n> / tdrt <n> / twrt <n>   [channel]
+        -> the TOP 10 of category n for that period (no name needed).
+             tdrt 16        top 10 daily powerups, echoed to you
+             tdrt 16 spo    same, one coloured line to spo
+             tdrt 16 tell Bob   same, sent to Bob as a tell
+
+  The yrt/mrt/drt/wrt and tyrt/tmrt/tdrt/twrt lists show each person's clan as
+  the short coloured tag (table CLANTAGS in the script). The plain yrank/mrank/
+  drank/wrank scans do not.
+
+  Numeric forms of the game commands ("yrank 18") pass straight through.
+
+  Other aliases:
+    rankname <name>   - override the default name; "rankname" alone goes back
+                        to the logged-in character
+    rankdebug         - show which column was used as the "total" for each
+                        category in the last scan
+
+  Speed: all category commands are sent at once and the replies are split up by
+  their "Aardwolf ... rankings by X." header, so the whole scan costs about one
+  round trip plus a one-second quiet wait at the end.
+-->
+
+<muclient>
+<plugin
+   name="RankTracker"
+   author="Eric"
+   id="7c2e5a9b3d4f4e1a8b6c0d12"
+   language="Lua"
+   purpose="Finds you (or anyone) in the yearly/monthly/weekly/daily top 100 rankings"
+   save_state="y"
+   date_written="2026-10-17"
+   requires="4.00"
+   version="1.3"
+   >
+</plugin>
+
+<!--  Aliases  -->
+<aliases>
+
+  <alias
+   match="^(yrank|mrank|drank|wrank)$"
+   enabled="y"
+   regexp="y"
+   script="alias_echo"
+   sequence="100"
+   ignore_case="y"
+  ></alias>
+
+  <!-- letter-first argument = channel ("-" = local echo); numbers fall through to the game -->
+  <alias
+   match="^(yrank|mrank|drank|wrank)\s+([A-Za-z]\w*|-)(?:\s+(\S+))?$"
+   enabled="y"
+   regexp="y"
+   script="alias_channel"
+   sequence="100"
+   ignore_case="y"
+  ></alias>
+
+  <!-- individual category with the people around the player -->
+  <alias
+   match="^(yrt|mrt|drt|wrt)\s+(\d+)(?:\s+([A-Za-z]\w*|-)(?:\s+(\S+))?)?$"
+   enabled="y"
+   regexp="y"
+   script="alias_rt"
+   sequence="100"
+   ignore_case="y"
+  ></alias>
+
+  <!-- top 10 of a category -->
+  <alias
+   match="^(tyrt|tmrt|tdrt|twrt)\s+(\d+)(?:\s+([A-Za-z]\w*(?:\s+[A-Za-z]\w*)?|-))?$"
+   enabled="y"
+   regexp="y"
+   script="alias_top"
+   sequence="100"
+   ignore_case="y"
+  ></alias>
+
+  <alias
+   match="^rankname(?:\s+(\S+))?$"
+   enabled="y"
+   regexp="y"
+   script="alias_name"
+   sequence="100"
+  ></alias>
+
+  <alias
+   match="^rankdebug$"
+   enabled="y"
+   regexp="y"
+   script="alias_debug"
+   sequence="100"
+  ></alias>
+
+</aliases>
+
+<!--  Triggers: only enabled while a scan is running  -->
+<triggers>
+
+  <trigger
+   enabled="n"
+   group="scan"
+   match="^\s*Aardwolf (yearly|monthly|weekly|daily) rankings by (.+?)\.?\s*$"
+   regexp="y"
+   omit_from_output="y"
+   script="on_header"
+   sequence="90"
+  ></trigger>
+
+  <trigger
+   enabled="n"
+   group="scan"
+   match="^\s*Num\s+Name\s+Clan(.*)$"
+   regexp="y"
+   omit_from_output="y"
+   script="on_colhdr"
+   sequence="95"
+  ></trigger>
+
+  <trigger
+   enabled="n"
+   group="scan"
+   match="^\s*-+(\s+-+)+\s*$"
+   regexp="y"
+   omit_from_output="y"
+   sequence="100"
+  ></trigger>
+
+  <trigger
+   enabled="n"
+   group="scan"
+   match="^\s*\d+\)\s+\S.*\d\s*$"
+   regexp="y"
+   omit_from_output="y"
+   script="on_row"
+   sequence="100"
+  ></trigger>
+
+  <trigger
+   enabled="n"
+   group="scan"
+   match="^\s*$"
+   regexp="y"
+   omit_from_output="y"
+   sequence="100"
+  ></trigger>
+
+</triggers>
+
+<script>
+<![CDATA[
+
+local PERIODS = {
+  yrank = { cmd = "yrank", label = "Yearly"  },
+  mrank = { cmd = "mrank", label = "Monthly" },
+  drank = { cmd = "drank", label = "Daily"   },
+  wrank = { cmd = "wrank", label = "Weekly"  },
+}
+
+-- short "rt" aliases -> the matching rank command
+local RT = { yrt = "yrank", mrt = "mrank", drt = "drank", wrt = "wrank" }
+
+local TOP_N = 100
+local CATS  = { 1, 2, 3, 4, 5, 6, 16, 18 }   -- categories to scan
+local QUIET = 1.0                            -- seconds of silence = scan finished
+
+-- known stat columns, in the order they might appear in the table header
+local COLNAMES = { "Level", "Total Qp", "Mob Kills", "Deaths", "Gquests", "Quests", "Campaigns" }
+
+local scan     = nil   -- active scan state, nil when idle
+local lastscan = nil   -- finished scan, for rankdebug
+
+-- colours: @x099 yellow, @x045 cyan, @W white, @x048 green
+-- (also the standard Aardwolf letter codes, needed for the clan tags)
+local ANSI = { r = "31", g = "32", y = "33", b = "34", m = "35", c = "36", w = "37", D = "1;30",
+               R = "1;31", G = "1;32", Y = "1;33", B = "1;34", M = "1;35", C = "1;36", W = "1;37" }
+
+local function cnote(s)
+  s = s:gsub("@@", "\1")
+  s = s:gsub("@x(%d%d%d)", function(n) return "\27[0;38;5;" .. tonumber(n) .. "m" end)
+  s = s:gsub("@([rgybmcwDRGYBMCW])", function(c) return "\27[0;" .. ANSI[c] .. "m" end)
+  s = s:gsub("\1", "@")
+  AnsiNote(s .. "\27[0m")
+end
+
+-- shortened clan tags (Aardwolf colour codes; all are 3 visible characters wide)
+local CLANTAGS = {
+  crimson     = "@Y|@RC@Y|",
+  bard        = "@W~@RB@W~",
+  druid       = "@W/@gD@W\\",
+  gaardian    = "@M<@WG@M>",
+  retribution = "@r>@x252R@r>",
+  touchstone  = "@G>@WT@G<",
+  loqui       = "@w:@rL@w:",
+  xunti       = "@r^@bX@r^",
+  amazon      = "@m]@GA@m[",
+  twinlobe    = "@G!@CT@G!",
+  imperium    = "@R>@WI@R>",
+  boot        = "@x226|@x048B@x226|",
+  perdition   = "@R+@WP@R+",
+  rhabdo      = "@W^@WR@W^",
+  light       = "@x032)@WL@x032(",
+  hook        = "@C}@YH@C{",
+  pyre        = "@C/@cP@C\\",
+  masaki      = "@W=@RM@W=",
+  watchmen    = "@Y|@x238W@Y|",
+  crusader    = "@M=@WC@M=",
+  seekers     = "@M(@YS@M)",
+  emerald     = "@C[@GE@C]",
+  wolf        = "@R:@WW@R:",
+  baal        = "@r[@RB@r]",
+  tao         = "@g/@wT@g/",
+}
+
+-- tag for a clan name; no clan -> `blank` (spaces to keep columns aligned, or "" for channels)
+local function clan_tag(clan, blank)
+  blank = blank or ""
+  if not clan or clan == "" then return blank end
+  local k = clan:lower()
+  if k == "none" then return blank end
+  return CLANTAGS[k] or ("@w" .. clan)   -- clan without a listed tag: show its plain name
+end
+
+-- default name: manual override (rankname) > logged-in character (GMCP) > world name
+local function myname()
+  local n = GetVariable("charname")
+  if n == nil or n == "" then n = GetVariable("selfname") end
+  if n == nil or n == "" then n = WorldName() end
+  return n
+end
+
+local function shorten(cat)
+  cat = cat:gsub("%s*Completed$", "")
+  return cat
+end
+
+-- which table column holds this category's total?
+local function pick_col(cat, cols)
+  local c = cat:lower()
+  local want
+  if     c:find("campaign")                       then want = "Campaigns"
+  elseif c:find("gquest") or c:find("global")     then want = "Gquests"
+  elseif c:find("death")                          then want = "Deaths"
+  elseif c:find("kill")                           then want = "Mob Kills"
+  elseif c:find("point") or c:find("qp")          then want = "Total Qp"
+  elseif c:find("quest")                          then want = "Quests"
+  elseif c:find("level")                          then want = "Level"
+  end
+  if want then
+    for i, name in ipairs(cols) do
+      if name == want then return i end
+    end
+    return nil   -- known stat but its column isn't in this table: show "?" rather than a wrong number
+  end
+  -- unfamiliar category (e.g. "Powerups (Total)"): match a column named in the title
+  local flat = c:gsub("%W", "")
+  for i, name in ipairs(cols) do
+    local cn = (name:lower():gsub("%s", ""))
+    if flat:find(cn, 1, true) then return i end
+  end
+  -- otherwise assume the ranked value is the last column of the table
+  if #cols > 0 then return #cols end
+  return nil
+end
+
+---------------------------------------------------------------------
+-- GMCP: learn who is logged in
+---------------------------------------------------------------------
+
+function OnPluginTelnetSubnegotiation(msg_type, data)
+  if msg_type ~= 201 or not data then return end
+  if data:sub(1, 9) == "char.base" then
+    local n = data:match('"name"%s*:%s*"([^"]+)"')
+    if n and n ~= "" then SetVariable("selfname", n) end
+  end
+end
+
+---------------------------------------------------------------------
+-- scan engine
+---------------------------------------------------------------------
+
+local finish
+
+local function arm(delay, fn)
+  DoAfterSpecial(delay, fn .. "(" .. scan.gen .. ")", 12)
+end
+
+local function touch()
+  scan.gen = scan.gen + 1
+  arm(QUIET, "OnRankQuiet")
+end
+
+local function close_cur()
+  if scan.cur then
+    table.insert(scan.done, scan.cur)
+    scan.cur = nil
+  end
+end
+
+function OnRankQuiet(g)
+  if scan and g == scan.gen then finish() end
+end
+
+function OnRankStart(g)
+  -- nothing came back at all
+  if scan and g == scan.gen and #scan.done == 0 and not scan.cur then finish() end
+end
+
+function on_header(name, line, w)
+  if not scan then return end
+  close_cur()
+  scan.cur = { cat = w[2], cols = {}, rows = {}, rank = nil, nums = nil }
+  touch()
+end
+
+function on_colhdr(name, line, w)
+  if not (scan and scan.cur) then return end
+  local found = {}
+  local hdr = w[1] or ""
+  local covered = {}
+  for _, cn in ipairs(COLNAMES) do
+    local pos = hdr:find(cn, 1, true)
+    if pos then
+      found[#found + 1] = { pos = pos, name = cn }
+      for k = pos, pos + #cn - 1 do covered[k] = true end
+    end
+  end
+  -- any other word in the header is treated as an extra (unknown) column
+  for pos, tok in hdr:gmatch("()(%S+)") do
+    if not covered[pos] then found[#found + 1] = { pos = pos, name = tok } end
+  end
+  table.sort(found, function(a, b) return a.pos < b.pos end)
+  for _, f in ipairs(found) do scan.cur.cols[#scan.cur.cols + 1] = f.name end
+  scan.cur.colidx = pick_col(scan.cur.cat, scan.cur.cols)
+  touch()
+end
+
+function on_row(name, line, w)
+  if not (scan and scan.cur) then return end
+  local cur = scan.cur
+  local rank, who, clan = string.match(line, "^%s*(%d+)%)%s+(%S+)%s+(%S+)")
+  -- a name with a space in it (e.g. "MEGAN 2.01") pushes a number into the clan slot: ignore it
+  if clan and clan:match("^[%d%.]+$") then clan = nil end
+  if rank and who then
+    rank = tonumber(rank)
+    local isme = (who:lower() == scan.target:lower())
+    if scan.rt or scan.top then
+      -- single-category mode: keep every row so the neighbours / top 10 can be shown
+      local nums = {}
+      for n in line:gmatch("%d+") do nums[#nums + 1] = n end
+      cur.rows[rank] = { who = who, clan = clan, nums = nums }
+      if isme and not cur.rank then cur.rank = rank; cur.who = who end
+    elseif not cur.rank and rank <= TOP_N and isme then
+      local nums = {}
+      for n in line:gmatch("%d+") do nums[#nums + 1] = n end
+      local ncols = #cur.cols
+      if ncols == 0 then ncols = 1 end
+      -- stat columns are the LAST ncols numbers on the row (names may contain digits)
+      cur.rank = rank
+      cur.who  = who
+      if cur.colidx then
+        cur.total = nums[#nums - ncols + cur.colidx]
+      end
+      cur.nums = nums
+    end
+  end
+  touch()
+end
+
+-- ranked value of a stored row
+local function row_total(cur, row)
+  if not cur.colidx then return "?" end
+  local ncols = #cur.cols
+  if ncols == 0 then ncols = 1 end
+  return row.nums[#row.nums - ncols + cur.colidx] or "?"
+end
+
+local function report(s)
+  local p = s.p
+  if #s.hits == 0 then
+    cnote("@x045[@x099" .. p.label .. " Ranks@x045] @x099" .. s.target ..
+          "@W is not in the top " .. TOP_N .. " of any scanned category.")
+    return
+  end
+
+  if s.chan then
+    local parts = {}
+    for _, h in ipairs(s.hits) do
+      parts[#parts + 1] = string.format("@x045%s @x048#%d@W: @x099%s @x048%s",
+                           shorten(h.cat), h.rank, h.who or s.target, h.total or "?")
+    end
+    Execute(s.chan .. " @x099" .. p.label .. "@W - " .. table.concat(parts, "@W, ") .. "@w")
+  else
+    cnote("@x045[@x099" .. p.label .. " Ranks@x045] @x099" .. s.target ..
+          "@W - top " .. TOP_N .. " appearances: @x048" .. #s.hits)
+    for _, h in ipairs(s.hits) do
+      cnote("  @x045" .. shorten(h.cat) .. "@W: @x099" .. (h.who or s.target) ..
+            " @x048#" .. h.rank .. " @W- @x048" .. (h.total or "?"))
+    end
+  end
+end
+
+-- one category, with the people around the player
+local function report_rt(s)
+  local p = s.p
+  local c = s.done[1]
+  if not c then
+    cnote("@x045[@x099RankTracker@x045]@W No " .. p.label:lower() ..
+          " ranking came back for category @x048" .. s.catnum)
+    return
+  end
+  if not c.rank then
+    cnote("@x045[@x099" .. p.label .. "@x045] @x045" .. c.cat .. "@W: @x099" .. s.target ..
+          "@W was not found in the list.")
+    return
+  end
+
+  -- 5 rows: 2 above, the player, 2 below; with nobody above, the window extends below
+  local first = math.max(1, c.rank - 2)
+
+  if s.chan then
+    local parts = {}
+    for r = first, first + 4 do
+      local row = c.rows[r]
+      if row then
+        local nm = (r == c.rank) and "@x099" or "@W"
+        local tag = clan_tag(row.clan, "")
+        parts[#parts + 1] = string.format("@x048#%d %s%s%s @x048%s",
+                             r, (tag ~= "" and (tag .. " ") or ""), nm, row.who, row_total(c, row))
+      end
+    end
+    Execute(s.chan .. " @x099" .. p.label .. " @x045" .. shorten(c.cat) .. "@W - " ..
+            table.concat(parts, "@W, ") .. "@w")
+  else
+    cnote("@x045[@x099" .. p.label .. "@x045] @x045" .. c.cat)
+    for r = first, first + 4 do
+      local row = c.rows[r]
+      if row then
+        local nm = (r == c.rank) and "@x099" or "@W"
+        cnote(string.format("  @x048#%-4d %s %s%-14s @x048%s",
+                            r, clan_tag(row.clan, "   "), nm, row.who, row_total(c, row)))
+      end
+    end
+  end
+end
+
+-- top 10 of one category
+local function report_top(s)
+  local p = s.p
+  local c = s.done[1]
+  if not c then
+    cnote("@x045[@x099RankTracker@x045]@W No " .. p.label:lower() ..
+          " ranking came back for category @x048" .. s.catnum)
+    return
+  end
+
+  if s.chan then
+    local parts = {}
+    for r = 1, 10 do
+      local row = c.rows[r]
+      if row then
+        local tag = clan_tag(row.clan, "")
+        parts[#parts + 1] = string.format("@x048#%d %s@x099%s @x048%s",
+                             r, (tag ~= "" and (tag .. " ") or ""), row.who, row_total(c, row))
+      end
+    end
+    Execute(s.chan .. " @x099" .. p.label .. " @x045Top 10 " .. shorten(c.cat) .. "@W - " ..
+            table.concat(parts, "@W, ") .. "@w")
+  else
+    cnote("@x045[@x099" .. p.label .. "@x045] @x045" .. c.cat .. "@W - top 10")
+    for r = 1, 10 do
+      local row = c.rows[r]
+      if row then
+        cnote(string.format("  @x048#%-3d %s @x099%-14s @x048%s",
+                            r, clan_tag(row.clan, "   "), row.who, row_total(c, row)))
+      end
+    end
+  end
+end
+
+finish = function()
+  EnableTriggerGroup("scan", false)
+  local s = scan
+  if s.cur then table.insert(s.done, s.cur); s.cur = nil end
+  s.hits = {}
+  for _, c in ipairs(s.done) do
+    if c.rank then s.hits[#s.hits + 1] = c end
+  end
+  scan, lastscan = nil, s
+  if s.rt then report_rt(s)
+  elseif s.top then report_top(s)
+  else report(s) end
+end
+
+-- "" or "-" means no channel (echo locally)
+local function norm_chan(chan)
+  if chan == nil or chan == "" or chan == "-" then return nil end
+  return chan
+end
+
+local function norm_target(t)
+  if t == nil or t == "" then return myname() end
+  return t
+end
+
+local function start_scan(key, chan, target)
+  if scan then
+    cnote("@x045[@x099RankTracker@x045]@W A scan is already running, hang on.")
+    return
+  end
+  scan = { p = PERIODS[key:lower()], chan = norm_chan(chan), target = norm_target(target),
+           gen = 0, done = {}, hits = {} }
+  EnableTriggerGroup("scan", true)
+  cnote("@x045[@x099RankTracker@x045]@W Scanning " .. scan.p.label:lower() ..
+        " rankings for @x099" .. scan.target .. "@W (lists gagged)...")
+  -- send everything at once; replies are split by their headers
+  for _, n in ipairs(CATS) do
+    Send(scan.p.cmd .. " " .. n)   -- Send, not Execute: avoids re-entering our own aliases
+  end
+  scan.gen = scan.gen + 1
+  DoAfterSpecial(6, "OnRankStart(" .. scan.gen .. ")", 12)
+end
+
+local function start_rt(key, catnum, chan, target)
+  if scan then
+    cnote("@x045[@x099RankTracker@x045]@W A scan is already running, hang on.")
+    return
+  end
+  scan = { p = PERIODS[RT[key:lower()]], rt = true, catnum = catnum,
+           chan = norm_chan(chan), target = norm_target(target),
+           gen = 0, done = {}, hits = {} }
+  EnableTriggerGroup("scan", true)
+  Send(scan.p.cmd .. " " .. catnum)
+  scan.gen = scan.gen + 1
+  DoAfterSpecial(6, "OnRankStart(" .. scan.gen .. ")", 12)
+end
+
+local function start_top(key, catnum, chan)
+  if scan then
+    cnote("@x045[@x099RankTracker@x045]@W A scan is already running, hang on.")
+    return
+  end
+  -- key is tyrt/tmrt/tdrt/twrt -> drop the leading "t" to get yrt/mrt/drt/wrt
+  scan = { p = PERIODS[RT[key:lower():sub(2)]], top = true, catnum = catnum,
+           chan = norm_chan(chan), target = "",
+           gen = 0, done = {}, hits = {} }
+  EnableTriggerGroup("scan", true)
+  Send(scan.p.cmd .. " " .. catnum)
+  scan.gen = scan.gen + 1
+  DoAfterSpecial(6, "OnRankStart(" .. scan.gen .. ")", 12)
+end
+
+---------------------------------------------------------------------
+-- aliases
+---------------------------------------------------------------------
+
+function alias_echo(name, line, w)
+  start_scan(w[1], nil, nil)
+end
+
+function alias_channel(name, line, w)
+  start_scan(w[1], w[2], w[3])
+end
+
+function alias_rt(name, line, w)
+  start_rt(w[1], tonumber(w[2]), w[3], w[4])
+end
+
+function alias_top(name, line, w)
+  start_top(w[1], tonumber(w[2]), w[3])
+end
+
+function alias_name(name, line, w)
+  local n = w[1]
+  if n == nil or n == "" then
+    SetVariable("charname", "")
+    cnote("@x045[@x099RankTracker@x045]@W Default name is now the logged-in character: @x099" .. myname())
+  else
+    SetVariable("charname", n)
+    cnote("@x045[@x099RankTracker@x045]@W Default name set to @x099" .. n)
+  end
+end
+
+function alias_debug(name, line, w)
+  if not lastscan then
+    cnote("@x045[@x099RankTracker@x045]@W No scan has run yet.")
+    return
+  end
+  for _, c in ipairs(lastscan.done) do
+    local colname = c.cols[c.colidx or 0] or "?"
+    cnote("  @x045" .. c.cat .. "@W  columns: @x099" .. table.concat(c.cols, ", ") ..
+          "@W  total from: @x048" .. colname ..
+          "@W  rank: @x048" .. (c.rank and ("#" .. c.rank) or "-"))
+  end
+end
+
+function OnPluginInstall()
+  EnableTriggerGroup("scan", false)
+  -- installed mid-session: ask the game for char.base so we learn the character name
+  if (GetVariable("selfname") or "") == "" and IsConnected() then
+    SendPkt(string.char(255, 250, 201) .. "request char" .. string.char(255, 240))
+  end
+end
+
+function OnPluginClose()
+  EnableTriggerGroup("scan", false)
+end
+
+]]>
+</script>
+
+</muclient>
