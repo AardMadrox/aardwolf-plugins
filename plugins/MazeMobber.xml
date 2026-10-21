@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="6.2"
+   version="6.4"
    >
 </plugin>
 
@@ -2761,7 +2761,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "6.2"
+local VERSION  = "6.4"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3215,6 +3215,14 @@ local function absorb_room ()
   if type (ri) ~= "table" then return end
   local num = tonumber (ri.num)
   if not num then return end
+  -- A different room means a listing that has not arrived yet.  rc_seen and
+  -- rc_waited say "THIS room's listing", but were only ever cleared when a
+  -- run began, so after the first listing of a hunt every wait-for-the-
+  -- listing check was switched off for good: the plugin decided on a 0.1s
+  -- timer, walked on, and the listing landed in the room behind it - the
+  -- Gardens mob "walked past".  A global because the locals are declared
+  -- further down the file than this function.
+  if num ~= cur then MM_RCReset () end
   cur = num
   room_fresh = true
   walked.inflight = false
@@ -3363,6 +3371,7 @@ local exits_token = 0      -- bumped by each line, so we finish just after
                            -- the LAST one instead of sitting out a timeout
 local rc_seen   = false    -- a {roomchars} block arrived for THIS room
 local rc_waited = false    -- and we have already given it one extra second
+function MM_RCReset () rc_seen, rc_waited = false, false end
 local rc_warned = false    -- only nag about a missing room listing once
 -- How long to wait for a move to be answered before treating that exit as
 -- dead.  Generous by default: a spurious timeout is far more damaging than
@@ -3943,22 +3952,27 @@ function advance ()
   -- Dive Room.  Eric's call: the reset stays for the small areas it was
   -- made for (Prosper and the like), and these three explore as they did
   -- before 4.3.
-  if phase == "goto" and NAME[cur] and not NO_STALL_RESET[A.key]
-     and walked.n - (walked.lastnew or 0) >= STALL_MOVES then
-    stall_reset ()
-  end
-
-  -- HELEGEAR (6.0).  Thirty moves without one new room means the learned
-  -- map is going round in a small cluster (links that contradict get their
-  -- room wiped, which puts the frontier right back next to us).  Stop
-  -- trusting it: for the rest of this walk pick a random real exit, which
-  -- reaches the Dive Room whatever the links do.  Only while the target is
-  -- not yet on a known path (that check comes first below).
-  if phase == "goto" and A.key == "helegear" and NAME[cur] and not walked.rw
+  -- HELEGEAR (6.0) AND DUNOIR (6.3).  Thirty moves without one new room
+  -- means the learned map is going round in a small cluster: Helegear's
+  -- links that contradict get their room wiped, which puts the frontier
+  -- right back next to us; Dunoir's six lava rooms are all called "Flying
+  -- over Lava", so a believed route can bounce between two of them for
+  -- ever, and the reset below only re-seeds the same belief.  Stop trusting
+  -- the map: for the rest of this walk pick a random real exit (a link that
+  -- goes straight to the target is still taken).  Checked BEFORE the reset
+  -- so the reset does not zero the count first.
+  if phase == "goto" and (A.key == "helegear" or A.key == "dunoir")
+     and NAME[cur] and not walked.rw
      and walked.n - (walked.lastnew or 0) >= STALL_MOVES then
     walked.rw = true
     note ("Going round in circles - switching to a random walk until I land on @x048" ..
           (NAME[target] or tostring (target)) .. "@w.")
+  end
+
+  if phase == "goto" and NAME[cur] and not NO_STALL_RESET[A.key]
+     and not walked.rw
+     and walked.n - (walked.lastnew or 0) >= STALL_MOVES then
+    stall_reset ()
   end
 
   -- Inside a maze, wait for this room's exit line before choosing a
@@ -4065,11 +4079,16 @@ function advance ()
       end
     end
     local path = bfs (cur, function (v) return v == target end)
-    if path and path[1] then move (path[1]) return end
-    -- Random-walk fallback (6.0): the map has stopped paying off.
     if walked.rw then
+      -- Random walk (6.0/6.3): the map has stopped paying off, so a
+      -- believed multi-step route is exactly what is going in circles.
+      -- Only a link straight onto the target is trusted.
+      if path and #path == 1 then move (path[1]) return end
       local d = MM_RWStep ()
       if d then move (d) return end
+    elseif path and path[1] then
+      move (path[1])
+      return
     end
   end
 

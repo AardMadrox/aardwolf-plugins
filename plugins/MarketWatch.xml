@@ -2336,9 +2336,11 @@ function OnPluginInstall ()
     warn ("wrapped_captures.lua did not load - scanning will not work.")
   end
 
-  -- Every load shows the full help, so the commands are always in front of
-  -- you.  Note this fires on each world open, not just a manual reload.
-  MW_Cmd_Help ()
+  -- Every load shows just the version and a pointer to the help command.
+  -- Note this fires on each world open, not just a manual reload.
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", "v" .. GetPluginInfo (GetPluginID (), 19) .. " loaded. Type ",
+              CLR_HI, "", "marketw help", CLR_MSG, "", " for help.")
 end
 
 function OnPluginSaveState ()

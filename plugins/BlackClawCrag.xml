@@ -217,8 +217,8 @@
          resetData()
 		end
 
-		InitializeWindow()				
-      Help()
+		InitializeWindow()
+      ColourNote("silver", "", "Black Claw Helper v" .. GetPluginInfo(GetPluginID(), 19) .. " loaded. Type ", "lime", "", "bcc help", "silver", "", " for help.")
    end
 
    function OnPluginClose()

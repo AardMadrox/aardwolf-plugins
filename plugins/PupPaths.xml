@@ -741,7 +741,8 @@ end
 function OnPluginInstall()
     LoadConfig()
     LoadData()
-    pp.help()
+    Msg(WHITE, BG, "v" .. GetPluginInfo(GetPluginID(), 19) .. " loaded. Type ",
+        RED, BG, "pp help", WHITE, BG, " for help.")
 end
 
 function OnPluginConnect()
