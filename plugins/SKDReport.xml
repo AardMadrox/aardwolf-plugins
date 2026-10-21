@@ -652,7 +652,11 @@ function OnPluginInstall()
     MigrateOldStats()
   end
   ResetSKD()
-  ShowSKDHelp()
+  local parts = BuildLine({
+    {"white",  "["}, {"cyan", "SKDReport"}, {"white", "] v" .. GetPluginInfo(GetPluginID(), 19) .. " loaded. Type "},
+    {"red",    "skdreport help"}, {"white", " for help."},
+  })
+  ColourNote(unpack(parts))
 end
 
 function OnPluginConnect()
