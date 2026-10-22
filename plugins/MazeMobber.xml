@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="6.4"
+   version="6.5"
    >
 </plugin>
 
@@ -2761,7 +2761,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "6.4"
+local VERSION  = "6.5"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3215,14 +3215,6 @@ local function absorb_room ()
   if type (ri) ~= "table" then return end
   local num = tonumber (ri.num)
   if not num then return end
-  -- A different room means a listing that has not arrived yet.  rc_seen and
-  -- rc_waited say "THIS room's listing", but were only ever cleared when a
-  -- run began, so after the first listing of a hunt every wait-for-the-
-  -- listing check was switched off for good: the plugin decided on a 0.1s
-  -- timer, walked on, and the listing landed in the room behind it - the
-  -- Gardens mob "walked past".  A global because the locals are declared
-  -- further down the file than this function.
-  if num ~= cur then MM_RCReset () end
   cur = num
   room_fresh = true
   walked.inflight = false
@@ -3370,9 +3362,7 @@ local exits_seen = {}      -- rooms already asked this run.  A single
 local exits_token = 0      -- bumped by each line, so we finish just after
                            -- the LAST one instead of sitting out a timeout
 local rc_seen   = false    -- a {roomchars} block arrived for THIS room
-local rc_waited = false    -- and we have already given it one extra second
-function MM_RCReset () rc_seen, rc_waited = false, false end
-local rc_warned = false    -- only nag about a missing room listing once
+local rc_waited = false    -- and we have already given it one extra secondlocal rc_warned = false    -- only nag about a missing room listing once
 -- How long to wait for a move to be answered before treating that exit as
 -- dead.  Generous by default: a spurious timeout is far more damaging than
 -- a slow one, because the exit gets written off.  'nenukon wait <secs>'.
@@ -3592,6 +3582,22 @@ function MM_RWStep ()
 end
 
 function move (dir)
+  -- ONE MOVE IN THE AIR AT A TIME (6.5).  Every legitimate caller clears
+  -- `pending` first (a landing, a wall, a stall timeout), so a call that
+  -- finds one still set is a stray - a second decision for a room that has
+  -- already chosen.  Sent anyway it is a second step from wherever the
+  -- first one lands, which is a room walked straight past: the mob found
+  -- one room and the plugin already in the next, or "Alas, you cannot go
+  -- that way" from the dead end it was found in.
+  if running and pending and pending.dir and A and NAME[cur] then
+    if debug_on then
+      note ("move '@x048" .. tostring (dir) .. "@w' ignored - '@x048" ..
+            pending.dir .. "@w' from room @x048" .. tostring (pending.from) ..
+            "@w is still in flight")
+    end
+    return
+  end
+
   -- HUNTING SOMETHING ONLY THE ROOM'S CHARACTER LIST CAN SHOW?  THEN DO
   -- NOT LEAVE UNTIL THAT LIST HAS ARRIVED, or a fair wait for it has gone
   -- by.  Everything above this is a timer, and a timer is a race the
@@ -3659,6 +3665,11 @@ function move (dir)
   -- on every arrival while {/rdesc}, arriving mid-description, did not.
   -- Walking silently also spares you a screen of n/e/s/w echoes.
   SendNoEcho (dir)
+  if debug_on then
+    note ("sent '@x048" .. dir .. "@w' from room @x048" .. tostring (cur) ..
+          "@w (move " .. walked.n .. ", listing seen=" ..
+          tostring (rc_seen) .. ")")
+  end
   DoAfterSpecial (move_wait, "mm_timeout (" .. gen .. "," .. move_id .. ")", 12)
 end
 
