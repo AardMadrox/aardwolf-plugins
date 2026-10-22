@@ -355,7 +355,10 @@ end
 
 function OnPluginInstall ()
   load_data()
-  OnPortalHelp()
+  ColourNote(TC.hdr, "", "[PortalUse] ",
+             TC.num, "", "v" .. GetPluginInfo(GetPluginID(), 19) .. " loaded. Type ",
+             TC.ok, "", "portalhelp",
+             TC.num, "", " for help.")
 end
 
 ---------------------------------------------------------
