@@ -8,7 +8,11 @@
      Both offer a one-click bid at the maximum price you set per item.
 
      Commands (see "marketw help"):
-       market add <name> <max>   add a watch entry  (also: marketw add)
+       market add <name> <max> [auc|mark]   add a watch entry  (also: marketw add)
+       marketw mode <n|text> <both|auc|mark>   per-item: auction only / market only
+       market add <name> bid <max1> [max2 [max3]] [auc|mark]   add (blank = both channels)
+       marketw max2|max3 <n|text> <amt|off>     set or clear a tier on an existing item
+       marketw set <n> <max1> [max2 [max3]] [auc|mark|both]   redo an item's amounts / mode by list number
        marketw                        scan the market now
        marketw list                   show your watch list
        marketw bids                   what you already have a bid on
@@ -37,7 +41,7 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="4.2"
+   version="4.7"
 >
 </plugin>
 
@@ -141,6 +145,29 @@ DATA AND STATE
   MarketWatch_data.lua in the world folder (GetInfo(66)): the watch list
   and both bid ledgers.
 
+WATCH MODE AND BID TIERS (v4.3-4.7)
+  Each watch entry has a mode: "both" (default), "auc" (live auction channel
+  only) or "mark" (marketplace scan + market channel only). modeAllows(w, chan)
+  is the one gate; classifyRow uses chan "mkt", matchWatch takes the channel
+  as its second argument. Old data files without a mode load as "both".
+
+  Bid tiers: an entry has max, and optionally max2 and max3 (ascending).
+  nextTier(w, cur) returns the lowest tier above the current bid. A fresh
+  auction line offers that tier in the pop-up. After we bid, gAucAmt[num]
+  remembers the amount; if a later repeat of the auction line shows a current
+  bid above it, aucRaise offers the next tier up (once per tier, tracked in
+  gAucOffer). A raise that fails for gold must NOT clear gAucBid (the earlier
+  bid stands), which is why gLastBid carries second and prev. Tiers apply to the
+  LIVE auction channel only; market bids are proxy bids at max (tier 1).
+  Too-low bids (v4.7): the MUD answers a bid that does not beat the current one
+  by 50,000 or 5% with "Current bid on <item> is now N. Min bid is M."
+  (MW_BidTooLow).  Within BID_FAIL_WINDOW of a bid we sent, that un-records the
+  bid and offers the lowest tier >= M at the FRONT of the pop-up queue.
+  Outbid detection: the trigger "<name> has placed a bid for N gold on <item>
+  (Level L, Num n)" (MW_AuctionBidLine) calls aucRaise, as does a repeat of the
+  auctioning line with a higher "Current bid is N". What we bid on each auction
+  is gAucAmt[num], saved to the data file with gAucBid so a reload keeps it.
+
 WHEN EDITING
   * keep_evaluating is essential on the channel triggers. MUSHclient stops
     the trigger chain on the first match, and the soundpack and channel
@@ -153,6 +180,15 @@ WHEN EDITING
   * The popup prompt is a miniwindow (WIN_ID "MarketWatch_prompt") with a
     POPUP_TTL of 60 seconds. It is a convenience layer over the same
     click to bid actions, not a separate path.
+  * Pop-up QUEUE (v4.6): gPrompts is a queue and the window shows only its
+    first entry, with a "(n more waiting)" line.  Bid / No / the [x] button
+    resolve that one and the next appears.  The 60 second POPUP_TTL clock
+    starts when an entry reaches the front, not when it was queued; entries
+    that wait longer than QUEUE_MAX_AGE (10 min) are dropped.  Sold lines still
+    remove an entry wherever it sits in the queue.  "Skip all" / popup close
+    clear the whole queue.  MW_PopupDestroy refuses to run while the queue is
+    non-empty - an old teardown timer used to wipe a prompt added just after
+    the previous one closed.
   * Pop-up font (v4.2): POPUP_FONT / POPUP_FONT_SIZE (Consolas 12) for both
     title and text. Bold is forced by pointing textrect.font at
     textrect.font_bold, because a style's bold flag only draws when the
@@ -192,6 +228,14 @@ WHEN EDITING
    match="only carrying [\d,]+ gold piece"
    script="MW_NotEnoughGold">
   </trigger>
+  <!-- "You have to beat the current bid by at least 50,000gp or 5%."
+       "Current bid on Daily Blessing Qreset Token is now 15,000,000. Min bid is 15,050,000."
+       Our bid was refused as too low; the second line carries the figures. -->
+  <trigger
+   enabled="y" regexp="y" keep_evaluating="y" sequence="100"
+   match="^Current bid on (.+) is now ([\d,]+)\. Min bid is ([\d,]+)\.?"
+   script="MW_BidTooLow">
+  </trigger>
   <!-- "Auction: A Trivia Point Token SOLD to Madrox for 12,000,665 gold." -->
   <trigger
    enabled="y" regexp="y" keep_evaluating="y" sequence="100"
@@ -203,6 +247,13 @@ WHEN EDITING
    enabled="y" regexp="y" keep_evaluating="y" sequence="100"
    match="\(Level \d+, Num \d+\) sold to "
    script="MW_MarketSold">
+  </trigger>
+  <!-- "Auction: Aberrant has placed a bid for 12,000,000 gold on Daily Blessing Qreset Token (Level 1, Num 77)."
+       Someone else bidding on an auction we have a bid on = we were outbid. -->
+  <trigger
+   enabled="y" regexp="y" keep_evaluating="y" sequence="100"
+   match="^(?:Auction:\s*)?(\S+) has placed a bid for ([\d,]+) gold on (.+) \(Level \d+, Num (\d+)\)"
+   script="MW_AuctionBidLine">
   </trigger>
   <!-- diagnostic only: "marketw auc debug" turns this on to capture line variants -->
   <trigger
@@ -231,6 +282,9 @@ WHEN EDITING
   <alias match="^(?:marketw|marketwatch) bids$"         enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Bids"   sequence="88"></alias>
   <alias match="^(?:marketw|marketwatch) auc ?(.*)$"    enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Auc"    sequence="85"></alias>
   <alias match="^(?:marketw|marketwatch) mkt ?(.*)$"    enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Mkt"    sequence="85"></alias>
+  <alias match="^(?:marketw|marketwatch) mode (.+) (\S+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Mode" sequence="85"></alias>
+  <alias match="^(?:marketw|marketwatch) set (\S+) (.+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Set" sequence="85"></alias>
+  <alias match="^(?:marketw|marketwatch) max([23]) (.+) (\S+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Max" sequence="85"></alias>
   <alias match="^(?:marketw|marketwatch) popup ?(.*)$"  enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Popup"  sequence="85"></alias>
   <alias match="^(?:marketw|marketwatch) withdrawroom(?: (.*))?$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_WithdrawRoom" sequence="86"></alias>
   <alias match="^(?:marketw|marketwatch) withdraw(?: (.*))?$"     enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Withdraw"     sequence="85"></alias>
@@ -466,6 +520,10 @@ gBid = {}
 -- would otherwise collide with market numbers ("64817").
 gAucBid = {}
 
+-- What we bid on each live auction.  num -> amount.  Persisted with gAucBid, so a
+-- reload cannot make us forget it - the next tier is measured against this.
+gAucAmt = {}
+
 -- Buyout prices learned from the market channel ("This item has a buyout price
 -- of N").  That announcement is the one place a buyout is stated in a form we
 -- have actually seen, so it is remembered and reused by 'marketw' scans later.
@@ -474,20 +532,74 @@ gKnownBuyout = {}
 local AUC_BID_TTL = 3600   -- forget an auction bid after an hour
 local AUC_TTL     = 300    -- an auction line's link goes stale after 5 minutes
 
+-- Bid tiers: every watch entry has max (tier 1) and optionally max2 and max3
+-- (each higher than the one before).  On a LIVE auction the lowest tier that
+-- beats the current price is the one offered; when someone outbids you, the next
+-- tier up is offered in the pop-up.  Nothing is sent until you click.
+local gAucOffer = {}       -- auction num -> { amt = last tier offered, when = os.time () }
+
+local function tierList (w)
+  local t = { w.max }
+  if w.max2 then t [#t + 1] = w.max2 end
+  if w.max3 then t [#t + 1] = w.max3 end
+  return t
+end
+
+-- Lowest tier strictly above cur (tier 1 when there is no current bid).
+-- Returns amount, tier number - or nil when every tier is already beaten.
+local function nextTier (w, cur)
+  for i, amt in ipairs (tierList (w)) do
+    if not cur or amt > cur then return amt, i end
+  end
+  return nil
+end
+
+local function tierText (w)
+  local parts = {}
+  for _, amt in ipairs (tierList (w)) do parts [#parts + 1] = commafy (amt) end
+  return table.concat (parts, " / ")
+end
+
+-- Per-item watch mode.  Stored as "both" (default), "auc" or "mark".
+--   both = marketplace scan + market channel + auction channel
+--   auc  = live auction channel only
+--   mark = marketplace scan + market channel only
+local MODE_LABEL = { both = "both", auc = "auction only", mark = "market only" }
+
+local function parseMode (s)
+  s = trim (s):lower ()
+  if s == "both" or s == "all" then return "both" end
+  if s == "auc" or s == "auction" then return "auc" end
+  if s == "mark" or s == "market" or s == "mkt" then return "mark" end
+  return nil
+end
+
+-- Which channel is asking?  "auc" = live auction, "mkt" = marketplace (scan
+-- or market channel).  Does this entry's mode allow it?
+local function modeAllows (w, chan)
+  local m = w.mode or "both"
+  if m == "both" then return true end
+  if chan == "auc" then return m == "auc" end
+  return m == "mark"
+end
+
 local function saveData ()
   local plain = {}
   for i, w in ipairs (gWatch) do
-    plain [i] = { raw = w.raw, max = w.max, added = w.added }
+    plain [i] = { raw = w.raw, max = w.max, max2 = w.max2, max3 = w.max3,
+                  added = w.added, mode = w.mode or "both" }
   end
   -- serialize wants string keys for a sparse map
   local bid = {}
   for num, t in pairs (gBid) do bid [tostring (num)] = t end
   local abid = {}
   for num, t in pairs (gAucBid) do abid [tostring (num)] = t end
+  local aamt = {}
+  for num, v in pairs (gAucAmt) do aamt [tostring (num)] = v end
   local buy = {}
   for num, p in pairs (gKnownBuyout) do buy [tostring (num)] = p end
   local body = "return " .. serialize.save_simple (
-    { watch = plain, cfg = gCfg, bid = bid, aucbid = abid, buyout = buy })
+    { watch = plain, cfg = gCfg, bid = bid, aucbid = abid, aucamt = aamt, buyout = buy })
   local tmp = dataPath () .. ".tmp"
   local f, err = io.open (tmp, "w")
   if not f then warn ("cannot save watch list: " .. tostring (err)) return false end
@@ -519,6 +631,8 @@ local function loadData ()
     if w.raw and w.max then
       gWatch [#gWatch + 1] = {
         raw = w.raw, max = w.max, added = w.added or 0,
+        max2 = tonumber (w.max2), max3 = tonumber (w.max3),
+        mode = parseMode (w.mode or "") or "both",
         pieces = splitGlob (w.raw),
       }
     end
@@ -533,6 +647,11 @@ local function loadData ()
   for num, when in pairs (t.aucbid or {}) do
     local n = tonumber (num)
     if n and now - when < AUC_BID_TTL then gAucBid [n] = when end
+  end
+  gAucAmt = {}
+  for num, v in pairs (t.aucamt or {}) do
+    local n = tonumber (num)
+    if n and gAucBid [n] and tonumber (v) then gAucAmt [n] = tonumber (v) end
   end
   gKnownBuyout = {}
   for num, price in pairs (t.buyout or {}) do
@@ -722,7 +841,9 @@ local function classifyRow (row)
   local vis = norm (row.visible)
   for _, w in ipairs (gWatch) do
     local kind = nil
-    if piecesMatch (vis, w.pieces) then
+    if not modeAllows (w, "mkt") then
+      kind = nil                 -- auction-only entry: never matched on the market
+    elseif piecesMatch (vis, w.pieces) then
       kind = "sure"
     elseif row.truncated and couldMatchTruncated (vis, w.pieces) then
       kind = "maybe"
@@ -839,7 +960,11 @@ local function renderResults ()
       echoHi ("nothing to act on - ", table.concat (skipped, " and "),
               " among your watched items.")
     else
-      echoHi ("nothing on the market matches your ", tostring (#gWatch), " watched item(s).")
+      local nm = 0
+      for _, w in ipairs (gWatch) do
+        if modeAllows (w, "mkt") then nm = nm + 1 end
+      end
+      echoHi ("nothing on the market matches your ", tostring (nm), " market-watched item(s).")
     end
     return
   end
@@ -1032,8 +1157,11 @@ local POPUP_TTL = 60    -- seconds a prompt stays up if you never answer it
 -- is a bitmap font with no larger sizes.  Drawn bold, see popupBuild.
 local POPUP_FONT      = "Consolas"
 local POPUP_FONT_SIZE = 12
+local QUEUE_MAX_AGE = 600   -- a prompt that waits this long in the queue is dropped
 local gWin      = nil
-local gPrompts  = {}    -- see popupAdd for the entry shape
+local gPrompts  = {}    -- the queue; [1] is the one on screen.  See popupAdd
+local gHeadId   = nil   -- id of the entry the window was last built for
+local gExpireArmed = false
 
 local popupClose, popupBuild
 
@@ -1069,9 +1197,10 @@ end
 -- callback has returned.  The library's own close button defers for the same
 -- reason (it calls delete(true)).
 function MW_PopupDestroy ()
+  -- a prompt arrived after the close was scheduled: the window is in use again
+  if #gPrompts > 0 then return end
   local w = gWin
   gWin     = nil
-  gPrompts = {}
   if w then pcall (function () w:delete (true) end) end
   pcall (WindowDelete, WIN_ID)   -- also clears a window left behind by a
   pcall (Repaint)                -- half-finished teardown
@@ -1094,7 +1223,16 @@ end
 
 popupBuild = function ()
   if not gHaveWin then return end
-  if #gPrompts == 0 then popupClose () return end
+  if #gPrompts == 0 then gHeadId = nil popupClose () return end
+
+  -- Only the front of the queue is shown.  Its expiry clock starts now, so
+  -- time spent waiting behind another prompt does not use it up.
+  local head = gPrompts [1]
+  if head.id ~= gHeadId then
+    gHeadId   = head.id
+    head.when = os.time ()
+    MW_PopupArmExpire ()
+  end
 
   -- Never reuse an object the library no longer knows about.  If a teardown
   -- went wrong the old one is a zombie: its hotspots are live but its entry in
@@ -1143,14 +1281,21 @@ popupBuild = function ()
     local prior = gWin.do_on_delete
     gWin.do_on_delete = function (self)
       if prior then prior (self) end
-      gWin     = nil
-      gPrompts = {}
+      -- our own teardown clears gWin first, so only a click on the [x] lands here
+      if gWin ~= self then return end
+      gWin = nil
+      -- closing the window dismisses just the prompt that was showing
+      if #gPrompts > 0 then table.remove (gPrompts, 1) end
+      gHeadId = nil
+      if #gPrompts > 0 then
+        DoAfterSpecial (0.3, "MW_PopupRefresh ()", sendto.script)
+      end
     end
   end
 
   gWin:clear (false)
 
-  for _, p in ipairs (gPrompts) do
+  for _, p in ipairs ({ head }) do
     local s, l = promptLine { { text = p.name, colour = CLR_HI } }
     gWin:add_text (s, false, l)
 
@@ -1171,7 +1316,8 @@ popupBuild = function ()
       local segs = { { text = "  " } }
       if p.bid then
         segs [#segs + 1] = {
-          text = "[ BID " .. commafy (p.bid) .. " ]", colour = CLR_HI,
+          text = "[ BID " .. ((p.tier and p.tier > 1) and ("max" .. p.tier .. " ") or "") ..
+                 commafy (p.bid) .. " ]", colour = CLR_HI,
           code = string.format ("MW_PopupAct(%d,%q)", p.id, p.bidkind),
           tip  = "Send the bid now" }
         if p.buy or p.buyover then segs [#segs + 1] = { text = "   " } end
@@ -1201,11 +1347,20 @@ popupBuild = function ()
     end
   end
 
-  local s, l = promptLine {
+  local waiting = #gPrompts - 1
+  local tail = {
     { text = "  " },
     { text = "[ No ]", colour = CLR_NAME,
-      code = "MW_PopupNo()", tip = "Close this window and do nothing" },
+      code = "MW_PopupNo()",
+      tip = waiting > 0 and "Skip this one - the next is shown" or "Close this window and do nothing" },
   }
+  if waiting > 0 then
+    tail [#tail + 1] = { text = "   " }
+    tail [#tail + 1] = { text = "[ Skip all ]", colour = CLR_TAG,
+      code = "MW_PopupSkipAll()", tip = "Dismiss every waiting prompt" }
+    tail [#tail + 1] = { text = "   (" .. waiting .. " more waiting)", colour = CLR_DIM }
+  end
+  local s, l = promptLine (tail)
   gWin:add_text (s, false, l)
 
   pcall (function () gWin:fit_contents (1000, 600) end)
@@ -1232,12 +1387,17 @@ local function popupAdd (p)
     if q.num == p.num and q.family == p.family then return true end
   end
   gPromptSeq = gPromptSeq + 1
-  p.id   = gPromptSeq
-  p.when = os.time ()
-  gPrompts [#gPrompts + 1] = p
+  p.id     = gPromptSeq
+  p.when   = os.time ()
+  p.queued = p.when
+  if p.front then
+    table.insert (gPrompts, 1, p)      -- a replacement for the prompt just resolved
+  else
+    gPrompts [#gPrompts + 1] = p
+  end
   popupBuild ()
   -- Never leave it sitting there if nobody is at the keyboard.
-  DoAfterSpecial (POPUP_TTL + 1, "MW_PopupExpire ()", sendto.script)
+  MW_PopupArmExpire ()
   -- Only claim it if a window really exists now.  If the build failed the
   -- item must go back to the normal echo rather than vanish from both.
   if not gWin then
@@ -1353,19 +1513,49 @@ function MW_PopupId (id)
   end
 end
 
+-- "No": dismiss the prompt on screen only; the next one in the queue comes up.
 function MW_PopupNo ()
+  if #gPrompts > 0 then table.remove (gPrompts, 1) end
+  gHeadId = nil
+  if #gPrompts == 0 then popupClose () return end
+  -- We are inside the old prompt's own click callback, so the redraw waits a
+  -- moment (same reasoning as the deferred teardown above).  Hide it now so
+  -- the click is seen to work.
+  pcall (WindowShow, WIN_ID, false)
+  pcall (Repaint)
+  DoAfterSpecial (0.2, "MW_PopupRefresh ()", sendto.script)
+end
+
+function MW_PopupSkipAll ()
   popupClose ()
 end
 
--- Drop anything that has sat unanswered for too long.
+-- One expiry check chain at a time.  The front prompt lives POPUP_TTL seconds
+-- from reaching the front (or from its last click); anything still waiting is
+-- dropped after QUEUE_MAX_AGE.
+function MW_PopupArmExpire ()
+  if gExpireArmed then return end
+  gExpireArmed = true
+  DoAfterSpecial (10, "MW_PopupExpire ()", sendto.script)
+end
+
 function MW_PopupExpire ()
+  gExpireArmed = false
   local now, kept = os.time (), {}
-  for _, p in ipairs (gPrompts) do
-    if now - (p.when or 0) < POPUP_TTL then kept [#kept + 1] = p end
+  for i, p in ipairs (gPrompts) do
+    local live
+    if i == 1 then
+      live = now - (p.when or 0) < POPUP_TTL
+    else
+      live = now - (p.queued or p.when or 0) < QUEUE_MAX_AGE
+    end
+    if live then kept [#kept + 1] = p end
   end
-  if #kept == #gPrompts then return end
-  gPrompts = kept
-  popupBuild ()          -- closes the window if that emptied it
+  if #kept ~= #gPrompts then
+    gPrompts = kept
+    popupBuild ()          -- closes the window if that emptied it
+  end
+  if #gPrompts > 0 then MW_PopupArmExpire () end
 end
 
 -- Drop the prompt for an item that is no longer for sale.  Called from the
@@ -1425,10 +1615,12 @@ local gAuc     = {}   -- auction num -> { name, level, bid, entry, when }
 local gAucLast = { line = "", when = 0 }
 
 -- Pick the best watch entry for a full, untruncated item name.
-local function matchWatch (fullname)
+-- chan is "auc" (live auction) or "mkt" (market channel); entries whose mode
+-- excludes that channel are skipped.
+local function matchWatch (fullname, chan)
   local hay, best = norm (fullname), nil
   for _, w in ipairs (gWatch) do
-    if piecesMatch (hay, w.pieces) then
+    if modeAllows (w, chan) and piecesMatch (hay, w.pieces) then
       if not best or w.max > best.max then best = w end
     end
   end
@@ -1439,6 +1631,84 @@ function MW_AuctionDebug (name, line, wildcards)
   if gCfg.aucdebug then
     ColourNote (CLR_DIM, "", "[marketw auc] " .. tostring (line))
   end
+end
+
+-- We already bid on this auction and a repeat of the channel line shows the
+-- price has moved.  If someone has outbid us and a higher tier (max2 / max3)
+-- still beats the price, offer that tier.  Each tier is offered once per
+-- auction.  Nothing is sent until the button / link is clicked.
+local function aucRaise (num, item, w, cur, now)
+  local myamt = gAucAmt [num]
+  if not myamt or not cur then return end
+  if cur <= myamt then return end            -- not outbid
+  local amt, tier = nextTier (w, cur)
+  if not amt then return end                 -- past every tier you set
+  local last = gAucOffer [num]
+  if last and now - last.when < AUC_BID_TTL and amt <= last.amt then return end
+
+  gAucOffer [num] = { amt = amt, when = now }
+  -- the record may be gone (plugin reloaded since we bid), so rebuild it
+  local a = gAuc [num]
+  if not a then a = {} gAuc [num] = a end
+  a.name       = item
+  a.entry      = w
+  a.bid        = cur
+  a.when       = now
+  a.second     = true       -- marks this as a raise on top of a standing bid
+  a.second_amt = amt
+  a.tier       = tier
+
+  -- a prompt from an earlier offer on this auction would swallow this one
+  popupDrop ("auc", num, nil)
+
+  if popupAdd { family = "auc", num = num, name = item,
+                bid = amt, bidkind = "auc", tier = tier,
+                note = "Auction " .. num .. "   OUTBID - now " .. commafy (cur) ..
+                       "   you bid " .. commafy (myamt) ..
+                       "   max" .. tier .. " " .. commafy (amt) } then
+    return
+  end
+
+  echoHi ("outbid: ", item,
+          string.format ("   (Num %d, now %s, you bid %s)", num,
+                         commafy (cur), commafy (myamt)))
+  local preview = CMD_AUC:gsub ("%$num", intstr (num)):gsub ("%$amt", intstr (amt))
+  ColourTell (CLR_MSG, "", "        ")
+  Hyperlink ("mwaucbid " .. num,
+             "[ BID max" .. tier .. " " .. commafy (amt) .. " ]",
+             "Send: " .. preview,
+             CLR_HI, "black", 0, 1)
+  ColourTell (CLR_MSG, "", "  ")
+  Hyperlink ("mwaucid " .. num, "[ ID ]",
+             "Show the item: " .. CMD_AUCID:gsub ("%$num", intstr (num)),
+             CLR_TAG, "black", 0, 1)
+  ColourNote (CLR_DIM, "", "   tier " .. tier .. " of your watch entry " .. string.format ("%q", w.raw))
+end
+
+-- "Auction: Aberrant has placed a bid for 12,000,000 gold on <item> (Level 1, Num 77)."
+-- Someone bidding on an auction we have a bid on means we were outbid: offer the
+-- next tier up (max2, then max3) if one still beats the new price.
+function MW_AuctionBidLine (name, line, wildcards)
+  if not gCfg.auc then return end
+  local bidder = tostring (wildcards [1] or "")
+  local cur    = tonumber ((tostring (wildcards [2] or ""):gsub (",", "")))
+  local item   = tostring (wildcards [3] or "")
+  local num    = tonumber (wildcards [4])
+  if not cur or not num or item == "" then return end
+
+  if gCfg.aucdebug then
+    ColourNote (CLR_DIM, "", string.format ("[marketw auc] bid line: %s bid %s on %q (Num %d)  ours=%s",
+                bidder, commafy (cur), item, num, tostring (gAucAmt [num])))
+  end
+
+  -- our own bid echoing back
+  if gmcp_name and bidder:lower () == gmcp_name:lower () then return end
+  -- only auctions we actually bid on
+  if not gAucBid [num] or not gAucAmt [num] then return end
+
+  local w = matchWatch (item, "auc")
+  if not w then return end
+  aucRaise (num, item, w, cur, os.time ())
 end
 
 function MW_AuctionLine (name, line, wildcards)
@@ -1465,26 +1735,34 @@ function MW_AuctionLine (name, line, wildcards)
   local cur = line:match ("[Cc]urrent bid is%s+([%d,]+)")
   cur = cur and tonumber ((cur:gsub (",", ""))) or nil
 
-  local w = matchWatch (item)
+  local w = matchWatch (item, "auc")
   if gCfg.aucdebug then
     ColourNote (CLR_DIM, "", string.format ("[marketw auc] item=%q level=%s num=%d bid=%s match=%s",
                 item, tostring (level), num, tostring (cur), w and w.raw or "none"))
   end
   if not w then return end
-  -- already bid: the bid stands, so say nothing at all
-  if gAucBid [num] then return end
-  -- bidding is already past what we would pay: nothing to act on, stay quiet
-  if cur and cur >= w.max then return end
+  -- already bid: the bid stands, so say nothing - unless we have been outbid
+  -- and a higher tier is available, in which case that tier is offered
+  if gAucBid [num] then
+    aucRaise (num, item, w, cur, now)
+    return
+  end
+  -- bidding is already past every tier you set: nothing to act on, stay quiet
+  local offer, tier = nextTier (w, cur)
+  if not offer then return end
+  local tierTag = tier > 1 and ("max" .. tier .. " ") or ""
 
-  gAuc [num] = { name = item, level = level, bid = cur, entry = w, when = now }
+  gAuc [num] = { name = item, level = level, bid = cur, entry = w, when = now,
+                 offer = offer, tier = tier }
 
   -- Auctions are over in minutes, so every one of these gets the pop-up.
   -- When the window takes it, the echo below would only say it twice.
   if popupAdd { family = "auc", num = num, name = item,
-                bid = w.max, bidkind = "auc",
+                bid = offer, bidkind = "auc", tier = tier,
                 note = "Auction " .. num ..
                        (cur and ("   current bid " .. commafy (cur)) or "") ..
-                       "   your max " .. commafy (w.max) } then
+                       "   your " .. (tier > 1 and ("max" .. tier) or "max") ..
+                       " " .. commafy (offer) } then
     return
   end
 
@@ -1492,10 +1770,10 @@ function MW_AuctionLine (name, line, wildcards)
           string.format ("   (Num %d, L%s%s)", num, tostring (level or "?"),
                          cur and (", bid " .. commafy (cur)) or ""))
 
-  local preview = CMD_AUC:gsub ("%$num", intstr (num)):gsub ("%$amt", intstr (w.max))
+  local preview = CMD_AUC:gsub ("%$num", intstr (num)):gsub ("%$amt", intstr (offer))
   ColourTell (CLR_MSG, "", "        ")
   Hyperlink ("mwaucbid " .. num,
-             "[ BID " .. commafy (w.max) .. " ]",
+             "[ BID " .. tierTag .. commafy (offer) .. " ]",
              "Send: " .. preview,
              CLR_HI, "black", 0, 1)
   ColourTell (CLR_MSG, "", "  ")
@@ -1503,6 +1781,101 @@ function MW_AuctionLine (name, line, wildcards)
              "Show the item: " .. CMD_AUCID:gsub ("%$num", intstr (num)),
              CLR_TAG, "black", 0, 1)
   ColourNote (CLR_DIM, "", "   matches " .. string.format ("%q", w.raw))
+end
+
+-- "Current bid on <item> is now 15,000,000. Min bid is 15,050,000."
+-- The bid we just sent was refused because it did not beat the current bid by
+-- enough.  Nothing was bid, so undo the record of it, then offer the lowest tier
+-- (max2, max3) that clears the minimum.  Nothing is sent until you click.
+function MW_BidTooLow (name, line, wildcards)
+  local item   = trim (tostring (wildcards [1] or ""))
+  local cur    = tonumber ((tostring (wildcards [2] or ""):gsub (",", "")))
+  local minbid = tonumber ((tostring (wildcards [3] or ""):gsub (",", "")))
+  local b = gLastBid
+  if not b or not cur or not minbid then return end
+  if os.time () - b.when > BID_FAIL_WINDOW then return end
+
+  local a = gAuc [b.num]
+  if b.auction and a and a.name and norm (a.name) ~= norm (item) then
+    return                      -- about some other item: not our bid
+  end
+  gLastBid = nil
+
+  if not b.auction then
+    -- marketplace bid refused: forget it so it is offered again
+    gBid [b.num] = nil
+    saveData ()
+    popupFail ("mkt", b.num, "bid too low - current " .. commafy (cur) ..
+               ", min bid " .. commafy (minbid))
+    echoHi ("bid too low on item ", tostring (b.num),
+            string.format (" - current %s, min bid %s.", commafy (cur), commafy (minbid)))
+    return
+  end
+
+  local num = b.num
+  -- undo the record of the refused bid
+  if b.second then
+    gAucAmt [num] = b.prev              -- the earlier bid still stands
+  else
+    gAucBid [num] = nil
+    gAucAmt [num] = nil
+  end
+  saveData ()
+
+  local w = (a and a.entry) or matchWatch (item, "auc")
+  if not w then return end
+
+  -- lowest tier that clears the minimum
+  local amt, tier
+  for i, v in ipairs (tierList (w)) do
+    if v >= minbid then amt, tier = v, i break end
+  end
+
+  -- the prompt for the refused bid is spent either way
+  popupDrop ("auc", num, nil)
+
+  if not amt then
+    echoHi ("bid too low on ", item,
+            string.format (": current %s, min bid %s - above all your max bids (%s), so nothing to offer.",
+                           commafy (cur), commafy (minbid), tierText (w)))
+    return
+  end
+
+  a = a or {}
+  gAuc [num] = a
+  a.name  = item
+  a.entry = w
+  a.bid   = cur
+  a.when  = os.time ()
+  a.tier  = tier
+  if gAucBid [num] then
+    a.second, a.second_amt = true, amt       -- raising a bid that still stands
+  else
+    a.second, a.offer = false, amt           -- nothing standing: a first bid
+  end
+  gAucOffer [num] = { amt = amt, when = os.time () }
+
+  if popupAdd { family = "auc", num = num, name = item, front = true,
+                bid = amt, bidkind = "auc", tier = tier,
+                note = "Auction " .. num .. "   BID TOO LOW - now " .. commafy (cur) ..
+                       "   min " .. commafy (minbid) ..
+                       "   max" .. tier .. " " .. commafy (amt) } then
+    return
+  end
+
+  echoHi ("bid too low: ", item,
+          string.format ("   (Num %d, now %s, min bid %s)", num, commafy (cur), commafy (minbid)))
+  local preview = CMD_AUC:gsub ("%$num", intstr (num)):gsub ("%$amt", intstr (amt))
+  ColourTell (CLR_MSG, "", "        ")
+  Hyperlink ("mwaucbid " .. num,
+             "[ BID max" .. tier .. " " .. commafy (amt) .. " ]",
+             "Send: " .. preview,
+             CLR_HI, "black", 0, 1)
+  ColourTell (CLR_MSG, "", "  ")
+  Hyperlink ("mwaucid " .. num, "[ ID ]",
+             "Show the item: " .. CMD_AUCID:gsub ("%$num", intstr (num)),
+             CLR_TAG, "black", 0, 1)
+  Note ("")
 end
 
 function MW_Click_AucBid (name, line, wildcards)
@@ -1517,11 +1890,13 @@ function MW_Click_AucBid (name, line, wildcards)
           " minutes old - the auction has probably moved on.  Nothing sent.")
     return
   end
-  if gAucBid [num] then
+  if gAucBid [num] and not a.second then
     warn ("you already bid on auction " .. num .. " - nothing sent.")
     return
   end
-  local amt = a.entry.max
+  -- a raise click bids the tier worked out when it was offered; a first bid
+  -- uses the tier picked when the auction line arrived
+  local amt = a.second and a.second_amt or a.offer or a.entry.max
   if a.bid and a.bid >= amt then
     warn ("refused: current bid " .. commafy (a.bid) ..
           " already meets your max " .. commafy (amt) .. ".")
@@ -1537,9 +1912,14 @@ function MW_Click_AucBid (name, line, wildcards)
 
   local cmd = CMD_AUC:gsub ("%$num", intstr (num)):gsub ("%$amt", intstr (amt))
   gAucBid [num] = os.time ()
-  gLastBid = { num = num, amt = amt, auction = true, when = os.time () }
+  gLastBid = { num = num, amt = amt, auction = true, when = os.time (),
+               second = a.second and true or false, prev = gAucAmt [num] }
+  -- remember what we bid, so a later outbid can be measured against it
+  local wasSecond = a.second
+  gAucAmt [num] = amt
+  a.second = false
   saveData ()
-  echoHi ("sending: ", cmd, "   (" .. a.name .. ")")
+  echoHi (wasSecond and "sending raised bid: " or "sending: ", cmd, "   (" .. a.name .. ")")
   Send (cmd)
 end
 
@@ -1573,7 +1953,7 @@ function MW_MarketLine (name, line, wildcards)
                 item, tostring (level), num, currency))
   end
 
-  local w = matchWatch (item)
+  local w = matchWatch (item, "mkt")
   if not w then gPendingAnnounce = nil return end
   -- already bid: nothing left to decide, stay quiet
   if gBid [num] then gPendingAnnounce = nil return end
@@ -1715,7 +2095,22 @@ function MW_NotEnoughGold (name, line, wildcards)
 
   -- The bid did NOT happen, so undo the record of it - otherwise the item
   -- would stay hidden from every future scan for something we never bought.
-  if b.auction then gAucBid [b.num] = nil else gBid [b.num] = nil end
+  if b.auction and b.second then
+    -- a failed SECOND-CHANCE bid must not erase the record of the first bid,
+    -- which stands; just re-arm the offer so it can be retried
+    local a = gAuc [b.num]
+    if a then
+      a.second     = true
+      a.second_amt = b.amt
+      a.when       = os.time ()
+    end
+    gAucAmt [b.num] = b.prev
+  elseif b.auction then
+    gAucBid [b.num] = nil
+    gAucAmt [b.num] = nil
+  else
+    gBid [b.num] = nil
+  end
   saveData ()
 
   -- If this came from the pop-up, keep the window open and say why, with the
@@ -1727,7 +2122,9 @@ function MW_NotEnoughGold (name, line, wildcards)
   local retryAlias = b.auction and ("mwaucbid " .. b.num) or ("mwbid " .. b.num)
 
   echoHi ("bid on item ", tostring (b.num), " failed - not enough gold on hand.")
-  ColourNote (CLR_DIM, "", "        it is no longer marked as bid, so it will be offered again.")
+  ColourNote (CLR_DIM, "", b.second
+    and "        your earlier bid still stands; the raised bid can be retried."
+    or  "        it is no longer marked as bid, so it will be offered again.")
 
   if not gCfg.withdraw then
     ColourTell (CLR_MSG, "", "        ")
@@ -1929,18 +2326,51 @@ end
 
 function MW_Cmd_Add (name, line, wildcards)
   local arg = trim (wildcards [1])
-  local body, amt = arg:match ("^(.-)%s+([%d%.,]+[kmbKMB]?)$")
-  if not body then
-    warn ("usage: market add <item name> <max bid>")
-    helpLine ("example", "market add a shiny platinum blank chaos portal 1200000000")
-    helpLine ("example", "market add * Fantasy Series Collector Card 6m")
+  -- market add <item name> bid <max1> [max2 [max3]] [auc|mark]
+  -- (the older  market add <item name> <max>  still works)
+  local mode = nil
+  local head, word = arg:match ("^(.-)%s+(%a+)$")
+  if head and parseMode (word) then
+    arg  = head
+    mode = parseMode (word)
+  end
+
+  local body, tiers = nil, nil
+  local nm, amts = arg:match ("^(.*)%s+[Bb][Ii][Dd]%s+(.+)$")
+  if nm then
+    -- new form: everything after the last " bid " is the amounts
+    body, tiers = nm, {}
+    for tok in amts:gmatch ("[^%s/]+") do
+      local v = parseAmount (tok)
+      if not v then tiers = nil break end
+      tiers [#tiers + 1] = v
+    end
+  else
+    -- old form: the last word is the amount (tiers may be joined with "/")
+    local b, amtstr = arg:match ("^(.-)%s+(%S+)$")
+    if b and amtstr:match ("^[%d%.,kmbKMB/]+$") then
+      body, tiers = b, {}
+      for piece in (amtstr .. "/"):gmatch ("([^/]*)/") do
+        local v = parseAmount (piece)
+        if not v then tiers = nil break end
+        tiers [#tiers + 1] = v
+      end
+    end
+  end
+  if not body or not tiers or #tiers == 0 or #tiers > 3 then
+    warn ("usage: market add <item name> bid <max1> [max2 [max3]] [auc|mark]")
+    helpLine ("example", "market add a blank chaos portal bid 1b")
+    helpLine ("example", "market add a blank chaos portal bid 1b 1.2b 1.5b auc")
+    helpLine ("example", "market add * Fantasy Series Collector Card bid 6m mark")
     return
   end
-  local max = parseAmount (amt)
-  if not max then
-    warn ("could not read " .. amt .. " as an amount.")
-    return
+  for i = 2, #tiers do
+    if tiers [i] <= tiers [i - 1] then
+      warn ("each max must be higher than the one before it (max1 < max2 < max3).")
+      return
+    end
   end
+  local max, max2, max3 = tiers [1], tiers [2], tiers [3]
   body = trim (body)
   local pieces = splitGlob (body)
   if #pieces == 0 then
@@ -1956,17 +2386,22 @@ function MW_Cmd_Add (name, line, wildcards)
   end
   for _, w in ipairs (gWatch) do
     if norm (w.raw) == norm (body) then
-      local old = w.max
-      w.max = max
+      local old = tierText (w)
+      w.max, w.max2, w.max3 = max, max2, max3    -- the amounts given replace all tiers
+      if mode then w.mode = mode end     -- no mode word given: keep what it had
       saveData ()
       echoHi ("updated max for " .. string.format ("%q", w.raw) .. ": " ..
-              commafy (old) .. " -> ", commafy (max), "")
+              old .. " -> ", tierText (w),
+              "  (" .. MODE_LABEL [w.mode or "both"] .. ")")
       return
     end
   end
-  gWatch [#gWatch + 1] = { raw = body, max = max, added = os.time (), pieces = pieces }
+  mode = mode or "both"
+  gWatch [#gWatch + 1] = { raw = body, max = max, max2 = max2, max3 = max3,
+                           added = os.time (), pieces = pieces, mode = mode }
   saveData ()
-  echoHi ("watching " .. string.format ("%q", body) .. " up to ", commafy (max), " gold.")
+  echoHi ("watching " .. string.format ("%q", body) .. " up to ", tierText (gWatch [#gWatch]),
+          " gold  (" .. MODE_LABEL [mode] .. ").")
 end
 
 function MW_Cmd_Del (name, line, wildcards)
@@ -1993,10 +2428,18 @@ end
 function MW_Cmd_List ()
   if #gWatch == 0 then echo ("watch list is empty.") return end
   echoHi ("watching ", tostring (#gWatch), " item(s):")
+  Note ("")
   for i, w in ipairs (gWatch) do
+    -- line 1: number and name.  line 2: the bids and mode, indented under it.
     ColourNote (CLR_HI,  "", string.format ("  %2d. ", i),
-                CLR_MSG, "", string.format ("%-48s ", w.raw:sub (1, 48)),
-                CLR_DIM, "", "max " .. commafy (w.max))
+                CLR_MSG, "", w.raw)
+    local parts = {}
+    for t, amt in ipairs (tierList (w)) do
+      parts [#parts + 1] = "max" .. t .. " " .. commafy (amt)
+    end
+    ColourNote (CLR_DIM, "", "      " .. table.concat (parts, "   ") ..
+                             "   [" .. MODE_LABEL [w.mode or "both"] .. "]")
+    Note ("")
   end
   ColourNote (CLR_DIM, "", "  bid command: " .. CMD_BID)
   ColourNote (CLR_DIM, "", "  buy command: " .. CMD_BUY)
@@ -2038,6 +2481,126 @@ function MW_Cmd_Bids ()
     end
     ColourNote (CLR_DIM, "", "  These expire on their own after an hour.")
   end
+end
+
+-- number from 'marketw list', or part of the item's name
+local function findEntry (target)
+  local idx = tonumber (target)
+  if idx and gWatch [idx] then return gWatch [idx] end
+  local t = norm (target)
+  for _, e in ipairs (gWatch) do
+    if t ~= "" and norm (e.raw):find (t, 1, true) then return e end
+  end
+  return nil
+end
+
+-- marketw mode <number|text> <both|auc|mark>
+function MW_Cmd_Mode (name, line, wildcards)
+  local target, word = trim (wildcards [1]), trim (wildcards [2])
+  local mode = parseMode (word)
+  if not mode then
+    warn ("usage: marketw mode <number|text> <both|auc|mark>")
+    return
+  end
+  local w = findEntry (target)
+  if not w then
+    warn ("no watch entry matches " .. string.format ("%q", target) .. ".  Try: marketw list")
+    return
+  end
+  w.mode = mode
+  saveData ()
+  echoHi ("watching " .. string.format ("%q", w.raw) .. ": ", MODE_LABEL [mode], ".")
+end
+
+-- marketw set <number> <max1> [max2 [max3]] [auc|mark|both]
+-- e.g.  marketw set 3 1000 20000 300000 auc
+-- The amounts given replace ALL of the item's tiers; the mode is only changed
+-- when a mode word is given.  A lone mode word changes just the mode.
+function MW_Cmd_Set (name, line, wildcards)
+  local target, rest = trim (wildcards [1]), trim (wildcards [2])
+  local w = findEntry (target)
+  if not w then
+    warn ("no watch entry matches " .. string.format ("%q", target) .. ".  Try: marketw list")
+    return
+  end
+
+  local tiers, mode = {}, nil
+  for tok in rest:gmatch ("[^%s/]+") do
+    local m = parseMode (tok)
+    if m then
+      mode = m
+    else
+      local v = parseAmount (tok)
+      if not v then
+        warn ("could not read " .. tok .. " as an amount or mode.")
+        ColourNote (CLR_DIM, "", "  usage: marketw set <n> <max1> [max2 [max3]] [auc|mark|both]")
+        return
+      end
+      tiers [#tiers + 1] = v
+    end
+  end
+  if #tiers > 3 then
+    warn ("at most three amounts: max1 max2 max3.")
+    return
+  end
+  if #tiers == 0 and not mode then
+    warn ("usage: marketw set <n> <max1> [max2 [max3]] [auc|mark|both]")
+    return
+  end
+  for i = 2, #tiers do
+    if tiers [i] <= tiers [i - 1] then
+      warn ("each max must be higher than the one before it (max1 < max2 < max3).")
+      return
+    end
+  end
+
+  if #tiers > 0 then
+    w.max, w.max2, w.max3 = tiers [1], tiers [2], tiers [3]
+  end
+  if mode then w.mode = mode end
+  saveData ()
+  echoHi ("item " .. tostring (tonumber (target) or "") .. " " ..
+          string.format ("%q", w.raw) .. ": ", tierText (w),
+          " gold  (" .. MODE_LABEL [w.mode or "both"] .. ")")
+end
+
+-- marketw max2|max3 <number|text> <amount|off>
+function MW_Cmd_Max (name, line, wildcards)
+  local tier   = tonumber (wildcards [1])
+  local target = trim (wildcards [2])
+  local word   = trim (wildcards [3]):lower ()
+  local w = findEntry (target)
+  if not w then
+    warn ("no watch entry matches " .. string.format ("%q", target) .. ".  Try: marketw list")
+    return
+  end
+
+  if word == "off" or word == "none" or word == "clear" then
+    if tier == 2 then w.max2, w.max3 = nil, nil    -- max3 means nothing without max2
+    else w.max3 = nil end
+  else
+    local v = parseAmount (word)
+    if not v then
+      warn ("usage: marketw max" .. tier .. " <number|text> <amount|off>")
+      return
+    end
+    if tier == 3 and not w.max2 then
+      warn ("set max2 first - max3 has to sit above it.")
+      return
+    end
+    local floor = (tier == 2) and w.max or w.max2
+    if v <= floor then
+      warn ("max" .. tier .. " must be higher than " .. commafy (floor) .. ".")
+      return
+    end
+    if tier == 2 and w.max3 and v >= w.max3 then
+      warn ("max2 must stay below max3 (" .. commafy (w.max3) .. ").")
+      return
+    end
+    if tier == 2 then w.max2 = v else w.max3 = v end
+  end
+  saveData ()
+  echoHi ("watching " .. string.format ("%q", w.raw) .. " up to ", tierText (w), " gold.")
 end
 
 function MW_Cmd_Deep ()
@@ -2104,7 +2667,7 @@ function MW_Cmd_Help ()
   ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
               CLR_MSG, "", "watch the market and bid with one click.")
   Note ("")
-  helpLine ("market add <name> <max>", "watch an item, up to <max> gold")
+  helpLine ("market add <name> bid <m1> [m2 [m3]] [auc|mark]", "watch an item; no mode = both")
   helpLine ("marketw add <name> <max>",     "same thing, if 'market add' clashes")
   helpLine ("marketw / marketwatch",        "scan the market now")
   helpLine ("marketw list",                 "show the watch list")
@@ -2116,6 +2679,9 @@ function MW_Cmd_Help ()
   helpLine ("marketw auc on|off|debug",     "watch the live auction channel")
   helpLine ("marketw mkt on|off",           "watch the market channel for new listings")
   helpLine ("marketw popup on|off",         "live listings pop up in a window, not the output")
+  helpLine ("marketw mode <n|text> <m>",    "per item: both (default), auc = auction only, mark = market only")
+  helpLine ("marketw set <n> <m1> [m2 [m3]] [mode]", "redo an item's amounts / mode by its list number")
+  helpLine ("marketw max2|max3 <n|text> <amt>", "extra bid tiers, offered when outbid on an auction")
   Note ("")
   helpLine ("marketw withdraw on|off",      "top up from the bank when a bid falls short")
   helpLine ("marketw withdrawroom here",    "only ever withdraw in this room")
