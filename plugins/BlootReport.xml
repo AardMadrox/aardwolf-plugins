@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-09-18"
    requires="4.73"
-   version="1.7"
+   version="1.8"
    >
 <description trim="y">
 <![CDATA[
@@ -94,6 +94,23 @@ IDENTIFY SPELL (v1.7)
   window gets a note saying so. See idCommand. Unverified at time of
   writing: that "c identify" accepts an object id, and that the spell reply
   uses the same dashed box that trimToIdBox looks for.
+
+EXPIRATION SORTER GUARD (v1.8)
+  Mendaloth's Aardwolf_Expiration_Sorter (id 20324f91..., "expiresort") has a
+  trigger, start_inv, that matches every {invdata} line and never disables
+  itself after the first run. So once expiresort has been typed in a session,
+  EVERY invdata reply, including BlootReport's own, makes the sorter run its
+  whole reorder: "give ID self" for each timed item in 25 item batches. That
+  was the clash. BlootReport cannot hide a line from another plugin, so
+  instead it switches the sorter plugin off (EnablePlugin false) just before
+  it sends invdata and switches it back on 0.5s after {/invdata} or the
+  timeout. See sorterHold and sorterRelease.
+  It only touches the sorter if it is installed and was enabled, and it
+  always puts it back (also on plugin close or disable).
+  Known limits: typing expiresort during that ~1s window does nothing, and if
+  a sorter batch is mid-run its next batch timer is paused for that second.
+  The real cure is one line in the sorter's start_inv: add
+  EnableTrigger("start_inv", false) so it only listens to its own reply.
 
 DATA AND STATE
   SetVariable "cfg" (bag, idchan, debug, spellid, off = set of lower case OFF tiers) and "tally" (per tier got and kept).
@@ -632,6 +649,32 @@ end
 
 local claimed = {}   -- object ids already given to an item this session
 
+-- Expiration Sorter guard (v1.8).  That plugin reacts to every {invdata}
+-- reply, ours included, so keep it switched off while we wait for ours.
+local SORTER_ID   = "20324f91b0722c698a10f0a6"   -- Aardwolf_Expiration_Sorter
+local gSorterHeld = false
+
+local function sorterHold ()
+  if gSorterHeld then return end
+  if not IsPluginInstalled (SORTER_ID) then return end
+  if not GetPluginInfo (SORTER_ID, 17) then return end   -- already off, leave it
+  pcall (EnablePlugin, SORTER_ID, false)
+  gSorterHeld = not GetPluginInfo (SORTER_ID, 17)
+  if gSorterHeld then dbg ("expiration sorter held off for invdata") end
+end
+
+local function sorterRelease (force)
+  if not gSorterHeld then return end
+  if gInvWaiting and not force then return end   -- a newer invdata is out
+  gSorterHeld = false
+  pcall (EnablePlugin, SORTER_ID, true)
+  dbg ("expiration sorter released")
+end
+
+function BR_SorterRelease ()
+  sorterRelease (false)
+end
+
 local startIds
 
 function BR_Resolve ()
@@ -645,6 +688,7 @@ function BR_Resolve ()
   gInvWaiting = true
   gInvRows    = {}
   gInvToken   = gInvToken + 1
+  sorterHold ()
   EnableTrigger ("br_inv_start", true)
   SendNoEcho ("invdata")
   DoAfterSpecial (INV_TIMEOUT, "BR_InvTimeout (" .. gInvToken .. ")", sendto.script)
@@ -722,6 +766,7 @@ function BR_InvEnd ()
   EnableTrigger ("br_inv_line", false)
   EnableTrigger ("br_inv_end", false)
   gInvWaiting = false
+  DoAfterSpecial (0.5, "BR_SorterRelease ()", sendto.script)
   dbg ("invdata rows: " .. #gInvRows)
   applyResolution (true)
 end
@@ -732,6 +777,7 @@ function BR_InvTimeout (token)
   EnableTrigger ("br_inv_line", false)
   EnableTrigger ("br_inv_end", false)
   gInvWaiting = false
+  DoAfterSpecial (0.5, "BR_SorterRelease ()", sendto.script)
   warn ("no invdata reply - keeping by keyword instead.")
   applyResolution (false)
 end
@@ -1084,10 +1130,12 @@ function OnPluginSaveState ()
 end
 
 function OnPluginClose ()
+  sorterRelease (true)
   BR_WinDestroy ()
 end
 
 function OnPluginDisable ()
+  sorterRelease (true)
   BR_WinDestroy ()
 end
 
