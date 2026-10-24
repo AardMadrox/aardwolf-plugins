@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-09-18"
    requires="4.73"
-   version="1.8"
+   version="1.9"
    >
 <description trim="y">
 <![CDATA[
@@ -112,6 +112,17 @@ EXPIRATION SORTER GUARD (v1.8)
   The real cure is one line in the sorter's start_inv: add
   EnableTrigger("start_inv", false) so it only listens to its own reply.
 
+OWN CORPSE (v1.9)
+  After you die, getting your gear back from "the corpse of Madrox" prints
+  the same "You get (tier) item from the corpse of NAME." lines as mob loot.
+  The loot trigger now captures NAME (wildcard 3) and BR_LootTrig ignores the
+  line completely when NAME is the player's own character: not counted, not
+  kept, no id, no window.  The character name comes from GMCP
+  char.base.name via the Aardwolf GMCP handler plugin (GMCP_ID), is saved in
+  cfg.charname when seen, and that saved copy is the fallback if GMCP is not
+  ready yet.  If no name is known at all, nothing is skipped (old behaviour).
+  Only your own corpse is skipped, another player's corpse still counts.
+
 DATA AND STATE
   SetVariable "cfg" (bag, idchan, debug, spellid, off = set of lower case OFF tiers) and "tally" (per tier got and kept).
   The queue is not saved; a reload drops any open window.
@@ -134,7 +145,7 @@ WHEN EDITING
    name="br_loot"
    enabled="y"
    keep_evaluating="y"
-   match="^You get \(?\((Polished|Enhanced|Burnished|Shiny|Vibrant|Sparkling|Gleaming|Shimmering|Dazzling|Brilliant|Radiant|Wondrous|Majestic|Exalted|Eternal|Legendary|Epic|Mythical|Divine|Fabled|Godly)\)\)? (.*) from the (?:\w+ )?(?:corpse|torso) of .*\.$"
+   match="^You get \(?\((Polished|Enhanced|Burnished|Shiny|Vibrant|Sparkling|Gleaming|Shimmering|Dazzling|Brilliant|Radiant|Wondrous|Majestic|Exalted|Eternal|Legendary|Epic|Mythical|Divine|Fabled|Godly)\)\)? (.*) from the (?:\w+ )?(?:corpse|torso) of (.*)\.$"
    regexp="y"
    ignore_case="y"
    script="BR_LootTrig"
@@ -601,9 +612,41 @@ end
 -- =====================================================================
 local norm
 
+-- The player's own character name (v1.9): live from GMCP, else the copy
+-- saved in cfg, so a corpse loot still works if GMCP has not arrived yet.
+local GMCP_ID = "3e7dedbe37e44942dd46d264"   -- Aardwolf GMCP handler
+
+local function myName ()
+  local n
+  if IsPluginInstalled (GMCP_ID) then
+    local ok, v = pcall (CallPlugin, GMCP_ID, "gmcpval", "char.base.name")
+    if ok and type (v) == "string" then
+      v = v:gsub ('^%s*"', ""):gsub ('"%s*$', "")   -- tolerate a quoted value
+      v = trim (v)
+      if v ~= "" then n = v end
+    end
+  end
+  if n then
+    if gCfg.charname ~= n then gCfg.charname = n saveAll () end
+    return n
+  end
+  if type (gCfg.charname) == "string" and gCfg.charname ~= "" then
+    return gCfg.charname
+  end
+  return nil
+end
+
 function BR_LootTrig (name, line, wc)
   local tier  = TIER_BY_LOWER [tostring (wc [1]):lower ()]
   if not tier then return end
+
+  -- your own corpse after a death is not mob loot
+  local owner = trim (wc [3])
+  local me    = myName ()
+  if me and owner:lower () == me:lower () then
+    dbg ("own corpse, ignored: " .. tier .. " / " .. trim (wc [2]))
+    return
+  end
   local iname = trim (wc [2])
   local auto  = (AUTO_BAG [norm (iname)] and TIER_RANK [tier] >= SHARD_MIN) or false
 
@@ -1114,6 +1157,7 @@ function OnPluginInstall ()
   if type (c.idchan) == "string" then gCfg.idchan = c.idchan end
   gCfg.debug = c.debug and true or false
   gCfg.spellid = c.spellid and true or false
+  if type (c.charname) == "string" and c.charname ~= "" then gCfg.charname = c.charname end
   if type (c.off) == "table" then
     gCfg.off = {}
     for k, v in pairs (c.off) do if v then gCfg.off [tostring (k):lower ()] = true end end
