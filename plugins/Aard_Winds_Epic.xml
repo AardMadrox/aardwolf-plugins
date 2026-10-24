@@ -18,7 +18,7 @@ commentz
    purpose="Winds epic stuff."
    date_written="2018-01-24 20:02:50"
    requires="4.30"
-   version="2.4"
+   version="2.5"
    save_state="y"
    >
 <description trim="n">
@@ -681,6 +681,7 @@ end
 
 function use_cmd()
 	if cmd == "" then
+		ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "silver", "", " no command set yet - waiting for the announcer to post one.\n")
 		return
 	end
 	-- Send ONLY the stand step. The words are NOT captured now: while we wait to
@@ -831,6 +832,10 @@ end
 function player_pedestal(name, line, args)
 	player = args.player
 	pedestal_confirmed = 0 -- new attempt: no words confirmed in order yet
+	-- Forget the previous guesser's word. If we never see THIS player's say
+	-- lines (gagged, ignored, lost), a stale word must not get credited or
+	-- scratched by their result line.
+	word = ""
 	player_attempt(player)
 	if cmd ~= "" then
 		ColourNote("#FBFF00", "", "\n >> ", "#9AC7FE", "", "Winds of Fate", "white", "", " cmd ", "silver", "", " cleared out because ", "white", "", player, "silver", "", " used it.\n")
@@ -899,21 +904,43 @@ function say_result(name, line, args)
 		my_attempt = false
 		says_outstanding = 0
 	end
+	if word == "" then
+		-- We never saw a say line for the player who just got this result, so we
+		-- have no idea which word it belongs to. Guessing here is what corrupts a
+		-- side. Say nothing about the word, but re-post the status so nobody is
+		-- left following a stale command. Only bother on a bolt - that's when the
+		-- pedestal is free again and a fresh command is actually useful.
+		if sitter and rslt == 0 then
+			Send(chan.."@Y>> @x075Winds of Fate @Y>> @wDidn't see the word that was said - nothing scratched.$C")
+			report(side)
+			go_try()
+		end
+		return
+	end
 	for i = 1, 4 do
 		local t = _G["side"..i]
 		for k, v in ipairs(t) do
 			if v.word == word then
-				local show = false
-				if not v.result then
-					show = true
-				end
+				-- Report whenever this word's status actually CHANGES - not just the
+				-- first time it is set. A word going green->red (an earlier wrong
+				-- call being corrected) has to be re-broadcast, or the group keeps
+				-- pasting the old command and eating lightning.
+				local show = (v.result ~= rslt)
 				if rslt == 1 then
-					-- a correct word. It only counts as the next confirmed side
-					-- (and only then advances the pointer) if it was said IN ORDER,
-					-- i.e. right after the sides already confirmed this attempt.
-					-- Record it green either way, but never let an out-of-order word
-					-- advance `side` and skip past later candidates.
+					-- a correct word. It only counts if it was said IN ORDER, i.e.
+					-- right after the sides already confirmed this attempt. An
+					-- out-of-order "correct" means we missed a say line somewhere,
+					-- so it is NOT safe to paint the word green - doing that pins
+					-- the wrong answer for the side and the group loops on it.
 					local in_order = (i == pedestal_confirmed + 1)
+					if not in_order then
+						if sitter then
+							Send(chan.."@Y>> @x075Winds of Fate @Y>> @wNot accepting @W"..word.."@w - it was said out of order.$C")
+							report(side)
+							go_try()
+						end
+						return
+					end
 					v.result = 1
 					if in_order then
 						pedestal_confirmed = i
@@ -923,7 +950,7 @@ function say_result(name, line, args)
 						-- If that was the last word we had queued and it was right,
 						-- put the next side's first candidate on the clipboard so it
 						-- can just be pasted to continue (no auto-saying).
-						if my_attempt and says_outstanding <= 0 and side <= 4 then
+						if my_attempt and not sitter and says_outstanding <= 0 and side <= 4 then
 							local nxt = side_result(side)
 							if nxt ~= "" then
 								local w = string.match(nxt, "^%s*say%s+(.+)$") or nxt
@@ -939,6 +966,16 @@ function say_result(name, line, args)
 						if in_order then
 							Send(chan.."@Y>> @x075Winds of Fate @Y>> @Wside@D[@x075"..i.."@D] @Wis @G"..word.."$C")
 							rename_group()
+							-- Sitter: the player on the pedestal just got this side right, so tell them the
+							-- first word to try on the NEXT side (side was already advanced above). It is the
+							-- same word the clipboard offers a player running their own attempt.
+							if side <= 4 and player ~= "" then
+								local nxt = side_result(side)
+								local w = string.match(nxt, "^%s*say%s+(.+)$") or nxt
+								if w ~= "" then
+									Send("gt "..player.." say "..w)
+								end
+							end
 						end
 						report(side)
 					end
@@ -1059,30 +1096,40 @@ function OnPluginSaveState()
 	SetVariable("cases", serialize.save_simple(cases))
 end
 
+function apply_room_info()
+	if gmcp then
+		room_info = gmcp("room.info")
+	else
+		-- legacy gmcp handler
+		any, p = CallPlugin("3e7dedbe37e44942dd46d264", "gmcpval", "room.info")
+		room_info = loadstring("return "..p)()
+	end
+	if room_info.zone == "winds" then
+		EnableTriggerGroup("triggers", true)
+		if last_zone ~= "winds" then
+			init_winds()
+		end
+	else
+		EnableTriggerGroup("triggers", false)
+	end
+	last_room = room_info.num
+	last_zone = room_info.zone
+end
+
+-- Called shortly after load/reinstall: pick up the room we are already in so the
+-- trigger group is enabled without having to move to force a room.info broadcast.
+function sync_room_info()
+	local ok = pcall(apply_room_info)
+	if not ok then
+		-- GMCP data not available yet; the next room.info broadcast will handle it
+		room_info = 1
+	end
+end
+
 function OnPluginBroadcast (msg, id, name, text)
 	if id == "3e7dedbe37e44942dd46d264" then
 		if text == "room.info" then
-			if gmcp then
-				room_info = gmcp("room.info")
-			else
-				-- legacy gmcp handler
-				any, p = CallPlugin("3e7dedbe37e44942dd46d264", "gmcpval", "room.info")
-				room_info = loadstring("return "..p)()
-			end
-			if room_info.zone == "winds" then
-				--DebugNote({"in winds zone"})
-				EnableTriggerGroup("triggers", true)
-				if last_zone ~= "winds" then
-					--DebugNote({"last zone was not winds"})
-					init_winds()
-				else
-					--DebugNote({"last zone was winds, so did not try to init"})
-				end
-			else
-				EnableTriggerGroup("triggers", false)
-			end
-			last_room = room_info.num
-			last_zone = room_info.zone
+			apply_room_info()
 		end
 		if text == "char.status" then
 			if gmcp then
@@ -1161,6 +1208,7 @@ init_winds()
 set_searches()
 
 DoAfterSpecial(.2, "loaded()", 12)
+DoAfterSpecial(.5, "sync_room_info()", 12)
 
 ]]>
 </script>
