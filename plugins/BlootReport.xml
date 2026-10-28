@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-09-18"
    requires="4.73"
-   version="1.9"
+   version="2.0"
    >
 <description trim="y">
 <![CDATA[
@@ -122,6 +122,12 @@ OWN CORPSE (v1.9)
   cfg.charname when seen, and that saved copy is the fallback if GMCP is not
   ready yet.  If no name is known at all, nothing is skipped (old behaviour).
   Only your own corpse is skipped, another player's corpse still counts.
+  v2.0 fix: v1.9 never worked.  CallPlugin returns (status, value) and the
+  code took the status as the name.  myName now reads the value, tries
+  gmcpval then gmcpdata_as_string, and falls back to cfg.setname, set by
+  "blootreport name NAME" (off clears it), then to the saved cfg.charname.
+  "blootreport name" alone shows which name is in use.  Debug mode prints
+  the corpse owner and the name it compared against on every bloot line.
 
 DATA AND STATE
   SetVariable "cfg" (bag, idchan, debug, spellid, off = set of lower case OFF tiers) and "tally" (per tier got and kept).
@@ -205,6 +211,8 @@ WHEN EDITING
          sequence="100" script="BR_Cmd_IdChan"></alias>
   <alias match="^(?:blootreport|blootr) identify(?: +(on|off))? *$" enabled="y" regexp="y" ignore_case="y"
          sequence="100" script="BR_Cmd_Identify"></alias>
+  <alias match="^(?:blootreport|blootr) name(?: +(.+?))? *$" enabled="y" regexp="y" ignore_case="y"
+         sequence="100" script="BR_Cmd_Name"></alias>
   <alias match="^(?:blootreport|blootr) +(.+?) *$" enabled="y" regexp="y" ignore_case="y"
          sequence="200" script="BR_Cmd_Channel"></alias>
 </aliases>
@@ -619,13 +627,17 @@ local GMCP_ID = "3e7dedbe37e44942dd46d264"   -- Aardwolf GMCP handler
 local function myName ()
   local n
   if IsPluginInstalled (GMCP_ID) then
-    local ok, v = pcall (CallPlugin, GMCP_ID, "gmcpval", "char.base.name")
-    if ok and type (v) == "string" then
-      v = v:gsub ('^%s*"', ""):gsub ('"%s*$', "")   -- tolerate a quoted value
-      v = trim (v)
-      if v ~= "" then n = v end
+    -- CallPlugin returns (status, value): status 0 means the call worked
+    for _, fn in ipairs { "gmcpval", "gmcpdata_as_string" } do
+      local ok, rc, v = pcall (CallPlugin, GMCP_ID, fn, "char.base.name")
+      if ok and rc == 0 and type (v) == "string" then
+        v = v:gsub ('^%s*"', ""):gsub ('"%s*$', "")   -- tolerate a quoted value
+        v = trim (v)
+        if v ~= "" then n = v break end
+      end
     end
   end
+  if not n and gCfg.setname and gCfg.setname ~= "" then n = gCfg.setname end
   if n then
     if gCfg.charname ~= n then gCfg.charname = n saveAll () end
     return n
@@ -643,6 +655,7 @@ function BR_LootTrig (name, line, wc)
   -- your own corpse after a death is not mob loot
   local owner = trim (wc [3])
   local me    = myName ()
+  dbg ("corpse owner '" .. owner .. "', my name '" .. tostring (me) .. "'")
   if me and owner:lower () == me:lower () then
     dbg ("own corpse, ignored: " .. tier .. " / " .. trim (wc [2]))
     return
@@ -1019,6 +1032,8 @@ function BR_Cmd_Help ()
   helpLine ("blootreport idchan off",    "clear the report channel")
   helpLine ("blootreport identify", "toggle the identify spell for stats")
   helpLine ("",                          "(no Identify wish). on / off works too")
+  helpLine ("blootreport name [NAME]",   "your character, whose own corpse is ignored")
+  helpLine ("",                          "(GMCP normally supplies it; off clears)")
   helpLine ("blootreport bag <keyword>", "bag the KEEP button uses")
   helpLine ("blootreport reset",         "zero the tally")
   helpLine ("blootreport debug",         "toggle debug messages")
@@ -1135,6 +1150,21 @@ function BR_Cmd_IdChan (name, line, wc)
   end
 end
 
+-- blootreport name [NAME|off]: your character name, used only if GMCP gives
+-- none.  With no argument it shows the name in use.  (v2.0)
+function BR_Cmd_Name (name, line, wc)
+  local n = trim (wc [1])
+  if n:lower () == "off" or n:lower () == "none" then
+    gCfg.setname = nil
+    saveAll ()
+  elseif n ~= "" then
+    gCfg.setname = n
+    saveAll ()
+  end
+  echoHi ("Own corpse is ignored for: ", tostring (myName () or "nobody known yet"),
+          gCfg.setname and "  (set by hand)" or "  (from GMCP)")
+end
+
 function BR_Cmd_Identify (name, line, wc)
   local mode = trim (wc [1]):lower ()
   if mode == "on" then gCfg.spellid = true
@@ -1158,6 +1188,7 @@ function OnPluginInstall ()
   gCfg.debug = c.debug and true or false
   gCfg.spellid = c.spellid and true or false
   if type (c.charname) == "string" and c.charname ~= "" then gCfg.charname = c.charname end
+  if type (c.setname) == "string" and c.setname ~= "" then gCfg.setname = c.setname end
   if type (c.off) == "table" then
     gCfg.off = {}
     for k, v in pairs (c.off) do if v then gCfg.off [tostring (k):lower ()] = true end end
