@@ -41,7 +41,7 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="4.7"
+   version="5.0"
 >
 </plugin>
 
@@ -145,7 +145,7 @@ DATA AND STATE
   MarketWatch_data.lua in the world folder (GetInfo(66)): the watch list
   and both bid ledgers.
 
-WATCH MODE AND BID TIERS (v4.3-4.7)
+WATCH MODE AND BID TIERS (v4.3-5.0)
   Each watch entry has a mode: "both" (default), "auc" (live auction channel
   only) or "mark" (marketplace scan + market channel only). modeAllows(w, chan)
   is the one gate; classifyRow uses chan "mkt", matchWatch takes the channel
@@ -159,6 +159,14 @@ WATCH MODE AND BID TIERS (v4.3-4.7)
   gAucOffer). A raise that fails for gold must NOT clear gAucBid (the earlier
   bid stands), which is why gLastBid carries second and prev. Tiers apply to the
   LIVE auction channel only; market bids are proxy bids at max (tier 1).
+  Market bid line (v5.0): the "Market: Bid of N gold on <item> (Level L, Num n)"
+  line is the only market feed - there is no list polling and no probe before an
+  alert (v4.8/4.9's ending-soon scan was removed).  MW_MarketBidLine matches the
+  item, and if we have no bid the lowest tier above the bid is offered (mktOffer);
+  if we do have one (gBid, with the amount in gMktAmt) a bid above it is an
+  outbid and the next tier up is offered, at the front of the pop-up queue.
+  gMktOffer / MKT_REOFFER stop the same tier being offered again within 5 minutes.
+  The click still re-reads the item with a silent lbid (clickBid) before sending.
   Too-low bids (v4.7): the MUD answers a bid that does not beat the current one
   by 50,000 or 5% with "Current bid on <item> is now N. Min bid is M."
   (MW_BidTooLow).  Within BID_FAIL_WINDOW of a bid we sent, that un-records the
@@ -236,6 +244,12 @@ WHEN EDITING
    match="^Current bid on (.+) is now ([\d,]+)\. Min bid is ([\d,]+)\.?"
    script="MW_BidTooLow">
   </trigger>
+  <!-- "Market: Bid of 1,001 gold on <item> (Level 201, Num 66719)" - someone bid -->
+  <trigger
+   enabled="y" regexp="y" keep_evaluating="y" sequence="100"
+   match="^(?:Market:\s*)?Bid of ([\d,]+) (\w+) on (.+) \(Level (\d+), Num (\d+)\)"
+   script="MW_MarketBidLine">
+  </trigger>
   <!-- "Auction: A Trivia Point Token SOLD to Madrox for 12,000,665 gold." -->
   <trigger
    enabled="y" regexp="y" keep_evaluating="y" sequence="100"
@@ -294,6 +308,7 @@ WHEN EDITING
   <alias match="^mwid (\d+)$"       enabled="y" regexp="y" ignore_case="y" script="MW_Click_ShowId"    sequence="80"></alias>
   <alias match="^mwaucid (\d+)$"    enabled="y" regexp="y" ignore_case="y" script="MW_Click_ShowAucId" sequence="80"></alias>
   <alias match="^mwbid (\d+)$"      enabled="y" regexp="y" ignore_case="y" script="MW_Click_Bid"      sequence="80"></alias>
+  <alias match="^mwbidamt (\d+) (\d+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Click_BidAmt"   sequence="80"></alias>
   <alias match="^mwbidforce (\d+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Click_BidForce" sequence="80"></alias>
   <alias match="^mwbuy (\d+)$"      enabled="y" regexp="y" ignore_case="y" script="MW_Click_Buy"      sequence="80"></alias>
 </aliases>
@@ -524,6 +539,11 @@ gAucBid = {}
 -- reload cannot make us forget it - the next tier is measured against this.
 gAucAmt = {}
 
+-- What we bid on each MARKET item.  num -> amount.  Persisted with gBid.  It is
+-- how an outbid is told from "we are the high bidder": a current bid above this
+-- means someone has passed us.
+gMktAmt = {}
+
 -- Buyout prices learned from the market channel ("This item has a buyout price
 -- of N").  That announcement is the one place a buyout is stated in a form we
 -- have actually seen, so it is remembered and reused by 'marketw' scans later.
@@ -596,10 +616,12 @@ local function saveData ()
   for num, t in pairs (gAucBid) do abid [tostring (num)] = t end
   local aamt = {}
   for num, v in pairs (gAucAmt) do aamt [tostring (num)] = v end
+  local mamt = {}
+  for num, v in pairs (gMktAmt) do mamt [tostring (num)] = v end
   local buy = {}
   for num, p in pairs (gKnownBuyout) do buy [tostring (num)] = p end
   local body = "return " .. serialize.save_simple (
-    { watch = plain, cfg = gCfg, bid = bid, aucbid = abid, aucamt = aamt, buyout = buy })
+    { watch = plain, cfg = gCfg, bid = bid, aucbid = abid, aucamt = aamt, mktamt = mamt, buyout = buy })
   local tmp = dataPath () .. ".tmp"
   local f, err = io.open (tmp, "w")
   if not f then warn ("cannot save watch list: " .. tostring (err)) return false end
@@ -641,6 +663,11 @@ local function loadData ()
   for num, when in pairs (t.bid or {}) do
     local n = tonumber (num)
     if n then gBid [n] = when end
+  end
+  gMktAmt = {}
+  for num, v in pairs (t.mktamt or {}) do
+    local n = tonumber (num)
+    if n and gBid [n] and tonumber (v) then gMktAmt [n] = tonumber (v) end
   end
   gAucBid = {}
   local now = os.time ()
@@ -1102,7 +1129,7 @@ function MW_ListCaptured (lines)
   if sawFooter then
     local pruned = 0
     for num in pairs (gBid) do
-      if not onMarket [num] then gBid [num] = nil pruned = pruned + 1 end
+      if not onMarket [num] then gBid [num] = nil gMktAmt [num] = nil pruned = pruned + 1 end
     end
     for num in pairs (gKnownBuyout) do
       if not onMarket [num] then gKnownBuyout [num] = nil pruned = pruned + 1 end
@@ -1314,6 +1341,17 @@ popupBuild = function ()
     else
       -- indent kept out of the links so only the buttons are clickable
       local segs = { { text = "  " } }
+      if p.bids then
+        -- one button per bid tier that still beats the current bid
+        for i, b in ipairs (p.bids) do
+          if i > 1 then segs [#segs + 1] = { text = "  " } end
+          segs [#segs + 1] = {
+            text = "[ BID max" .. b.tier .. " " .. commafy (b.amt) .. " ]", colour = CLR_HI,
+            code = string.format ("MW_PopupAct(%d,%q)", p.id, "bidamt:" .. intstr (b.amt)),
+            tip  = "Re-check the item, then bid " .. commafy (b.amt) }
+        end
+        segs [#segs + 1] = { text = "   " }
+      end
       if p.bid then
         segs [#segs + 1] = {
           text = "[ BID " .. ((p.tier and p.tier > 1) and ("max" .. p.tier .. " ") or "") ..
@@ -1430,7 +1468,11 @@ function MW_PopupAct (id, action)
   target.when    = os.time ()         -- restart its expiry clock
 
   local num = target.num
-  if action == "auc" then
+  local bidamt = type (action) == "string" and action:match ("^bidamt:(%d+)$")
+  if bidamt then
+    target.sentamt = tonumber (bidamt)
+    MW_Click_BidAmt (nil, nil, { tostring (num), bidamt })
+  elseif action == "auc" then
     MW_Click_AucBid (nil, nil, { tostring (num) })
   elseif action == "buy" then
     MW_Click_Buy (nil, nil, { tostring (num) })
@@ -1438,6 +1480,7 @@ function MW_PopupAct (id, action)
     -- you clicked a button that spells out the price, so the max is waived
     MW_Click_Buy (nil, nil, { tostring (num) }, true)
   else
+    target.sentamt = target.bid
     MW_Click_Bid (nil, nil, { tostring (num) })
   end
   -- redraw once we are out of the click callback, same reasoning as the
@@ -1457,8 +1500,17 @@ function MW_PopupSettle (id)
   end
   if not target or not target.pending then return end
 
-  local placed = (target.family == "auc") and gAucBid [target.num]
-                 or (target.family ~= "auc") and gBid [target.num]
+  local placed
+  if target.family == "auc" then
+    placed = gAucBid [target.num]
+  else
+    placed = gBid [target.num]
+    -- a re-bid on an item we already had a bid on: gBid was set before, so the
+    -- recorded amount is what shows this click really went through
+    if placed and target.sentamt and (gMktAmt [target.num] or 0) < target.sentamt then
+      placed = nil
+    end
+  end
 
   if placed then
     target.pending = false
@@ -1783,6 +1835,119 @@ function MW_AuctionLine (name, line, wildcards)
   ColourNote (CLR_DIM, "", "   matches " .. string.format ("%q", w.raw))
 end
 
+-- =====================================================================
+-- MARKET BID LINE  (v5.0)
+--
+--   Market: Bid of 1,001 gold on <item> (Level 201, Num 66719)
+--
+-- is printed whenever someone bids on a market item.  It names the item, its
+-- number and the new bid, which is everything needed - there is no market list
+-- read and no probe to decide anything.  It is handled the way the auction
+-- channel is:
+--   * you have not bid, and the bid is below one of your maxes: a pop-up offers
+--     the lowest max that beats it (max1; or max2 when it is already past max1,
+--     and so on);
+--   * you have bid, and a later line shows a higher bid (you were outbid) that a
+--     higher max still beats: the pop-up opens again with that max.
+-- One button at a time; nothing is ever sent without a click.  The click itself
+-- still re-reads the item with a silent lbid before bidding (see clickBid).
+-- =====================================================================
+local MKT_REOFFER = 300     -- the same max is not offered again for this long
+local gMktOffer   = {}      -- market num -> { amt = max last offered, when = os.time () }
+
+local function topTier (w)
+  local t = tierList (w)
+  return t [#t]
+end
+
+-- Put the item where the click handlers look for it, then show the offer in the
+-- pop-up (or print it, if the pop-up is off).  front = jump the queue.
+local function mktOffer (num, item, level, w, cur, amt, tier, front, headline)
+  local now = os.time ()
+  local row = gRows [num]
+  if not row then
+    row = { num = num, visible = item, truncated = false, level = level,
+            ctype = "Gold", bids = 0, announced = true, stats = { num = num } }
+    gRows [num] = row
+  end
+  row.entry, row.seen, row.bid, row.kind = w, now, cur, "sure"
+  row.stats = row.stats or { num = num }
+  row.stats.bid = cur
+  row.stats.buyout = row.stats.buyout or gKnownBuyout [num]
+
+  local mine = gBid [num] and gMktAmt [num] or nil
+  local note = "Num " .. num .. "   bid " .. commafy (cur)
+  if mine then note = "OUTBID   " .. note .. "   you bid " .. commafy (mine) end
+  note = note .. "   max" .. tier .. " " .. commafy (amt)
+  if headline then note = headline .. "   " .. note end
+
+  gMktOffer [num] = { amt = amt, when = now }
+  popupDrop ("mkt", num, nil)
+  if popupAdd { family = "mkt", num = num, name = item, front = front,
+                bids = { { amt = amt, tier = tier } }, bidkind = "bid",
+                note = note } then
+    return
+  end
+
+  echoHi (mine and "outbid on market: " or "market bid: ", item,
+          string.format ("   (Num %d, bid %s)", num, commafy (cur)))
+  ColourTell (CLR_MSG, "", "        ")
+  Hyperlink ("mwbidamt " .. num .. " " .. intstr (amt),
+             "[ BID max" .. tier .. " " .. commafy (amt) .. " ]",
+             "Re-check this item, then bid " .. commafy (amt),
+             CLR_HI, "black", 0, 1)
+  ColourTell (CLR_MSG, "", "  ")
+  Hyperlink ("mwid " .. num, "[ ID ]",
+             "Show the full item: " .. CMD_PROBE:gsub ("%$num", intstr (num)),
+             CLR_TAG, "black", 0, 1)
+  Note ("")
+end
+
+-- "Market: Bid of 1,001 gold on <item> (Level 201, Num 66719)"
+function MW_MarketBidLine (name, line, wildcards)
+  local cur      = tonumber ((tostring (wildcards [1] or ""):gsub (",", "")))
+  local currency = tostring (wildcards [2] or ""):lower ()
+  local item     = trim (tostring (wildcards [3] or ""))
+  local level    = tonumber (wildcards [4])
+  local num      = tonumber (wildcards [5])
+  if not cur or not num or item == "" or currency ~= "gold" then return end
+
+  local known = gRows [num]
+  if known then
+    known.bid = cur
+    if known.stats then known.stats.bid = cur end
+  end
+
+  if not gCfg.mkt then return end
+  local w = matchWatch (item, "mkt")
+  if not w then return end
+
+  local now = os.time ()
+  if gBid [num] then
+    -- we already have a proxy bid here: only being outbid matters
+    local mine = gMktAmt [num]
+    if not mine or cur <= mine then return end
+  end
+
+  local amt, tier = nextTier (w, cur)
+  if not amt then return end                       -- past every max you set
+  local last = gMktOffer [num]
+  if last and now - last.when < MKT_REOFFER and amt <= last.amt then return end
+
+  -- an outbid jumps the queue; a first offer waits its turn
+  mktOffer (num, item, level, w, cur, amt, tier, gBid [num] ~= nil)
+end
+
+-- Put a refused market bid back the way it was: forget it entirely when it was
+-- the first bid on the item, or restore the earlier bid when it was a raise.
+local function undoMarketBid (b)
+  if b.prevbid then
+    gBid [b.num], gMktAmt [b.num] = b.prevbid, b.prevamt
+  else
+    gBid [b.num], gMktAmt [b.num] = nil, nil
+  end
+end
+
 -- "Current bid on <item> is now 15,000,000. Min bid is 15,050,000."
 -- The bid we just sent was refused because it did not beat the current bid by
 -- enough.  Nothing was bid, so undo the record of it, then offer the lowest tier
@@ -1802,13 +1967,28 @@ function MW_BidTooLow (name, line, wildcards)
   gLastBid = nil
 
   if not b.auction then
-    -- marketplace bid refused: forget it so it is offered again
-    gBid [b.num] = nil
+    -- marketplace bid refused: undo it, then offer the lowest max that clears
+    -- the minimum (the same as for an auction)
+    undoMarketBid (b)
     saveData ()
+    local row = gRows [b.num]
+    local mw  = row and row.entry
+    local mamt, mtier
+    if mw then
+      for i, v in ipairs (tierList (mw)) do
+        if v >= minbid then mamt, mtier = v, i break end
+      end
+    end
+    if mamt then
+      mktOffer (b.num, row.visible or item, row.level, mw, cur, mamt, mtier, true,
+                "BID TOO LOW - min " .. commafy (minbid))
+      return
+    end
     popupFail ("mkt", b.num, "bid too low - current " .. commafy (cur) ..
                ", min bid " .. commafy (minbid))
     echoHi ("bid too low on item ", tostring (b.num),
-            string.format (" - current %s, min bid %s.", commafy (cur), commafy (minbid)))
+            string.format (" - current %s, min bid %s - above all your maxes.",
+                           commafy (cur), commafy (minbid)))
     return
   end
 
@@ -2109,7 +2289,7 @@ function MW_NotEnoughGold (name, line, wildcards)
     gAucBid [b.num] = nil
     gAucAmt [b.num] = nil
   else
-    gBid [b.num] = nil
+    undoMarketBid (b)
   end
   saveData ()
 
@@ -2679,6 +2859,7 @@ function MW_Cmd_Help ()
   helpLine ("marketw auc on|off|debug",     "watch the live auction channel")
   helpLine ("marketw mkt on|off",           "watch the market channel for new listings")
   helpLine ("marketw popup on|off",         "live listings pop up in a window, not the output")
+  helpLine ("(market bids)",                "a bid line for a watched item pops up the lowest max that beats it; outbid -> next max")
   helpLine ("marketw mode <n|text> <m>",    "per item: both (default), auc = auction only, mark = market only")
   helpLine ("marketw set <n> <m1> [m2 [m3]] [mode]", "redo an item's amounts / mode by its list number")
   helpLine ("marketw max2|max3 <n|text> <amt>", "extra bid tiers, offered when outbid on an auction")
@@ -2727,8 +2908,10 @@ end
 -- =====================================================================
 local function sendBid (row, amt, why)
   local cmd = CMD_BID:gsub ("%$num", intstr (row.num)):gsub ("%$amt", intstr (amt))
+  gLastBid = { num = row.num, amt = amt, auction = false, when = os.time (),
+               prevbid = gBid [row.num], prevamt = gMktAmt [row.num] }
   gBid [row.num] = os.time ()
-  gLastBid = { num = row.num, amt = amt, auction = false, when = os.time () }
+  gMktAmt [row.num] = amt
   saveData ()
   echoHi ("sending: ", cmd, why and ("   (" .. why .. ")") or "")
   Send (cmd)
@@ -2736,12 +2919,17 @@ local function sendBid (row, amt, why)
 end
 
 -- second stage: fresh stats are in, decide whether to send
-local function bidVerified (num, forced)
+local function bidVerified (num, forced, wantAmt)
   local row = gRows [num]
   if not row or not row.entry then warn ("item " .. num .. " is no longer in the last scan.") return end
   local w   = row.entry
   local st  = row.stats
-  local amt = w.max
+  local amt = wantAmt or w.max
+  if wantAmt and wantAmt > topTier (w) then
+    warn ("refused: " .. commafy (wantAmt) .. " is over your highest max " ..
+          commafy (topTier (w)) .. ".")
+    return
+  end
 
   if row.ctype ~= "Gold" then
     warn ("refused: item " .. num .. " is a " .. tostring (row.ctype) .. " auction, not gold.")
@@ -2789,7 +2977,7 @@ local function bidVerified (num, forced)
   sendBid (row, amt, st and st.name or nil)
 end
 
-local function clickBid (num, forced)
+local function clickBid (num, forced, amt)
   local row = gRows [num]
   if not row or not row.entry then
     warn ("item " .. tostring (num) .. " is not in the current scan.  Run 'marketw' again.")
@@ -2801,16 +2989,19 @@ local function clickBid (num, forced)
     return
   end
   if gBid [num] then
-    warn ("you already have a proxy bid on item " .. num .. " - nothing sent.")
-    return
+    -- outbid items may be bid on again, but only for more than we bid before
+    if not (amt and gMktAmt [num] and amt > gMktAmt [num]) then
+      warn ("you already have a proxy bid on item " .. num .. " - nothing sent.")
+      return
+    end
   end
-  if forced then bidVerified (num, true) return end
+  if forced then bidVerified (num, true, amt) return end
 
   echo ("re-checking item " .. num .. " before bidding...")
   local ok = pcall (Capture.untagged_output, probeCmd (num), true, true, true,
     function (lines)
       if gRows [num] then gRows [num].stats = parseStats (num, textsOf (lines)) end
-      bidVerified (num, false)
+      bidVerified (num, false, amt)
     end,
     false,
     function () warn ("re-check timed out - nothing sent.") end,
@@ -2831,6 +3022,7 @@ function MW_Click_ShowAucId (name, line, wildcards)
 end
 
 function MW_Click_Bid (name, line, wildcards)      clickBid (tonumber (wildcards [1]), false) end
+function MW_Click_BidAmt (name, line, wildcards)   clickBid (tonumber (wildcards [1]), false, tonumber (wildcards [2])) end
 function MW_Click_BidForce (name, line, wildcards) clickBid (tonumber (wildcards [1]), true)  end
 
 function MW_Click_Buy (name, line, wildcards, force)
