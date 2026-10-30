@@ -14,7 +14,7 @@
    purpose="Aardwolf Character Development Tracking (Rewrite of SharpTracker)"
    save_state="y"   
    requires="4.70"
-   version="2.7"
+   version="2.8"
    >
 <description trim="n">
 		<![CDATA[
@@ -36,8 +36,14 @@ THIRD PARTY PLUGIN WITH LOCAL PATCHES. This is Nokfah's DullTracker (a
   "LOCAL PATCH". If you ever take a fresh copy from upstream, search for
   that string in this file first and re apply what is listed below.
 
-  Do NOT bump version= here just because the file was edited locally;
-  the version belongs to upstream.
+  DO bump version= when you change this file. Upstream is long gone
+  and these local patches are what is actually published, so Madrox
+  Plugin Manager's update detection is the only thing version= is read
+  for now (MUSHclient itself reads it as a decimal, so keep the minor
+  single digit: 2.8, 2.9, then 3.0 - never 2.10, which reads as 2.1).
+  The exception is a comment-only change: leave the version alone then,
+  so mpm offers nobody a pointless reinstall that resets their saved
+  state. The published history is 2.1, 2.5, 2.7, 2.8 - all local.
 
 WHAT IT DOES
   Aardwolf character development tracking: campaigns, quests, global
@@ -66,8 +72,8 @@ THE LOCAL PATCHES, in the order they appear
         TIME_CAP_CP_HIGH_LEVEL 200   campaigns taken at 200 or above...
         TIME_CAP_CP_HIGH       6 min ...are capped here
         TIME_CAP_CP            5 min campaigns below that level
-        TIME_CAP_QUEST         3 min all quests, every level (matches
-                                     SnD's own cap)
+        TIME_CAP_QUEST         2 min all quests, every level (deliberately
+                                     tighter than SnD's own 3 min)
         TIME_CAP_GQ           45 min global quests; only catches a broken
                                      timer
      NOTHING STORED IS ALTERED. SnD's rows and dull's own history keep
@@ -76,6 +82,17 @@ THE LOCAL PATCHES, in the order they appear
 
      CapTime() is kept but no longer called, so a cap can be put back to
      clamping in one place if that is ever wanted.
+
+     THE QUEST CAP HAS MOVED TWICE, so do not "tidy" it back:
+       v2.4  2 min, CLAMPING (a slow quest counted AS 2 min)
+       v2.7  3 min, EXCLUDING, to match SnD's STATS_CAP_QUEST_SECONDS
+       now   2 min, EXCLUDING - a deliberate local choice, 2026-10-30
+     It is deliberately tighter than SnD's own 3 min now, so the two tools
+     disagree on quest figures BY DESIGN. SnD's cap is its own constant and
+     was left alone. Measured over roughly 15,000 completed quests, 2.0%
+     ran past 2 min and 1.0% past 3 min, so the threshold moves the average
+     by only a second or two either way - it is about which runs are
+     honest, not about moving the number.
 
      Three places implement the exclusion and all three must agree: the
      SQL capWhere clause over SnD's stored rows, the hand folded current
@@ -117,6 +134,50 @@ THE LOCAL PATCHES, in the order they appear
      stuck in the list as text and recomputing best or average will not
      touch it. This removes the newest entry and echoes what went, so
      removing the wrong one is immediately obvious.
+
+  4. CAMPAIGN AND QUEST BEST/AVG ARE PER LEVEL, AND SAY SO.
+     The [best | avg] on the quest report line now compares against your
+     quests AT THE SAME LEVEL, which is what the campaign line has always
+     done. It used to pool every quest at every level, on the reasoning
+     that a quest is a quest.
+
+     At 201 this barely moves the number, because that is where nearly the
+     whole sample sits. While levelling it is the whole point: the level
+     being played is no longer averaged in with thousands of 201 quests.
+
+     The cost is sample size on levels passed through quickly.
+     TimeStatsString already refuses to report a count below two, so a
+     thinly played level shows no figures at all rather than a best and
+     average built from one run. That is deliberate.
+
+     Checked against a long-played character's SnDdb.db before this went
+     in: every level it had quested at already held at least two kept
+     quests, so in practice nothing printed blank. On a fresh character,
+     or on levels rushed through, expect a level to show no figures until
+     it has a sample of its own.
+
+     The level is read from GMCP at the COMPLETION line, while SnD files
+     its row under the level the run was TAKEN at. Those disagree only for
+     a run you level up during, and the campaign path has carried the same
+     seam since it was written. If it ever matters, the taken level is on
+     SnD's own open row and SnDTrueStart already reads it.
+
+     If per level turns out too thin to be useful, the banded middle
+     ground is to compare within a range instead of an exact match -
+     level_taken BETWEEN level-10 AND level+10 in the same WHERE clause.
+
+     THE LEVEL IS PRINTED ON BOTH LINES:
+     "[lvl 134 best 0m 6s | avg 0m 12s]". LevelLabel builds the coloured
+     "lvl N" and WithLevelLabel prints it alone when there are no figures
+     to put beside it, so the level never disappears with them. Both the
+     campaign and quest paths go through those two helpers so the lines
+     cannot drift apart. TimeStatsString takes the label as an optional
+     fourth argument; the gq line passes nothing and is unchanged.
+
+     The label comes from the SAME GMCP read that builds the WHERE clause.
+     That matters: if the read fails, the figures silently go back to
+     pooling every level, and a line headed "lvl 134" would be a lie. No
+     level read, no label, pooled figures printed plainly.
 
 THE XPR FIGURES, which are easy to get wrong
   XPR is SECONDS PER 1000 EXP, so LOWER is faster.
@@ -2285,7 +2346,8 @@ WHEN EDITING
 	TIME_CAP_CP_HIGH_LEVEL = 200      -- campaigns taken at this level or above...
 	TIME_CAP_CP_HIGH       = 6 * 60   -- ...are capped here
 	TIME_CAP_CP            = 5 * 60   -- campaigns taken at every level below it
-	TIME_CAP_QUEST         = 3 * 60   -- all quests, every level (matches SnD's own cap)
+	TIME_CAP_QUEST         = 2 * 60   -- all quests, every level. Deliberately TIGHTER than
+	                                  -- SnD's own 3 min: see note 4 in the maintainer notes.
 	TIME_CAP_GQ            = 45 * 60  -- global quests; only catches a broken timer
 
 	local SND_TYPE_QUEST  = 1
@@ -2389,7 +2451,11 @@ WHEN EDITING
 
 	-- Folds the run just finished into the stored figures and formats " [best X | avg Y]".
 	-- Returns "" when there is nothing to compare against yet.
-	function TimeStatsString(stats, current, cap)
+	--
+	-- LOCAL PATCH: an optional already-coloured `label` is printed just inside the bracket,
+	-- so a figure scoped to something can say what it is scoped to - " [lvl 134 best ...]".
+	-- Callers that pass nothing get exactly the old format.
+	function TimeStatsString(stats, current, cap, label)
 		if (current == nil or current <= 0) then return "" end
 
 		local count, best, total = 0, nil, 0
@@ -2407,8 +2473,40 @@ WHEN EDITING
 		if (count < 2) then return "" end
 
 		local avg = math.floor((total / count) + 0.5)
-		return dispLbl(" [best ") .. SecondsToMinutes(best) ..
+
+		local lead = ""
+		if (label ~= nil and label ~= "") then lead = label .. dispLbl(" ") end
+
+		return dispLbl(" [") .. lead .. dispLbl("best ") .. SecondsToMinutes(best) ..
 		       dispLbl(" | avg ") .. SecondsToMinutes(avg) .. dispLbl("]")
+	end
+
+	-- --- LOCAL PATCH - THE LEVEL ON THE LINE ------------------------------------
+	--
+	-- Both the campaign and quest figures are scoped to one level, so both say which
+	-- level on the line: "[lvl 134 best 0m 6s | avg 0m 12s]".
+	--
+	-- These two helpers are shared by both paths ON PURPOSE. The label and the WHERE
+	-- clause have to come from the same level, or a line ends up headed with a level the
+	-- figures underneath it were not filtered to, and keeping the formatting in one place
+	-- is what stops the campaign and quest lines drifting apart.
+	--
+	-- LevelLabel returns "" for an unknown level, which is also what drops the heading, so
+	-- a failed GMCP read gives pooled figures with no level on them rather than pooled
+	-- figures wearing a level.
+	function LevelLabel(level)
+		if (level == nil) then return "" end
+		return dispLbl("lvl ") .. dispVal(level)
+	end
+
+	-- The level is wanted on the line whether or not there is anything to compare against,
+	-- so on a level with no usable sample it prints alone rather than disappearing along
+	-- with the figures. TimeStatsString returns "" in exactly that case.
+	function WithLevelLabel(reported, label)
+		if (reported == "" and label ~= nil and label ~= "") then
+			return dispLbl(" [") .. label .. dispLbl("]")
+		end
+		return reported
 	end
 
 	-- Campaigns are compared against your other campaigns AT THE SAME LEVEL, which is also
@@ -2423,13 +2521,25 @@ WHEN EDITING
 			where = " AND CAST(level_taken AS INTEGER) = " .. level
 		end
 
-		return TimeStatsString(SnDTimes(SND_TYPE_CP, timers["cp"].start, where, cap), seconds, cap)
+		local label = LevelLabel(level)
+
+		return WithLevelLabel(TimeStatsString(
+			SnDTimes(SND_TYPE_CP, timers["cp"].start, where, cap), seconds, cap, label), label)
 	end
 
-	-- Quests are compared against every quest you've finished, any level - a quest is a quest.
 	function QuestTimeStats(seconds)
-		return TimeStatsString(
-			SnDTimes(SND_TYPE_QUEST, timers["quest"].start, "", TIME_CAP_QUEST), seconds, TIME_CAP_QUEST)
+		local level = tonumber(GetGmcp("char.status.level"))
+		local where = ""
+
+		if (level ~= nil) then
+			where = " AND CAST(level_taken AS INTEGER) = " .. level
+		end
+
+		local label = LevelLabel(level)
+
+		return WithLevelLabel(TimeStatsString(
+			SnDTimes(SND_TYPE_QUEST, timers["quest"].start, where, TIME_CAP_QUEST),
+			seconds, TIME_CAP_QUEST, label), label)
 	end
 
 	-- GQs come from dull's own record, since SnD doesn't keep one. This one is added to the
