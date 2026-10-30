@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="6.5"
+   version="6.6"
    >
 </plugin>
 
@@ -58,9 +58,15 @@ COMMANDS
   from AREAS and so writes itself.
 
   mm [args]    act on whichever of those areas you are standing in
-  <area> ...   the per area name works too (gaunt, gwill, nenukon, xyl,
-               hele, prosper, infamy, sahu)
-  <area><n>    the number glued on works as well as spaced: mm1, prosper3
+  mm <area> .. name the area (mm gaunt, mm prosper 3, mm prosper sea)
+  mm<n>        the number glued on works as well as spaced: mm1
+
+  6.6: THE AREA WORDS ARE NO LONGER ALIASES OF THEIR OWN.  "mayhem",
+  "dead", "times", "dark", "vale"... are ordinary words, and the mapper
+  sends custom exits through Execute - Elemental Chaos has a "mayhem"
+  exit, so every speedwalk through it was hijacked into a walk to
+  Artificer's Mayhem.  Only mm, mmr and mmout/mmo are aliases; links
+  send "mm <area> ...", and "mmout <area>" names an area to leave.
   mm version / mm help / mm reload  work anywhere, in or out of an area
   mmout / mmo  leave the maze; per area forms exist too (gwillout,
                nenukonout, xylout, heleout, prosperout, sahuout).  Only
@@ -529,8 +535,16 @@ WHEN EDITING
 -->
 
 <aliases>
+  <!-- 6.6: ONLY mm, mmr and mmout/mmo are aliases now.  The bare area words
+       (mayhem, dead, times, dark, vale, nix, scar, prom ...) used to be
+       aliases of their own, and they are ordinary words: the mapper sends
+       custom exits through Execute, so a speedwalk crossing Elemental
+       Chaos's "mayhem" exit was swallowed here and turned into a walk to
+       Artificer's Mayhem - a mapper goto started inside a mapper goto.
+       The area words still work as "mm <area> ...", which is what every
+       clickable link now sends. -->
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|gallows|goldrush|dunoir|mm)(?:\s+(.*))?$"
+    match="^(mm)(?:\s+(.*))?$"
     script="mm_command" name="mm_command"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -540,7 +554,7 @@ WHEN EDITING
        either the end of the line or a space, so "mm1" falls through it.
        Digits only, which is what keeps this off mmo, mmout and mmr. -->
   <alias
-    match="^(gaunt|gwill|gard|nenukon|xyl|hele|prosper|infamy|sahu|dark|times|prom|nix|astral|ft1|scar|nott|dead|mayhem|vale|gallows|goldrush|dunoir|mm)(\d+)$"
+    match="^(mm)(\d+)$"
     script="mm_command" name="mm_number"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -554,7 +568,7 @@ WHEN EDITING
   </alias>
 
   <alias
-    match="^(gwillout|gardout|nenukonout|xylout|heleout|prosperout|infamyout|sahuout|deadout|gallowsout|mmout|mmo)$"
+    match="^(mmout|mmo)(?:\s+(\w+))?$"
     script="mm_out" name="mm_out"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
@@ -2720,7 +2734,7 @@ local function area_lines ()
     if #a.outs == 0 then
       tail = tail .. ", no walk-out - recall or portal"
     end
-    t[#t + 1] = "   @x048" .. a.cmd .. "@w" ..
+    t[#t + 1] = "   @x048mm " .. a.cmd .. "@w" ..
                 string.rep (" ", cw - #a.cmd + 2) .. a.label ..
                 string.rep (" ", w - #a.label + 3) .. tail
   end
@@ -2761,7 +2775,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "6.5"
+local VERSION  = "6.6"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3947,7 +3961,7 @@ function advance ()
   -- let through: those pass rooms outside the area on purpose.
   if phase ~= "goto" and phase ~= "travel" and A and not NAME[cur] then
     stop ("Not inside " .. A.label .. " - nothing to search from here. " ..
-          "Type @x048" .. A.cmd .. "@w once you are.", true)
+          "Type @x048" .. "mm " .. A.cmd .. "@w once you are.", true)
     return
   end
 
@@ -4669,7 +4683,7 @@ function after_arrival ()
     rc_warned = true
     warn ("30 rooms and not one room character list from the MUD - that " ..
           "tag looks off, and without it @x048" .. (want_show or "it") ..
-          "@w cannot be spotted. Check with @x048" .. A.cmd .. " here@w.")
+          "@w cannot be spotted. Check with @x048" .. "mm " .. A.cmd .. " here@w.")
   end
 
   -- 1. Standing in the same room as it.  This is the only thing that
@@ -4923,7 +4937,7 @@ function mm_here_timeout ()
   dump_here = false
   warn ("No room listing came back. The MUD is not sending {roomchars}, " ..
         "so nothing can spot the noscan mobs. Try @x048tags roomchars on@w " ..
-        "by hand and run @x048" .. A.cmd .. " here@w again.")
+        "by hand and run @x048" .. "mm " .. A.cmd .. " here@w again.")
 end
 
 -- A move went unanswered.  Deliberately does NOT re-send it - that walked
@@ -5281,7 +5295,7 @@ local function offer_resume ()
   flush_notes_now ()
   local a = BYKEY[paused.area]
   ColourTell (CLR_TAG, "", "[", CLR_NAME, "", "MazeMobber", CLR_TAG, "", "] ")
-  Hyperlink ((a and a.cmd or "mm") .. " resume",
+  Hyperlink ((a and ("mm " .. a.cmd) or "mm") .. " resume",
              "RESUME to " .. paused.show,
              "Pick up where the fight interrupted it", CLR_HI, "black", 0, 1)
   ColourNote (CLR_MSG, "", "  or type ", CLR_HI, "", "mmr")
@@ -5871,6 +5885,16 @@ end
 -- Ether's "inhale ether"); the rest you just walk up from.
 function mm_out (name, line, wildcards)
   local word = (wildcards[1] or ""):lower ()
+  -- "mmout <area>" names the area (6.6); bare mmout/mmo means here.
+  local named = (wildcards[2] or ""):lower ()
+  if named == "gard" then named = "gwill" end
+  if named ~= "" then
+    if not BYCMD[named] then
+      warn ("No area called @x048" .. named .. "@w - type @x048mm areas@w.")
+      return
+    end
+    word = named .. "out"
+  end
   absorb_room ()
   -- Same way round as mm: the named forms mean their own area, mmout
   -- means wherever you are standing - and that falls back to the GMCP
@@ -5994,7 +6018,7 @@ function list_rows ()
       tail = (tail ~= "" and (tail .. " - ") or "") .. m[4]
     end
     rows[#rows + 1] = { n = i, label = nm, tip = "Hunt " .. nm,
-                        cmd = A.cmd .. " " .. i, colour = CLR_MSG,
+                        cmd = "mm " .. A.cmd .. " " .. i, colour = CLR_MSG,
                         pad = 30, tail = tail }
   end
 
@@ -6026,7 +6050,7 @@ function list_rows ()
       local how = (p.how == "walk there") and "" or (p.how .. extra)
       if how ~= "" then how = how .. "  " end
       rows[#rows + 1] = { n = k, label = label, tip = "Go and " .. p.how,
-                          cmd = A.cmd .. " " .. k,
+                          cmd = "mm " .. A.cmd .. " " .. k,
                           colour = side and CLR_NAME or CLR_MSG, pad = 32,
                           tail = how .. "(" .. p.room .. ")" ..
                                  ((cur == p.room) and "  <- you are here" or "") }
@@ -6212,7 +6236,7 @@ function area_rows ()
     for _, w in ipairs ((not area_off[a.key]) and (a.ways_in or { {} }) or {}) do
       n = n + 1
       local label = w.label or a.label
-      local cmd = a.cmd .. (w.arg and (" " .. w.arg) or "")
+      local cmd = "mm " .. a.cmd .. (w.arg and (" " .. w.arg) or "")
       rows[#rows + 1] = { n = n, label = label, tip = "Go to " .. label,
                           cmd = cmd, colour = CLR_MSG, pad = 36, tail = cmd }
     end
@@ -6293,7 +6317,7 @@ local function pick (n)
     begin ("goto", p.room, nil, false)
     return
   end
-  warn ("There is no entry " .. tostring (n) .. ". Type @x048" .. A.cmd .. "@w.")
+  warn ("There is no entry " .. tostring (n) .. ". Type @x048" .. "mm " .. A.cmd .. "@w.")
 end
 
 local function show_seen ()
@@ -6391,6 +6415,22 @@ function mm_command (name, line, wildcards)
   menu_on_arrival = false
   local word = (wildcards[1] or ""):lower ()
   local arg  = (wildcards[2] or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
+
+  -- "mm <area> [args]": the area word is the first token after mm (6.6).
+  -- No area word collides with a sub command (on, off, areas, win ...).
+  do
+    local first, rest = arg:match ("^(%S+)%s*(.-)$")
+    if first then
+      first = first:lower ()
+      if first == "gard" then first = "gwill" end
+      local n = first:match ("^%a+(%d+)$") and first:match ("^(%a+)%d+$")
+      if BYCMD[first] then
+        word, arg = first, rest
+      elseif n and BYCMD[n] then          -- "mm prosper3"
+        word, arg = n, first:match ("(%d+)$")
+      end
+    end
+  end
 
   absorb_room ()
 
@@ -6545,7 +6585,7 @@ function mm_command (name, line, wildcards)
       local zn  = (type (ri) == "table") and tostring (ri.zone or "?") or "?"
       warn ("You are not standing in any maze I know - the MUD says room @x048" ..
             num .. "@w, zone @x048" .. zn .. "@w. Use @x048" ..
-            cmd_list ("@w, @x048") .. "@w by name to be taken to one.")
+            "mm " .. cmd_list ("@w, @x048mm ") .. "@w to be taken to one.")
       return
     end
   end
@@ -6575,7 +6615,7 @@ function mm_command (name, line, wildcards)
     save_map ()
     note (no_auto[A.key]
           and (A.label .. ": the list will stay quiet now - type @x048" ..
-               A.cmd .. "@w or @x048mm@w when you want it.")
+               "mm " .. A.cmd .. "@w or @x048mm@w when you want it.")
           or (A.label .. ": the list will put itself up when you walk in."))
     return
   end
@@ -6586,7 +6626,7 @@ function mm_command (name, line, wildcards)
       if NAME[cur] and A.sections[cur] == w.section then menu_chat () return end
       if NAME[cur] then
         note ("You are in the other part of " .. A.label .. " - get out with " ..
-              "@x048mmout@w first, then @x048" .. A.cmd .. " " .. w.arg .. "@w.")
+              "@x048mmout@w first, then @x048" .. "mm " .. A.cmd .. " " .. w.arg .. "@w.")
         return
       end
       menu_on_arrival = true
@@ -6667,7 +6707,7 @@ function mm_command (name, line, wildcards)
                 watching .. " still being watched, " ..
                 (function () local n = 0
                    for _, v in pairs (moved) do n = n + v end return n end) () ..
-                " proved to shuffle.   " .. A.cmd ..
+                " proved to shuffle.   " .. "mm " .. A.cmd ..
                 " forget clears them for this area.")
     return
   end
@@ -6699,7 +6739,7 @@ function mm_command (name, line, wildcards)
   end
   if arg == "wait" then
     note ("Currently waiting @x048" .. move_wait .. "@w seconds per move. " ..
-          "Change it with @x048" .. A.cmd .. " wait <seconds>@w.")
+          "Change it with @x048" .. "mm " .. A.cmd .. " wait <seconds>@w.")
     return
   end
 
@@ -6743,7 +6783,7 @@ function mm_command (name, line, wildcards)
     -- it sweeping for something that may not live here at all, and "all"
     -- threw away the room ranges that make a hunt short - both cost a lot
     -- of walking to learn nothing.  Pick from the list instead.
-    warn ("I do not know @x048" .. arg .. "@w. Type @x048" .. A.cmd ..
+    warn ("I do not know @x048" .. arg .. "@w. Type @x048" .. "mm " .. A.cmd ..
           "@w for the list and pick from it.")
   end
 end
