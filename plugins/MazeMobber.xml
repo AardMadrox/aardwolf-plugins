@@ -6,11 +6,11 @@
    author="Eric"
    id="a7d34e9105c8b26f4a01de73"
    language="Lua"
-   purpose="mm and mmout solve the mazes in Prosper, Gauntlet, Gwillimberry, Nenukon, Xylmos, Helegear"
+   purpose="mm solves the shuffling mazes in twenty-two Aardwolf areas and walks you through them"
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="6.6"
+   version="6.7"
    >
 </plugin>
 
@@ -50,16 +50,27 @@ WHAT IT DOES
     sahu     Sahuagin, four doors up to the princes 34600 to 34613
 
 COMMANDS
-  The help (mm help) teaches THREE and no more - mm, mmr, mmout/mmo.  The
-  per area words and their number and out forms all still work, and are
-  what the clickable links send, but listing them turned the help into a
-  page of synonyms.  Keep it that way when adding an area: the only help
+  THREE aliases exist and no more - mm, mmr, mmout/mmo.  Since 6.6 the per
+  area words are NOT aliases of their own: an area is NAMED, "mm gaunt" /
+  "mmout gwill", which is what every clickable link sends.  The help
+  teaches the three.  Keep it that way when adding an area: the only help
   change a new area needs is its row in area_lines (), which is generated
   from AREAS and so writes itself.
 
   mm [args]    act on whichever of those areas you are standing in
   mm <area> .. name the area (mm gaunt, mm prosper 3, mm prosper sea)
   mm<n>        the number glued on works as well as spaced: mm1
+  mm version / mm help / mm reload  work anywhere, in or out of an area
+  mmout / mmo  leave the maze you are standing in; "mmout <area>" names
+               one instead.  Only the areas with an A.outs entry can be
+               walked out of - the Gauntlet and Infamy are recalled out
+               of - and those are also the ones remind_out () speaks up
+               in once you have arrived.
+  mmr          pick a run back up after a fight or a warded door
+
+  Sub commands include a mob name to hunt, "all <mob>" to ignore the room
+  range, "here" to dump the room listing, "wait <secs>" to change the move
+  timeout, and "debug".
 
   6.6: THE AREA WORDS ARE NO LONGER ALIASES OF THEIR OWN.  "mayhem",
   "dead", "times", "dark", "vale"... are ordinary words, and the mapper
@@ -67,18 +78,14 @@ COMMANDS
   exit, so every speedwalk through it was hijacked into a walk to
   Artificer's Mayhem.  Only mm, mmr and mmout/mmo are aliases; links
   send "mm <area> ...", and "mmout <area>" names an area to leave.
-  mm version / mm help / mm reload  work anywhere, in or out of an area
-  mmout / mmo  leave the maze; per area forms exist too (gwillout,
-               nenukonout, xylout, heleout, prosperout, sahuout).  Only
-               the areas with an A.outs entry have one - the Gauntlet and
-               Infamy are recalled out of - and those are also the ones
-               remind_out () speaks up in once you have arrived.
-  mmr          pick a run back up after a fight or a warded door
-  gard/gardout are still accepted, silently, so years of muscle memory
-  keep working; gwill is the name everything PRINTS.
-  Sub commands include a mob name to hunt, "all <mob>" to ignore the room
-  range, "here" to dump the room listing, "wait <secs>" to change the move
-  timeout, and "debug".
+
+  REMOVED IN 6.6, do not put them back: the per area out forms gwillout,
+  nenukonout, xylout, heleout, prosperout, sahuout, deadout, gallowsout,
+  infamyout and gardout.  They went with the area aliases, for the same
+  reason - "mmout <area>" replaces all of them.
+
+  gard is still accepted, silently, as an AREA WORD ("mm gard"), so years
+  of muscle memory keep working; gwill is the name everything PRINTS.
 
 AREAS THAT COME IN LEVELS (Infamy, and Helegear's two halves)
 
@@ -160,7 +167,7 @@ ONE MODE, AND HOW A RUN STOPS
   you are standing in - and mm on has to work INSIDE a switched-off area,
   which is why these are handled before the area is worked out. A
   switched-off area shows no list on arrival, is left out of area_rows (),
-  and answers mm, its own word and mmout with a line saying so.
+  and answers mm, "mm <area>" and mmout with a line saying so.
 
   OUR OWN "look" IS NOT A MOVE LANDING (5.7). A noscan hunt starts with a
   look, and the MUD answers it with room GMCP too. When that GMCP landed
@@ -703,22 +710,24 @@ require "gmcphelper"
 local GMCP_ID = "3e7dedbe37e44942dd46d264"
 
 -- ===========================================================
---  MazeMobber - one engine, four areas
+--  MazeMobber - one engine, twenty-two areas
 --
---    gaunt    The Gauntlet, in Gauntlet          31686-31739
---    gwill    Botanical Gardens, in Gwillimberry 26015-26024  gwillout
---    nenukon  The Nenukon, in Nenukon            31784-31833  nenukonout
---    xyl      Rose Ether, in Xylmos              444-455      xylout
---    hele     Helegear Sea and the depths        30699-30720  heleout
---    prosper  Prosper 201, the theater maze      28252-28267  prosperout
+--    Every area is a row in AREAS, below.  The full list with each
+--    one's word and room range is in the MAINTAINER NOTES at the top of
+--    this file, and the help builds its own copy out of AREAS, so the
+--    list is never written out by hand a third time.
 --
 --    mm / mmout  whichever of those you are standing in.  Anywhere in
---    one of those five areas counts: from elsewhere in Xylmos, mm walks
---    you to the entrance of Rose Ether and puts the list up.
+--    one of the areas counts: from elsewhere in Xylmos, mm walks you to
+--    the entrance of Rose Ether and puts the list up.  An area can also
+--    be NAMED - "mm xyl", "mm prosper 3", "mmout gwill" - which is what
+--    every clickable link sends.  The per area words and their out
+--    forms are NOT aliases of their own; that went in 6.6, because the
+--    mapper sends custom exits through Execute and Elemental Chaos's
+--    "mayhem" exit was being swallowed here.
 --
 --  Every command is gated to its own area's rooms.  Each area keeps a
---  separate learned map, so one never pollutes another.  The Prosper
---  201 maze is deliberately not here - that is STTNG, on its own.
+--  separate learned map, so one never pollutes another.
 --
 --  Maze links are never hardcoded: they reshuffle on repop, so they are
 --  learned by walking and dropped the moment a known one leads somewhere
@@ -2775,7 +2784,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "6.6"
+local VERSION  = "6.7"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -6353,14 +6362,15 @@ local function show_map ()
 end
 
 local function show_help ()
-  -- Deliberately written around mm / mmr / mmout only.  Every area also
-  -- answers to its own word and its own number and out forms, but naming
-  -- them all turned the help into a list of synonyms - three commands
-  -- cover everything, so those are what this teaches.
+  -- Deliberately written around mm / mmr / mmout only - since 6.6 those
+  -- are the only aliases there are.  An area is named as an argument
+  -- instead ("mm gaunt", "mmout gwill"), which is what every clickable
+  -- link sends, so three commands really do cover everything.
   local lines = {
     "@x048mm@w            the clickable list for the area you are standing in",
+    "@x048mm <area>@w     the same for an area you name - @x048mm gaunt@w, @x048mm prosper 3@w",
     "@x048mmr@w           carry on after a fight stopped it",
-    "@x048mmout@w or @x048mmo@w  walk back out of here",
+    "@x048mmout@w or @x048mmo@w  walk back out of here (@x048mmout <area>@w names one)",
     "",
     "Pick a mob or a room off the list and it walks you @x048the whole way@w,",
     "and tells you when you get there. A fight stops it where it stands -",
@@ -6378,7 +6388,7 @@ local function show_help ()
     "mm stop          give up on the current hunt",
     "mm resume        pick a run back up after a fight stopped it",
     "mmr              the same thing, shorter",
-    "mmout @wor @x048mmo@w     walk back out of here",
+    "mmout @wor @x048mmo@w     walk back out of here (@x048mmout <area>@w names one)",
     "mm list          stop this area putting its list up on arrival",
     "mm areas         every area, click one to switch it off or on",
     "mm off / mm on   switch this area off or back on (mm off gaunt too)",
