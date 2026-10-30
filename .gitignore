@@ -8,3 +8,14 @@
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# The publishing helpers. They are for this machine only - they hold
+# local paths and are not meant to be downloaded by anyone else. A copy
+# is kept in "MUSH Plugins\publish-helpers" so losing this folder does
+# not lose them again.
+publish.cmd
+publish.ps1
+see-changes.cmd
+undo-staging.cmd
+publish-hold.txt
+PUBLISHING.md
