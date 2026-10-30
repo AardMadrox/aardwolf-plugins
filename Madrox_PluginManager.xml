@@ -34,6 +34,94 @@ Download/reload mechanics adapted from Kelaire's Self_PluginManager
 </description>
 </plugin>
 
+<!--
+MAINTAINER NOTES (added 2026-09-09)
+====================================================================
+WHAT IT DOES
+  The plugin manager (mpm) for the public plugin repo at
+  https://github.com/AardMadrox/aardwolf-plugins
+  It lists the published plugins with clickable Install, Update, Reload
+  and Remove buttons, and can update itself.
+
+COMMANDS
+  mpm              re read from GitHub and show the plugin list
+  mpm list         show the list without re reading GitHub
+  mpm info <n>     details for plugin number n
+  mpm install <n>  install plugin number n
+  mpm update <n>   download and update plugin number n
+  mpm reload <n>   reload plugin number n
+  mpm remove <n>   unload and delete plugin number n
+  mpm updateall    update everything out of date
+  mpm check        re read the list from GitHub
+  mpm selfupdate   update this manager itself
+  mpm debug        toggle debug messages
+  mpm help         help
+
+HOW IT WORKS
+  There are two URLs at the top of the script: LIST_URL points at
+  plugins.list in the repo, and SELF_RAW at this manager's own xml.
+
+  Building the list is asynchronous and two staged:
+    1. buildCache() fetches plugins.list with
+       async.doAsyncRemoteRequest. mpm_on_list splits it into URLs,
+       skipping blank lines and lines starting with a hash.
+    2. It then fires one async request per plugin xml. mpm_on_plugin runs
+       for each, pulls name, version and id out of the downloaded file
+       with parse_field, checks IsPluginInstalled(id) and reads the local
+       version with GetPluginInfo(id, 19).
+  expected and received count the outstanding requests; when they match,
+  the cache is sorted by name (so the numbering is stable) and the menu
+  renders if it was asked to.
+
+  parse_field matches a field on its own line, and the callers pass case
+  insensitive character classes so NAME, Name and name all work.
+
+  VERSION COMPARISON IS NUMERIC, and this is the single most important
+  thing to understand here. MUSHclient stores a plugin's version as a
+  decimal NUMBER, so "1.10" equals 1.1, and GetPluginInfo(id, 19) hands it
+  back numerically. ver_num strips everything but digits and dots and
+  calls tonumber, so the comparison matches what the client itself does.
+  The rule that follows from this: in a plugin's version= attribute, keep
+  the minor a SINGLE digit, and after x.9 roll over to (x+1).0. A version
+  of 1.10 will compare as OLDER than 1.9 and updates will silently stop
+  being offered.
+
+  The menu is drawn with Hyperlink() calls, so each entry and button is a
+  clickable command. The status marks are [x] up to date, [!] update
+  available, [ ] not installed.
+
+  Install writes the downloaded file to GetInfo(60) plus the filename and
+  calls LoadPlugin. Update writes over the EXISTING path from
+  GetPluginInfo(id, 6), unloading first and loading after. Remove unloads
+  then os.remove.
+
+  Self update (adapted from Crowley's code via Kelaire's
+  epic_plugin_manager) writes the new xml over this plugin's own file,
+  then schedules a ReloadPlugin one second later through the script
+  prefix, because a plugin cannot safely reload itself inline. It sets
+  script_prefix if the world has none configured.
+
+DATA AND STATE
+  save_state is "y" but nothing meaningful is persisted. The cache is
+  rebuilt from GitHub each session.
+
+WHEN EDITING
+  * The async library is required lazily through get_async(), with a
+    pcall and a clear error, because it ships with the Aardwolf client
+    package rather than MUSHclient itself.
+  * download() is the SYNCHRONOUS path used by the action commands: it
+    creates an async thread and immediately joins it. The list building
+    path is the asynchronous one. Do not mix them up.
+  * Adding a plugin to the manager means adding its raw GitHub URL to
+    plugins.list in the repo, not editing this file.
+  * Remember that an update here REINSTALLS a plugin, which loses any
+    state that plugin kept in SetVariable. That is why several plugins in
+    this collection keep their settings in their own .dat or .txt file
+    instead.
+  * Download and reload mechanics are adapted from Kelaire's
+    Self_PluginManager (epic_plugin_manager), which credits Crowley.
+-->
+
 <aliases>
   <alias
      script="mpmMain"
