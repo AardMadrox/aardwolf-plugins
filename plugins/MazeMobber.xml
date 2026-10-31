@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="6.7"
+   version="6.8"
    >
 </plugin>
 
@@ -78,6 +78,29 @@ COMMANDS
   exit, so every speedwalk through it was hijacked into a walk to
   Artificer's Mayhem.  Only mm, mmr and mmout/mmo are aliases; links
   send "mm <area> ...", and "mmout <area>" names an area to leave.
+
+  6.8: MMOUT WITH NO ROUTE.  From a seeded side branch - the Pit of
+  Monuhi is the case that found this - bfs cannot reach EITHER of the
+  Nenukon's ways out.  The Pit (31798-31801) hangs off maze room 31797,
+  the seeds reach 31797 and stop, and nothing can be seeded out of a room
+  whose links reshuffle, so the router dead-ends there.  mm_out then has
+  to walk and find a way out.  Three things it now does better:
+    * it sets off towards the way out nearest BY A.depth, not ways[1].
+      From the camps ways[1] was the entrance, six rooms the wrong way.
+    * while walking out with no route it prefers an untried exit in a
+      room that has EVER been recorded as reaching the aim.  Contradicted
+      links never reach the map, but they still remember that 31784 was
+      last seen a step west of 31785 - which in the shallow half of the
+      Nenukon is the only clue there is, depth being 1 everywhere.
+    * then a depth gradient, which only bites where the two ends differ.
+  "mm debug" prints which way out it aimed at and why.  None of this makes
+  the search unnecessary: the maze really does reshuffle, so walking out
+  of the Pit is still a hunt for a link, just a directed one.
+
+  ALSO 6.8: ward_pause () had no out_walk branch, so a warded bounce
+  during an mmout was remembered as a plain "goto" and mmr never put
+  out_walk back - which silently switched off the re-pick of the nearer
+  way out for the rest of the run.  combat_check () always had this right.
 
   REMOVED IN 6.6, do not put them back: the per area out forms gwillout,
   nenukonout, xylout, heleout, prosperout, sahuout, deadout, gallowsout,
@@ -2784,7 +2807,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "6.7"
+local VERSION  = "6.8"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -4204,6 +4227,55 @@ function advance ()
                             end)
       if hot and hot[1] then move (hot[1]) return end
     end
+    -- WALKING OUT WITH NO ROUTE: EXPLORE WHERE THE WAY OUT HAS BEEN
+    -- SEEN FROM.  Blind exploring has no idea which way is out, so from
+    -- the Pit of Monuhi it set off across the whole Nenukon.  The links
+    -- we no longer trust are still the best clue there is: a contradicted
+    -- link never reaches the map, but it does remember that the entrance
+    -- was once a step west of 31785.  So prefer an untried exit in a room
+    -- that has EVER been recorded as reaching the room we are aiming at.
+    --
+    -- Falls through to the plain nearest-untried search below, so this
+    -- can only change WHICH untried exit is picked, never whether one is.
+    -- 6.8.
+    if out_walk and leaving then
+      local goal, near = leaving.room, {}
+      for from, ds in pairs (learned[A.key] or {}) do
+        for _, e in pairs (ds) do
+          if e.to == goal then near[from] = true end
+        end
+      end
+      near[goal] = nil
+      if next (near) then
+        local p = bfs (cur, function (v)
+                              return near[v] and untried (v) ~= nil
+                            end)
+        if p and p[1] then
+          if debug_on then
+            note ("mmout: exploring towards a room the way out has been " ..
+                  "seen from.")
+          end
+          move (p[1]) return
+        end
+      end
+      -- Failing that, head the right way through the area.  Only useful
+      -- where the two ends differ in depth - the Nenukon's camps are six
+      -- deep and its entrance is one - and it does nothing in the shallow
+      -- half, where every room is depth 1.
+      if A.depth then
+        local goald, hered = A.depth[goal] or 1, A.depth[cur] or 1
+        if goald ~= hered then
+          local down = goald < hered
+          local p = bfs (cur, function (v)
+                                if untried (v) == nil then return false end
+                                local dv = A.depth[v] or 1
+                                if down then return dv < hered end
+                                return dv > hered
+                              end)
+          if p and p[1] then move (p[1]) return end
+        end
+      end
+    end
     -- Nearest room that still has an untried exit.  Weighting this by how
     -- MANY untried exits a room has was tried and measured worse: the walk
     -- discovers nothing, so distance is what actually costs.
@@ -5373,7 +5445,16 @@ end
 -- A warded door bounced us back.  Same as a fight: remember what the run
 -- was doing, stop, and say how to pick it up again.
 function ward_pause ()
-  if want_show or (xover and xover.show) then
+  -- OUT_WALK IS TESTED FIRST, and it has to be.  During an mmout `target`
+  -- is set, so the plain "goto" branch below used to catch a ward bounce
+  -- and remember it as an ordinary walk - and resuming a "goto" never
+  -- puts out_walk back.  With out_walk off, the per-arrival "re-pick the
+  -- nearer way out" in advance () stays off for the rest of the run, so
+  -- mmout quietly turned into a walk to one committed room.  6.8.
+  -- combat_check () always got this right; only the ward path did not.
+  if out_walk then
+    paused = { kind = "out", show = "the way out", area = A.key }
+  elseif want_show or (xover and xover.show) then
     paused = { kind = "hunt", show = want_show or xover.show,
                noscan = want_show and noscan_mode or (xover and xover.noscan),
                extra = wide, area = A.key }
@@ -5963,11 +6044,39 @@ function mm_out (name, line, wildcards)
     for _, o in ipairs (ways) do
       names[#names + 1] = (o.label or roomname (o.room)) .. " (" .. o.room .. ")"
     end
+    -- NO ROUTE TO ANY WAY OUT, which is normal from a seeded side
+    -- branch.  The Pit of Monuhi hangs off maze room 31797: the seeds
+    -- reach 31797 and stop, because nothing can be seeded out of a room
+    -- whose links reshuffle, so bfs dead-ends there and both of the
+    -- Nenukon's ways out look unreachable.  The only way on is to walk
+    -- and find one.
+    --
+    -- Which one to set off for used to be ways[1], the first row in the
+    -- table.  From the camps that meant walking at the entrance with the
+    -- campsite way out six rooms away.  A.depth is how far into the area
+    -- a room is, so the way out at a similar depth is the better guess
+    -- when the map cannot answer.  advance () still re-picks the moment a
+    -- real route appears, so this only decides which way to set off.
+    local aim = ways[1]
+    if A.depth then
+      local here, bestd = A.depth[cur] or 1, nil
+      for _, o in ipairs (ways) do
+        local gap = math.abs ((A.depth[o.room] or 1) - here)
+        if not bestd or gap < bestd then bestd, aim = gap, o end
+      end
+    end
     note ("Searching for a way out of " .. A.label .. " - " ..
-          table.concat (names, " or ") .. ", whichever turns up first.")
-    leaving = ways[1]
+          table.concat (names, " or ") .. ", whichever turns up first. " ..
+          "Setting off towards @x048" .. (aim.label or roomname (aim.room)) ..
+          "@w.")
+    if debug_on then
+      note ("mmout: no route to any way out from " .. cur .. " (depth " ..
+            tostring (A.depth and A.depth[cur]) .. ") - aiming at " ..
+            aim.room .. ".")
+    end
+    leaving = aim
     out_walk = true
-    begin ("goto", ways[1].room, nil, false)
+    begin ("goto", aim.room, nil, false)
     return
   end
 
