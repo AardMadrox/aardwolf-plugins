@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="6.8"
+   version="6.9"
    >
 </plugin>
 
@@ -78,6 +78,32 @@ COMMANDS
   exit, so every speedwalk through it was hijacked into a walk to
   Artificer's Mayhem.  Only mm, mmr and mmout/mmo are aliases; links
   send "mm <area> ...", and "mmout <area>" names an area to leave.
+
+  6.9: A REFUSED MOVE IS NOT A WALL FOR EVER.  mm_blocked () marks an
+  exit that would not let us through with walked["!<room>,<dir>"], and
+  nothing ever cleared that marker: not reopen_crossed (), not the map
+  wipe, not stall_reset ().  One refusal killed the exit for the rest of
+  the run.  In the fixed mazes that is right.  In Rose Ether it is not:
+  the gas "is at some points impassable" and the impassable points move,
+  so east out of 454 refusing now says nothing about east in a minute.
+  Three refusals left 454 with only west and 448 with only east, each
+  pointing at the other; untried () went nil everywhere, bfs could reach
+  nothing else, and mmout bounced between the two through thirty four map
+  wipes before stopping.  reopen_crossed () now clears the markers and
+  puts the exits back - only ones A.exitdirs says the room can have - so
+  each wipe cycle gets one fresh try at every refused exit.  That is the
+  right answer in a maze whose walls move: keep retrying, bounded by
+  MAXSTEPS, rather than declare the area solved and stop.
+  It also no longer un-crosses the area's own ways out.  Those are zeroed
+  by seed () on purpose and untried () refuses them regardless, so they
+  only inflated the count - in Rose Ether they were the ONLY zeroes in
+  the map, which is why the message read "the 2 exits I had crossed off"
+  every single time while reopening nothing walkable.
+
+  ROSE ETHER's "inhale ether" way out (room 450 -> 424, An Ethereal
+  Dream) has been in A.outs and A.places since 1.9 and is right: checked
+  against the mapper, 450 is the only room with that exit.  mmout offers
+  all three ways out.  It never got that far because of the bug above.
 
   6.8: MMOUT WITH NO ROUTE.  From a seeded side branch - the Pit of
   Monuhi is the case that found this - bfs cannot reach EITHER of the
@@ -2807,7 +2833,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "6.8"
+local VERSION  = "6.9"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3775,7 +3801,49 @@ local function reopen_crossed ()
   local n = 0
   for from, t in pairs (edges) do
     for _, d in ipairs (DIRS) do
-      if t[d] == 0 or t[d] == -1 then t[d] = nil; n = n + 1 end
+      -- A way out of the area is crossed off on purpose, by seed (), and
+      -- untried () refuses it whatever this does - so un-crossing it only
+      -- inflated the count.  In Rose Ether those two leaves were the ONLY
+      -- zeroes in the map, so "re-trying the 2 exits I had crossed off"
+      -- came out every time and reopened nothing that could be walked.
+      if (t[d] == 0 or t[d] == -1)
+         and not (leaves_of[from] and leaves_of[from][d]) then
+        t[d] = nil
+        n = n + 1
+      end
+    end
+  end
+  -- AND THE REFUSED MOVES, which until 6.9 this did not touch at all.
+  -- mm_blocked () crosses an exit off three ways: edges[from][dir] = -1,
+  -- cleared by the loop above; exits[from][dir] = nil, which the next map
+  -- wipe puts back out of A.exitdirs; and walked["!from,dir"], which
+  -- NOTHING ever cleared - not this, not the wipe, not stall_reset ().
+  -- So one refused move killed that exit for the whole run, here of all
+  -- places, where the entire job is to try the crossed off ones again.
+  --
+  -- Rose Ether is the case that found it.  The gas there "is at some
+  -- points impassable" and which points move, so east out of 454 being
+  -- refused now says nothing about east in a minute.  Three refusals left
+  -- 454 with west and 448 with east, pointing at each other: untried ()
+  -- went nil everywhere, bfs could reach nothing else, and mmout bounced
+  -- 448-454-448 through thirty four map wipes before giving up.
+  --
+  -- Only an exit the area's own table says the room can have is put back,
+  -- so a direction tried off a stale guess is not invented into a room
+  -- that never had it.  Clearing fields of walked while walking it is
+  -- fine; no key is added.
+  for k in pairs (walked) do
+    local from, d = tostring (k):match ("^!(%d+),(%a+)$")
+    if from then
+      walked[k] = nil
+      from = tonumber (from)
+      for _, have in ipairs ((A and A.exitdirs[from]) or {}) do
+        if have == d then
+          exits[from] = exits[from] or {}
+          exits[from][d] = true
+          n = n + 1
+        end
+      end
     end
   end
   return n
