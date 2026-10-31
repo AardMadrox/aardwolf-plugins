@@ -43,6 +43,7 @@
                         to the logged-in character
     rankdebug         - show which column was used as the "total" for each
                         category in the last scan
+    rankhelp          - the full command list in colour (also ranktrackerhelp)
 
   Speed: all category commands are sent at once and the replies are split up by
   their "Aardwolf ... rankings by X." header, so the whole scan costs about one
@@ -59,9 +60,57 @@
    save_state="y"
    date_written="2026-10-17"
    requires="4.00"
-   version="1.3"
+   version="1.4"
    >
 </plugin>
+
+<!--
+  MAINTAINER NOTES (added 2026-10-30)
+
+  WHAT IT DOES
+    Looks a player up in Aardwolf's yearly / monthly / weekly / daily top 100
+    ranking tables. Three shapes of output: a full scan of the eight scanned
+    categories, one category with the neighbours around the player, and the
+    top 10 of one category. Each can be echoed locally or sent as a single
+    coloured line to a channel.
+
+  COMMANDS
+    yrank mrank drank wrank          full scan, local echo
+    <period>rank <chan> [name]       full scan, one line to a channel
+    yrt mrt drt wrt <n> [chan [nm]]  one category, 2 above / player / 2 below
+    tyrt tmrt tdrt twrt <n> [chan]   top 10 of one category
+    rankname [name]                  default name override, blank resets
+    rankdebug                        which column was read as each total
+    rankhelp / ranktrackerhelp       the help screen
+
+  HOW IT WORKS
+    All CATS commands are sent at once; the replies are split apart by their
+    "Aardwolf ... rankings by X." header line, so a whole scan costs about one
+    round trip plus QUIET seconds of silence to know it finished. The scan
+    trigger group is enabled only while a scan runs, and gags the long lists.
+    pick_col() decides which table column holds the ranked value: a known stat
+    name first, then a column named in the category title, then the last
+    column as a fallback. It deliberately returns nil (shown as "?") rather
+    than guess a wrong number when a known stat's column is absent.
+
+  DATA AND STATE
+    Variables only: charname (rankname override) and selfname (learned from
+    GMCP char.base). No data file. lastscan is kept in memory for rankdebug
+    and does not survive a reload.
+
+  WHEN EDITING
+    A channel argument is passed to Execute as a command prefix, so it must be
+    a real channel command. The rt aliases accept one word, the top 10 aliases
+    accept two so that "tell Bob" works. The alias regexes require the channel
+    argument to start with a letter on purpose: that is what lets a numeric
+    game form such as "yrank 18" fall through to the MUD untouched. Clan tags
+    in CLANTAGS are all three visible characters wide so the columns line up;
+    keep that width if you add one. Help screen colours follow the house
+    style: @x099 rule, @x045 name, @x048 commands, @w body. The load banner
+    prints the VERSION constant at the top of the script, not GetPluginInfo:
+    the package documents the version field as both 18 (ppi.lua) and 19
+    (show_loaded.lua), so bump VERSION and version= together instead.
+-->
 
 <!--  Aliases  -->
 <aliases>
@@ -119,6 +168,15 @@
    regexp="y"
    script="alias_debug"
    sequence="100"
+  ></alias>
+
+  <alias
+   match="^rank(?:tracker)?help$"
+   enabled="y"
+   regexp="y"
+   script="alias_help"
+   sequence="100"
+   ignore_case="y"
   ></alias>
 
 </aliases>
@@ -189,6 +247,7 @@ local PERIODS = {
 -- short "rt" aliases -> the matching rank command
 local RT = { yrt = "yrank", mrt = "mrank", drt = "drank", wrt = "wrank" }
 
+local VERSION  = "1.4"   -- keep in step with version= in the plugin tag above
 local TOP_N = 100
 local CATS  = { 1, 2, 3, 4, 5, 6, 16, 18 }   -- categories to scan
 local QUIET = 1.0                            -- seconds of silence = scan finished
@@ -623,8 +682,54 @@ function alias_debug(name, line, w)
   end
 end
 
+function alias_help(name, line, w)
+  local who = myname()
+  cnote("@x099===== @x045RankTracker@x099 =====@w  @D(this help: @Wrankhelp@D)@w")
+  cnote("  @wFinds you, or anyone, in Aardwolf's yearly, monthly, weekly and")
+  cnote("  @wdaily top " .. TOP_N .. " rankings. Looking up: @x048" .. who ..
+        "@w  @D(rankname to change)@w")
+  cnote("")
+  cnote("@x048Full scan@w, every category you place in:")
+  cnote("  @x048yrank@x099 / @x048mrank@x099 / @x048wrank@x099 / @x048drank@w   yearly, monthly, weekly, daily")
+  cnote("  @x048drank <channel>@w                 one coloured line to that channel")
+  cnote("  @x048drank <channel> <name>@w          someone else, to that channel")
+  cnote("  @x048drank - <name>@w                  someone else, echoed only to you")
+  cnote("")
+  cnote("@x048One category@w, you with 2 people above and 2 below:")
+  cnote("  @x048drt <n>@w                         echoed to you")
+  cnote("  @x048wrt 18 spo@w                      weekly category 18, one line to spo")
+  cnote("  @x048drt 16 spo Ultimate@w             Ultimate and his neighbours, to spo")
+  cnote("  @x048drt 16 - Ultimate@w               same, echoed only to you")
+  cnote("  @D(yrt / mrt / wrt / drt for yearly / monthly / weekly / daily)@w")
+  cnote("")
+  cnote("@x048Top 10@w of one category, no name needed:")
+  cnote("  @x048tdrt <n>@w                        echoed to you")
+  cnote("  @x048tdrt 16 spo@w                     one coloured line to spo")
+  cnote("  @x048tdrt 16 tell Bob@w                sent to Bob as a tell")
+  cnote("  @D(tyrt / tmrt / twrt / tdrt for yearly / monthly / weekly / daily)@w")
+  cnote("")
+  cnote("@x048Settings@w:")
+  cnote("  @x048rankname <name>@w                 look that player up by default")
+  cnote("  @x048rankname@w                        back to your logged in character")
+  cnote("  @x048rankdebug@w                       which column was read as the total")
+  cnote("  @x048rankhelp@w                        this screen")
+  cnote("")
+  cnote("@x048Notes@w:")
+  cnote("  @wThe full scan covers categories @x048" .. table.concat(CATS, " ") ..
+        "@w. The drt and tdrt")
+  cnote("  @wcommands send whatever number you give straight to the game, so")
+  cnote("  @wother categories work there too.")
+  cnote("  @wClan tags show on the drt and tdrt lists, not on the full scan.")
+  cnote("  @wA channel is one word (@x048spo@x099, @x048clan@x099, @x048gratz@w). Only the top 10")
+  cnote("  @wcommands take two, so that @x048tdrt 16 tell Bob@w works.")
+  cnote("  @wThe game's own numeric forms still pass through untouched:")
+  cnote("  @x048yrank 18@w gives you the MUD's full list.")
+end
+
 function OnPluginInstall()
   EnableTriggerGroup("scan", false)
+  cnote("@x045[@x099RankTracker@x045]@W v" .. VERSION ..
+        " loaded. @x048rankhelp@W for the command list.")
   -- installed mid-session: ask the game for char.base so we learn the character name
   if (GetVariable("selfname") or "") == "" and IsConnected() then
     SendPkt(string.char(255, 250, 201) .. "request char" .. string.char(255, 240))
