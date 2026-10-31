@@ -60,7 +60,7 @@
    save_state="y"
    date_written="2026-10-17"
    requires="4.00"
-   version="1.4"
+   version="1.5"
    >
 </plugin>
 
@@ -106,7 +106,14 @@
     game form such as "yrank 18" fall through to the MUD untouched. Clan tags
     in CLANTAGS are all three visible characters wide so the columns line up;
     keep that width if you add one. Help screen colours follow the house
-    style: @x099 rule, @x045 name, @x048 commands, @w body. The load banner
+    style: @x099 rule, @x045 name, @x048 commands, @w body. Rank numbers are
+    @x099 in every report, NOT @x048: a channel line joins its entries with
+    "@W, " only, so a green total ran straight into the next entry's green
+    rank with just the comma between them. Totals stay @x048, plain names
+    @W, and the looked up player's own row @x045 (the standard name colour).
+    Nothing adjacent may share a colour: a name was @x099 too, so a clanless
+    player with no tag to separate them ran "#6 Zyne" together in one purple.
+    The load banner
     prints the VERSION constant at the top of the script, not GetPluginInfo:
     the package documents the version field as both 18 (ppi.lua) and 19
     (show_loaded.lua), so bump VERSION and version= together instead.
@@ -247,7 +254,7 @@ local PERIODS = {
 -- short "rt" aliases -> the matching rank command
 local RT = { yrt = "yrank", mrt = "mrank", drt = "drank", wrt = "wrank" }
 
-local VERSION  = "1.4"   -- keep in step with version= in the plugin tag above
+local VERSION  = "1.5"   -- keep in step with version= in the plugin tag above
 local TOP_N = 100
 local CATS  = { 1, 2, 3, 4, 5, 6, 16, 18 }   -- categories to scan
 local QUIET = 1.0                            -- seconds of silence = scan finished
@@ -474,7 +481,7 @@ local function report(s)
   if s.chan then
     local parts = {}
     for _, h in ipairs(s.hits) do
-      parts[#parts + 1] = string.format("@x045%s @x048#%d@W: @x099%s @x048%s",
+      parts[#parts + 1] = string.format("@x045%s @x099#%d@W: @W%s @x048%s",
                            shorten(h.cat), h.rank, h.who or s.target, h.total or "?")
     end
     Execute(s.chan .. " @x099" .. p.label .. "@W - " .. table.concat(parts, "@W, ") .. "@w")
@@ -482,8 +489,8 @@ local function report(s)
     cnote("@x045[@x099" .. p.label .. " Ranks@x045] @x099" .. s.target ..
           "@W - top " .. TOP_N .. " appearances: @x048" .. #s.hits)
     for _, h in ipairs(s.hits) do
-      cnote("  @x045" .. shorten(h.cat) .. "@W: @x099" .. (h.who or s.target) ..
-            " @x048#" .. h.rank .. " @W- @x048" .. (h.total or "?"))
+      cnote("  @x045" .. shorten(h.cat) .. "@W: @W" .. (h.who or s.target) ..
+            " @x099#" .. h.rank .. " @W- @x048" .. (h.total or "?"))
     end
   end
 end
@@ -511,9 +518,9 @@ local function report_rt(s)
     for r = first, first + 4 do
       local row = c.rows[r]
       if row then
-        local nm = (r == c.rank) and "@x099" or "@W"
+        local nm = (r == c.rank) and "@x045" or "@W"
         local tag = clan_tag(row.clan, "")
-        parts[#parts + 1] = string.format("@x048#%d %s%s%s @x048%s",
+        parts[#parts + 1] = string.format("@x099#%d %s%s%s @x048%s",
                              r, (tag ~= "" and (tag .. " ") or ""), nm, row.who, row_total(c, row))
       end
     end
@@ -524,8 +531,8 @@ local function report_rt(s)
     for r = first, first + 4 do
       local row = c.rows[r]
       if row then
-        local nm = (r == c.rank) and "@x099" or "@W"
-        cnote(string.format("  @x048#%-4d %s %s%-14s @x048%s",
+        local nm = (r == c.rank) and "@x045" or "@W"
+        cnote(string.format("  @x099#%-4d %s %s%-14s @x048%s",
                             r, clan_tag(row.clan, "   "), nm, row.who, row_total(c, row)))
       end
     end
@@ -548,7 +555,7 @@ local function report_top(s)
       local row = c.rows[r]
       if row then
         local tag = clan_tag(row.clan, "")
-        parts[#parts + 1] = string.format("@x048#%d %s@x099%s @x048%s",
+        parts[#parts + 1] = string.format("@x099#%d %s@W%s @x048%s",
                              r, (tag ~= "" and (tag .. " ") or ""), row.who, row_total(c, row))
       end
     end
@@ -559,7 +566,7 @@ local function report_top(s)
     for r = 1, 10 do
       local row = c.rows[r]
       if row then
-        cnote(string.format("  @x048#%-3d %s @x099%-14s @x048%s",
+        cnote(string.format("  @x099#%-3d %s @W%-14s @x048%s",
                             r, clan_tag(row.clan, "   "), row.who, row_total(c, row)))
       end
     end
@@ -678,7 +685,7 @@ function alias_debug(name, line, w)
     local colname = c.cols[c.colidx or 0] or "?"
     cnote("  @x045" .. c.cat .. "@W  columns: @x099" .. table.concat(c.cols, ", ") ..
           "@W  total from: @x048" .. colname ..
-          "@W  rank: @x048" .. (c.rank and ("#" .. c.rank) or "-"))
+          "@W  rank: @x099" .. (c.rank and ("#" .. c.rank) or "-"))
   end
 end
 
