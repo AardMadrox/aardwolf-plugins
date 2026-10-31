@@ -42,7 +42,7 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="5.1"
+   version="5.2"
 >
 </plugin>
 
@@ -213,6 +213,38 @@ LAST CHANCE (v5.1)
   "marketw lc debug on" enables mw_lc_debug, which echoes any Market:/Auction:
   line mentioning minutes - for if the wording above ever changes.
 
+MARKET BID LINES - BOTH WORDINGS (v5.2)
+  The market channel words a bid two ways, and until v5.2 only the first was
+  handled, so a rival proxy bid passing ours went completely unnoticed:
+
+    Market: Bid of 1,050,000 gold on <item> (Level 199, Num 66801)
+    Market: Madrox has bid 1,001 gold on <item> (Level 201, Num 66856).
+    Market: Madrox has proxy bid 4,080,085 gold on <item> (Level 201, Num 66856).
+    Market: Akira has proxy bid 4,284,089 gold on <item> (Level 201, Num 66856).
+
+  A proxy bid sent with "lbid <num> <amt> proxy confirm" produces the PAIR of
+  "has bid" / "has proxy bid" lines: the first is the visible price the board
+  now shows, the second is the bidder's CEILING.  So a rival "has proxy bid"
+  line states the figure our next bid has to beat, which is what nextTier
+  wants - do not mistake it for the current price.
+
+  Both forms now funnel into mktBidSeen (num, item, level, cur, currency,
+  proxy, mine), which is the only place that decides anything:
+    * mine: MW_MarketProxyBidLine compares the bidder against gmcp_name.  The
+      printed name can carry a pretitle ([[pretitles-break-name-matching]]), so
+      it looks for our name as a WORD inside the bidder text - padded with
+      spaces, so "Madroxia" is not read as "Madrox".  Our own line never
+      offers (otherwise we would bid against our own standing proxy); if we
+      already have a bid recorded, our own proxy line updates gMktAmt, since
+      the channel's figure is better evidence than what we think we sent.
+    * num < 1000 is rejected.  Market numbers are five digits and live auction
+      numbers are two, in a separate space - the "(.+?) has ... bid" shape is
+      loose enough that this guard matters.
+    * outbid with NOTHING left to raise with now echoes one line instead of
+      going silent, which used to look exactly like having won the item.
+    * an outbid by a proxy gets the headline "PASSED BY A PROXY BID".
+  The bidder is captured lazily, "(.+?) has (proxy )?bid", for the pretitle.
+
 WHEN EDITING
   * keep_evaluating is essential on the channel triggers. MUSHclient stops
     the trigger chain on the first match, and the soundpack and channel
@@ -305,6 +337,23 @@ WHEN EDITING
    enabled="y" regexp="y" keep_evaluating="y" sequence="100"
    match="^(?:Auction:\s*)?(\S+) has placed a bid for ([\d,]+) gold on (.+) \(Level \d+, Num (\d+)\)"
    script="MW_AuctionBidLine">
+  </trigger>
+  <!-- "Market: Akira has proxy bid 4,284,089 gold on <item> (Level 201, Num 66856)."
+       VERIFIED 2026-10-31.  The market channel words a bid TWO ways and this is
+       the one that was never handled, which is why an outbid went unnoticed.
+       A proxy bid sent with "lbid <num> <amt> proxy confirm" produces a pair:
+
+         Market: Madrox has bid 1,001 gold on <item> (Level 201, Num 66856).
+         Market: Madrox has proxy bid 4,080,085 gold on <item> (Level 201, Num 66856).
+
+       the first the visible price, the second the bidder's CEILING.  So a rival
+       "has proxy bid" line states the figure a bid of ours has to beat, which
+       is exactly what nextTier needs.  The bidder is captured lazily because a
+       pretitle can precede the name. -->
+  <trigger
+   enabled="y" regexp="y" keep_evaluating="y" sequence="100"
+   match="^(?:Market:\s*)?(.+?) has (proxy )?bid ([\d,]+) (\w+) on (.+) \(Level (\d+), Num (\d+)\)"
+   script="MW_MarketProxyBidLine">
   </trigger>
   <!-- "Market: Less than 15 minutes remaining on this item"
        VERIFIED 2026-10-31, and it names NO item - "this item" is the one in
@@ -1988,13 +2037,19 @@ local function mktOffer (num, item, level, w, cur, amt, tier, front, headline)
 end
 
 -- "Market: Bid of 1,001 gold on <item> (Level 201, Num 66719)"
-function MW_MarketBidLine (name, line, wildcards)
-  local cur      = tonumber ((tostring (wildcards [1] or ""):gsub (",", "")))
-  local currency = tostring (wildcards [2] or ""):lower ()
-  local item     = trim (tostring (wildcards [3] or ""))
-  local level    = tonumber (wildcards [4])
-  local num      = tonumber (wildcards [5])
-  if not cur or not num or item == "" or currency ~= "gold" then return end
+-- One bid on a market item, however the channel worded it (v5.2).  Both line
+-- forms land here so there is a single place that decides anything:
+--   proxy = the amount is that bidder's CEILING, which is the figure a bid of
+--           ours has to beat - not the visible current price.
+--   mine  = the line is our OWN bid, so it can never be an outbid.  Without
+--           this, our own "has proxy bid" line would be read as a rival and
+--           the plugin would offer a tier above our own standing bid.
+local function mktBidSeen (num, item, level, cur, currency, proxy, mine)
+  if not cur or not num or not item or item == "" then return end
+  if currency and currency ~= "" and currency ~= "gold" then return end
+  -- Market numbers are five digits; live auction numbers are two and are a
+  -- separate space entirely.  Never let one in through the market path.
+  if num < 1000 then return end
 
   local known = gRows [num]
   if known then
@@ -2006,24 +2061,90 @@ function MW_MarketBidLine (name, line, wildcards)
   -- watch list or the mode gate below make of this item.
   rememberMktLine (num, item, level, cur, "Gold")
 
+  if mine then
+    -- Keep what we know of our own bid up to date - the channel states our
+    -- ceiling, which is better evidence than what we think we sent - but
+    -- never offer against ourselves.
+    if proxy and gBid [num] then
+      local have = gMktAmt [num]
+      if not have or cur > have then
+        gMktAmt [num] = cur
+        saveData ()
+      end
+    end
+    dbg ("market bid line is our own (" .. commafy (cur) .. ") - no offer")
+    return
+  end
+
   if not gCfg.mkt then return end
   local w = matchWatch (item, "mkt")
   if not w then return end
 
-  local now = os.time ()
+  local now    = os.time ()
+  local outbid = false
   if gBid [num] then
     -- we already have a proxy bid here: only being outbid matters
-    local mine = gMktAmt [num]
-    if not mine or cur <= mine then return end
+    local amtmine = gMktAmt [num]
+    if not amtmine or cur <= amtmine then return end
+    outbid = true
   end
 
   local amt, tier = nextTier (w, cur)
-  if not amt then return end                       -- past every max you set
   local last = gMktOffer [num]
+
+  if not amt then
+    -- Passed with nothing left to raise with.  Say so once rather than going
+    -- silent, which looks exactly like having won it.
+    if outbid and not (last and now - last.when < MKT_REOFFER) then
+      gMktOffer [num] = { amt = cur, when = now }
+      echoHi ("outbid on ", item,
+              string.format ("   (Num %d, now %s) - that is past every max you set.",
+                             num, commafy (cur)))
+    end
+    return
+  end
+
   if last and now - last.when < MKT_REOFFER and amt <= last.amt then return end
 
+  -- A rival proxy is worth naming: the figure to beat is their ceiling, not
+  -- the price on the board.
+  local head = (outbid and proxy) and "PASSED BY A PROXY BID" or nil
+
   -- an outbid jumps the queue; a first offer waits its turn
-  mktOffer (num, item, level, w, cur, amt, tier, gBid [num] ~= nil)
+  mktOffer (num, item, level, w, cur, amt, tier, outbid, head)
+end
+
+-- "Market: Bid of 1,050,000 gold on <item> (Level 201, Num 66719)"
+function MW_MarketBidLine (name, line, wildcards)
+  mktBidSeen (tonumber (wildcards [5]),
+              trim (tostring (wildcards [3] or "")),
+              tonumber (wildcards [4]),
+              tonumber ((tostring (wildcards [1] or ""):gsub (",", ""))),
+              tostring (wildcards [2] or ""):lower (),
+              false, false)
+end
+
+-- "Market: Akira has proxy bid 4,284,089 gold on <item> (Level 201, Num 66856)."
+-- and the plain "<name> has bid N gold on <item> (...)" that precedes it.
+function MW_MarketProxyBidLine (name, line, wildcards)
+  local bidder = trim (tostring (wildcards [1] or ""))
+  local proxy  = trim (tostring (wildcards [2] or "")) ~= ""
+
+  -- Is this our own bid?  The name as printed can carry a pretitle, so look
+  -- for our own name as a WORD inside the bidder text rather than comparing
+  -- the whole thing - and as a word, so "Madroxia" is not read as "Madrox".
+  local mine = false
+  if gmcp_name and gmcp_name ~= "" then
+    mine = (" " .. norm (bidder) .. " "):find (" " .. norm (gmcp_name) .. " ",
+                                               1, true) ~= nil
+  end
+
+  mktBidSeen (tonumber (wildcards [7]),
+              trim (tostring (wildcards [5] or "")),
+              tonumber (wildcards [6]),
+              tonumber ((tostring (wildcards [3] or ""):gsub (",", ""))),
+              tostring (wildcards [4] or ""):lower (),
+              proxy, mine)
 end
 
 -- =====================================================================
