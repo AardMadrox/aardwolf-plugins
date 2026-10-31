@@ -16,6 +16,7 @@
        marketw                        scan the market now
        marketw list                   show your watch list
        marketw bids                   what you already have a bid on
+       marketw lc on|off              last chance when an item has minutes left
        marketw auc debug              DEBUG: echo every Auction:/Market: line
        marketw probe <num>            DEBUG: dump the raw 'lbid <num>' box
 
@@ -41,7 +42,7 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="5.0"
+   version="5.1"
 >
 </plugin>
 
@@ -176,6 +177,42 @@ WATCH MODE AND BID TIERS (v4.3-5.0)
   auctioning line with a higher "Current bid is N". What we bid on each auction
   is gAucAmt[num], saved to the data file with gAucBid so a reload keeps it.
 
+LAST CHANCE (v5.1)
+  The market channel warns that an item is nearly over.  VERIFIED wording,
+  2026-10-31 - and note it names NO item:
+
+    Market: Bid of 1,050,000 gold on (Sparkling) a pair of boots skinned from
+            a Diamond initiate (Level 199, Num 66801)
+    Market: Less than 15 minutes remaining on this item
+
+  "this item" is the one in the line IMMEDIATELY ABOVE.  So the trigger
+  ("^(?:Market:\s*)?Less than (\d+) minutes? remaining") carries only the
+  minute count, and MW_LastChanceLine takes the item from gLastMkt.
+
+  gLastMkt is set by rememberMktLine, called from BOTH MW_MarketBidLine and
+  MW_MarketLine *before* those functions consult the watch list or the mode
+  gate.  THAT ORDERING IS THE WHOLE TRICK: the line above is very often one
+  the plugin otherwise says nothing about (wrong mode, not watched, already
+  bid), and if the recorder sat after those early returns the warning would
+  have nothing to attach to.  Do not move it.  LC_LINK (10s) is how stale the
+  remembered line may be before a warning is no longer treated as its own.
+
+  lcMatchName is matchWatch WITHOUT the modeAllows gate - the point of the
+  feature.  "mode auc" means "do not nag me on the marketplace day to day",
+  not "let it close for less than I would have paid".
+  The offer then goes through the ordinary mktOffer at the FRONT of the pop-up
+  queue, headed "LAST CHANCE   under N min left".  An item we already hold a
+  proxy bid on is skipped unless the price has passed that bid (then the next
+  tier up).  gCfg.lcwindow (default 20) caps how large a warning counts;
+  gLC.offer / LC_REOFFER (600s) stop the same tier being offered twice.
+
+  Nothing is polled and the market list is never read for this.  An earlier
+  attempt swept "market list" on a timer and read its time-left column; that
+  was wrong, was thrown away, and must not come back.
+
+  "marketw lc debug on" enables mw_lc_debug, which echoes any Market:/Auction:
+  line mentioning minutes - for if the wording above ever changes.
+
 WHEN EDITING
   * keep_evaluating is essential on the channel triggers. MUSHclient stops
     the trigger chain on the first match, and the soundpack and channel
@@ -269,6 +306,27 @@ WHEN EDITING
    match="^(?:Auction:\s*)?(\S+) has placed a bid for ([\d,]+) gold on (.+) \(Level \d+, Num (\d+)\)"
    script="MW_AuctionBidLine">
   </trigger>
+  <!-- "Market: Less than 15 minutes remaining on this item"
+       VERIFIED 2026-10-31, and it names NO item - "this item" is the one in
+       the line immediately above:
+         Market: Bid of 1,050,000 gold on (Sparkling) a pair of boots skinned
+                 from a Diamond initiate (Level 199, Num 66801)
+         Market: Less than 15 minutes remaining on this item
+       So MW_LastChanceLine reads gLastMkt (set by the two handlers that parse
+       those lines) instead of trying to parse this one. -->
+  <trigger
+   enabled="y" regexp="y" keep_evaluating="y" sequence="100"
+   match="^(?:Market:\s*)?Less than (\d+) minutes? remaining"
+   script="MW_LastChanceLine">
+  </trigger>
+  <!-- diagnostic: "marketw lc debug on" echoes any Market:/Auction: line that
+       mentions minutes, in case the wording above ever changes. -->
+  <trigger
+   enabled="n" regexp="y" keep_evaluating="y" sequence="99"
+   name="mw_lc_debug"
+   match="^(?:Market|Auction):.*\d+ ?min"
+   script="MW_LastChanceDebug">
+  </trigger>
   <!-- diagnostic only: "marketw auc debug" turns this on to capture line variants -->
   <trigger
    enabled="n" regexp="y" keep_evaluating="y" sequence="99"
@@ -296,6 +354,7 @@ WHEN EDITING
   <alias match="^(?:marketw|marketwatch) bids$"         enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Bids"   sequence="88"></alias>
   <alias match="^(?:marketw|marketwatch) auc ?(.*)$"    enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Auc"    sequence="85"></alias>
   <alias match="^(?:marketw|marketwatch) mkt ?(.*)$"    enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Mkt"    sequence="85"></alias>
+  <alias match="^(?:marketw|marketwatch) (?:lastchance|lc) ?(.*)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_LastChance" sequence="84"></alias>
   <alias match="^(?:marketw|marketwatch) mode (.+) (\S+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Mode" sequence="85"></alias>
   <alias match="^(?:marketw|marketwatch) set (\S+) (.+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Set" sequence="85"></alias>
   <alias match="^(?:marketw|marketwatch) max([23]) (.+) (\S+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Max" sequence="85"></alias>
@@ -519,6 +578,14 @@ gCfg = {
   probe_delay = 0.6,      -- seconds between silent stats probes
   probe_max   = 30,       -- hard cap on probes per scan
   debug       = false,
+  -- Last chance (v5.1).  The market channel warns that an item is nearly over
+  -- ("Less than 15 minutes remaining on this item").  That one line is the
+  -- whole trigger - nothing is polled.  It deliberately ignores a watch
+  -- entry's auc/mark mode: an item in its final minutes is a last chance
+  -- whichever channel you normally watch it on.
+  lastchance  = true,     -- act on the closing-soon warning at all
+  lcwindow    = 20,       -- a warning of this many minutes or fewer counts
+  lcdebug     = false,    -- echo every market line that mentions minutes
 }
 
 local gWatch = {}         -- { {raw=, pieces=, max=, added=}, ... }
@@ -1855,6 +1922,20 @@ end
 local MKT_REOFFER = 300     -- the same max is not offered again for this long
 local gMktOffer   = {}      -- market num -> { amt = max last offered, when = os.time () }
 
+-- The closing-soon warning does not name its item:
+--   Market: Bid of 1,050,000 gold on <item> (Level 199, Num 66801)
+--   Market: Less than 15 minutes remaining on this item
+-- "this item" is the one in the line just above, so the last market-channel
+-- line we parsed is remembered here.  It is recorded BEFORE the watch list is
+-- consulted and before any mode gate, because the warning has to work for
+-- items this plugin would otherwise stay quiet about.
+local gLastMkt = nil     -- { num, item, level, cur, ctype, when }
+
+local function rememberMktLine (num, item, level, cur, ctype)
+  gLastMkt = { num = num, item = item, level = level, cur = cur,
+               ctype = ctype or "Gold", when = os.time () }
+end
+
 local function topTier (w)
   local t = tierList (w)
   return t [#t]
@@ -1889,7 +1970,10 @@ local function mktOffer (num, item, level, w, cur, amt, tier, front, headline)
     return
   end
 
-  echoHi (mine and "outbid on market: " or "market bid: ", item,
+  -- The pop-up carries the headline in its note; the echo fallback has to
+  -- carry it too, or a LAST CHANCE would read as an ordinary market bid.
+  echoHi (headline and (headline .. ": ")
+            or (mine and "outbid on market: " or "market bid: "), item,
           string.format ("   (Num %d, bid %s)", num, commafy (cur)))
   ColourTell (CLR_MSG, "", "        ")
   Hyperlink ("mwbidamt " .. num .. " " .. intstr (amt),
@@ -1918,6 +2002,10 @@ function MW_MarketBidLine (name, line, wildcards)
     if known.stats then known.stats.bid = cur end
   end
 
+  -- Remember it for a closing-soon warning on the next line, whatever the
+  -- watch list or the mode gate below make of this item.
+  rememberMktLine (num, item, level, cur, "Gold")
+
   if not gCfg.mkt then return end
   local w = matchWatch (item, "mkt")
   if not w then return end
@@ -1936,6 +2024,109 @@ function MW_MarketBidLine (name, line, wildcards)
 
   -- an outbid jumps the queue; a first offer waits its turn
   mktOffer (num, item, level, w, cur, amt, tier, gBid [num] ~= nil)
+end
+
+-- =====================================================================
+-- LAST CHANCE  (v5.1)
+--
+-- The market channel warns that an item is nearly over:
+--   Market: Bid of 1,050,000 gold on <item> (Level 199, Num 66801)
+--   Market: Less than 15 minutes remaining on this item
+--
+-- That second line is the ENTIRE trigger.  Nothing is polled, no timer runs
+-- and "market list" is never read for this.  The line names no item, so the
+-- item comes from gLastMkt - the market-channel line immediately above, which
+-- both MW_MarketBidLine and MW_MarketLine record before they consult the
+-- watch list.  That ordering is what makes this work at all: the line above
+-- may well be one this plugin otherwise says nothing about.
+--
+-- The watch MODE is deliberately not consulted.  "mode auc" means "do not nag
+-- me about this on the marketplace day to day"; it does not mean "let it
+-- close for less than I would have paid".  Everything on the list counts.
+--
+-- An item we already hold a proxy bid on is left alone, unless the price has
+-- passed that bid - then the next tier up is offered.  Nothing is ever sent
+-- without a click, and the click still re-reads the item first.
+-- =====================================================================
+local LC_REOFFER = 600   -- the same tier is not offered again for this long
+local LC_LINK    = 10    -- seconds the warning may still refer to the line above
+local gLC = { offer = {} }
+
+-- matchWatch WITHOUT the mode gate.  This is the point of the feature.
+local function lcMatchName (fullname)
+  local hay, best = norm (fullname), nil
+  for _, w in ipairs (gWatch) do
+    if piecesMatch (hay, w.pieces) then
+      if not best or topTier (w) > topTier (best) then best = w end
+    end
+  end
+  return best
+end
+
+function MW_LastChanceDebug (name, line, wildcards)
+  if gCfg.lcdebug then
+    ColourNote (CLR_DIM, "", "[marketw lc] " .. tostring (line))
+  end
+end
+
+function MW_LastChanceLine (name, line, wildcards)
+  if not gCfg.lastchance then return end
+  local mins = tonumber (wildcards [1])
+  local now  = os.time ()
+
+  local m = gLastMkt
+  if not m or not m.num then
+    dbg ("last chance: no market line above to attach the warning to")
+    return
+  end
+  if now - m.when > LC_LINK then
+    dbg ("last chance: the market line above is " .. (now - m.when) ..
+         "s old - not treating this warning as its own")
+    return
+  end
+
+  local win = tonumber (gCfg.lcwindow) or 20
+  if mins and mins > win then
+    dbg ("last chance: warning says " .. mins .. " min, outside the " ..
+         win .. " min window")
+    return
+  end
+
+  if m.ctype and m.ctype:lower () ~= "gold" then
+    dbg ("last chance: " .. m.num .. " is not a gold auction")
+    return
+  end
+
+  local w = lcMatchName (m.item)
+  if not w then
+    dbg ("last chance: " .. m.num .. " (" .. tostring (m.item) ..
+         ") is not on the watch list")
+    return
+  end
+
+  local cur = m.cur
+  if gBid [m.num] then
+    -- our proxy is already in: only a price past it needs a decision
+    local mine = gMktAmt [m.num]
+    if not mine or not cur or cur <= mine then
+      dbg ("last chance: our bid on " .. m.num .. " still leads, nothing to do")
+      return
+    end
+  end
+
+  local amt, tier = nextTier (w, cur)
+  if not amt then
+    dbg ("last chance: " .. m.num .. " is past every max you set")
+    return
+  end
+
+  local last = gLC.offer [m.num]
+  if last and now - last.when < LC_REOFFER and amt <= last.amt then return end
+  gLC.offer [m.num] = { amt = amt, when = now }
+
+  local head = "LAST CHANCE"
+  if mins then head = head .. "   under " .. mins .. " min left" end
+  mktOffer (m.num, m.item, m.level, w, cur or 0, amt, tier, true, head)
 end
 
 -- Put a refused market bid back the way it was: forget it entirely when it was
@@ -2132,6 +2323,10 @@ function MW_MarketLine (name, line, wildcards)
     ColourNote (CLR_DIM, "", string.format ("[marketw mkt] item=%q level=%s num=%d cur=%s",
                 item, tostring (level), num, currency))
   end
+
+  -- Same as the bid line: remember it before the watch list has any say, so a
+  -- warning on the next line can still be acted on.
+  rememberMktLine (num, item, level, nil, currency)
 
   local w = matchWatch (item, "mkt")
   if not w then gPendingAnnounce = nil return end
@@ -2447,6 +2642,58 @@ function MW_Cmd_Mkt (name, line, wildcards)
   end
   saveData ()
   echoHi ("market channel watching is ", gCfg.mkt and "ON" or "OFF", "")
+end
+
+-- marketw lc                status
+-- marketw lc on|off         act on the closing-soon warning or not
+-- marketw lc <mins>         largest warning that still counts as a last chance
+-- marketw lc debug on|off   echo every market line that mentions minutes
+function MW_Cmd_LastChance (name, line, wildcards)
+  local arg = trim (wildcards [1]):lower ()
+
+  local function status ()
+    echoHi ("last chance is ", gCfg.lastchance and "ON" or "OFF",
+            string.format ("   warnings of %d min or fewer count",
+                           tonumber (gCfg.lcwindow) or 20))
+    ColourNote (CLR_DIM, "", "  When the market channel says an item has minutes left and its bid")
+    ColourNote (CLR_DIM, "", "  is still under one of your maxes, it pops up - whatever that item's")
+    ColourNote (CLR_DIM, "", "  auc/mark mode is.")
+    if gCfg.lcdebug then
+      ColourNote (CLR_DIM, "", "  line debug is ON - every market line mentioning minutes is echoed.")
+    end
+    ColourNote (CLR_DIM, "", "  marketw lc on|off   |   marketw lc <mins>   |   marketw lc debug on")
+  end
+
+  if arg == "" then status () return end
+
+  if arg == "on" or arg == "off" then
+    gCfg.lastchance = (arg == "on")
+    saveData ()
+    status ()
+    return
+  end
+
+  local dbgarg = arg:match ("^debug%s*(.*)$")
+  if dbgarg then
+    if dbgarg == "on" then gCfg.lcdebug = true
+    elseif dbgarg == "off" then gCfg.lcdebug = false
+    elseif dbgarg ~= "" then warn ("usage: marketw lc debug on|off") return
+    end
+    EnableTrigger ("mw_lc_debug", gCfg.lcdebug and true or false)
+    saveData ()
+    echoHi ("last-chance line debug is ", gCfg.lcdebug and "ON" or "OFF", "")
+    return
+  end
+
+  local mins = tonumber (arg)
+  if mins and mins >= 1 and mins <= 180 then
+    gCfg.lcwindow = math.floor (mins)
+    saveData ()
+    status ()
+    return
+  end
+
+  warn ("usage: marketw lc [on|off|<minutes>|debug on|debug off]")
 end
 
 function MW_Cmd_Auc (name, line, wildcards)
@@ -2858,6 +3105,8 @@ function MW_Cmd_Help ()
   Note ("")
   helpLine ("marketw auc on|off|debug",     "watch the live auction channel")
   helpLine ("marketw mkt on|off",           "watch the market channel for new listings")
+  helpLine ("marketw lc on|off",            "last chance when an item has minutes left, any mode")
+  helpLine ("marketw lc <mins>",            "how large a closing warning still counts")
   helpLine ("marketw popup on|off",         "live listings pop up in a window, not the output")
   helpLine ("(market bids)",                "a bid line for a watched item pops up the lowest max that beats it; outbid -> next max")
   helpLine ("marketw mode <n|text> <m>",    "per item: both (default), auc = auction only, mark = market only")
@@ -3090,6 +3339,7 @@ function OnPluginInstall ()
   loadData ()
   pcall (WindowDelete, "MarketWatch_prompt")   -- clear anything left behind
   EnableTrigger ("mw_auc_debug", gCfg.aucdebug and true or false)
+  EnableTrigger ("mw_lc_debug",  gCfg.lcdebug  and true or false)
   if not gHaveCapture then
     warn ("wrapped_captures.lua did not load - scanning will not work.")
   end
