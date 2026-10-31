@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-09-18"
    requires="4.73"
-   version="2.0"
+   version="2.1"
    >
 <description trim="y">
 <![CDATA[
@@ -141,7 +141,10 @@ WHEN EDITING
   id, and whether the invdata name field carries the bloot tier word.
   Eric confirmed "id ITEMNUMBER" works.
   Tier order follows Eric's blootx chart, lowest first: Polished, Enhanced,
-  Burnished, Shiny, Vibrant, Sparkling ... Mythical, Fabled, Divine, Godly.
+  Burnished, Shiny, Vibrant, Sparkling ... Mythical, Divine, Fabled, Godly.
+  The chart is a flat +18 avg damage on shards per tier, Polished 807 to Godly
+  1167. v2.1 swapped Divine and Fabled in the TIERS table, which had them the
+  wrong way round; MadBot's "madbot bloot" chart is the same ladder.
   The local screen colours for @G @R @Y are plain bright green, red and
   yellow hex values, not read from the client palette.
 -->
@@ -287,11 +290,17 @@ local function trim (s)
 end
 
 -- =====================================================================
--- Tiers, lowest first.  Order after Mythical follows Eric's blootx chart.
+-- Tiers, lowest first.  Order follows Eric's blootx chart: every tier is 18 more avg
+-- damage on shards than the one below it, Polished 807 up to Godly 1167.
+-- v2.1: Divine and Fabled were the wrong way round here (Divine 1131 is BELOW Fabled
+-- 1149). The keep trigger's own tier list always had them in the right order, so this
+-- table was the odd one out. Nothing was misfiled by it: the tally and the per-tier
+-- on/off set are both keyed by tier NAME, and the three bracket colour bands all split
+-- at Brilliant and Eternal, well below the swap. Only list order was affected.
 -- =====================================================================
 local TIERS = { "Polished", "Enhanced", "Burnished", "Shiny", "Vibrant", "Sparkling", "Gleaming", "Shimmering", "Dazzling", "Brilliant",
                 "Radiant", "Wondrous", "Majestic", "Exalted", "Eternal",
-                "Legendary", "Epic", "Mythical", "Fabled", "Divine", "Godly" }
+                "Legendary", "Epic", "Mythical", "Divine", "Fabled", "Godly" }
 
 local TIER_BY_LOWER, TIER_RANK = {}, {}
 for i, t in ipairs (TIERS) do TIER_BY_LOWER [t:lower ()] = t TIER_RANK [t] = i end
