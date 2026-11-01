@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="7.1"
+   version="7.2"
    >
 </plugin>
 
@@ -78,6 +78,20 @@ COMMANDS
   exit, so every speedwalk through it was hijacked into a walk to
   Artificer's Mayhem.  Only mm, mmr and mmout/mmo are aliases; links
   send "mm <area> ...", and "mmout <area>" names an area to leave.
+
+  7.2: THE LIST WINDOW OPENS SCROLLED TO THE TOP.  A text window follows
+  its newest line like a console, so a list taller than WIN_MAX_H opened
+  at the BOTTOM - and TextRect:draw () only puts a hotspot on the lines it
+  can actually see, so the rows above the visible area were not clickable.
+  One line of overflow hid the title, two hid the title and the first row,
+  so it looked like one link near the top was dead while the rest worked.
+  One set_scroll (1), inside a pcall, after fit_contents (), which is the
+  same fix another of my list windows already carries. Scrolling by hand
+  was never affected: that redraws, and a redraw re-adds the hotspots for
+  whatever is on screen.
+  STILL TO DO ELSEWHERE: MarketWatch has clickable rows in a fit_contents
+  window with no set_scroll, so it has the same latent bug. BlootReport,
+  GQChecker and Pendant each have a link or two in one as well.
 
   7.1: 6.9 WAS TOO BROAD AND BROKE THE NENUKON.  Reopening refused exits
   is right in Rose Ether and wrong everywhere else, so it is now opt-in
@@ -300,7 +314,10 @@ ONE MODE, AND HOW A RUN STOPS
   list_rows () builds the entries once for both. A click drops the window
   and sends what the chat link would. The window scrolls (mouse wheel or
   the scrollbar) and is never taller than WIN_MAX_H, so Nenukon's long list
-  fits. Where you drag it is saved in the data file (winx/winy) and put
+  fits. IT IS ALSO SCROLLED BACK TO THE TOP EVERY TIME IT IS OPENED, and
+  must stay that way - see the comment on the set_scroll call in
+  win_open () for why a link stopped working without it (7.2).
+  Where you drag it is saved in the data file (winx/winy) and put
   back into movewindow's variables on load, because the plugin itself
   keeps no state file. Built the MarketWatch way - see the comment above
   list_rows () for the teardown trap and why it matters.
@@ -2865,7 +2882,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "7.1"
+local VERSION  = "7.2"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -6441,6 +6458,29 @@ function win_open (rows)
     gWin:add_text (st, false, lk)
   end
   pcall (function () gWin:fit_contents (1000, WIN_MAX_H) end)
+  -- ALWAYS OPEN AT THE TOP, and it has to be said out loud.  A text
+  -- window follows its newest line like a console: every add_text () runs
+  -- TextRect:lockstep (), which scrolls down one line for each line past
+  -- the window's height, and nothing afterwards puts that back - clear ()
+  -- goes through reWrapLines (), which carries display_start_line across
+  -- and only CLAMPS it, and fit_contents () resizing the window does the
+  -- same.  So any list taller than WIN_MAX_H - Nenukon's, or any list at
+  -- all once "mm fontsize" is turned up - opened scrolled to the bottom.
+  --
+  -- Why that stopped a link working rather than just looking odd:
+  -- TextRect:draw () calls WindowAddHotspot ONLY for the lines between
+  -- display_start_line and display_end_line, so a row above the visible
+  -- area has no hotspot at all and clicking where it should be does
+  -- nothing.  One line of overflow hides the title; two hides the title
+  -- and the first row - which is how this showed up, one link near the
+  -- top dead while every other one worked.
+  --
+  -- Scrolling by hand was always fine and still is: the wheel and the
+  -- scrollbar go through setScroll () and scroll (), both of which draw,
+  -- and each draw re-adds the hotspots for whatever is now on screen.
+  -- Another of my list windows had this same bug and took this same
+  -- one-line fix.  7.2.
+  pcall (function () gWin:set_scroll (1) end)
   gWin:draw ()
   gWin:show ()
   pcall (Repaint)
