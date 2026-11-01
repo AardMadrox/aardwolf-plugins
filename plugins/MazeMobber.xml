@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="6.9"
+   version="7.0"
    >
 </plugin>
 
@@ -78,6 +78,12 @@ COMMANDS
   exit, so every speedwalk through it was hijacked into a walk to
   Artificer's Mayhem.  Only mm, mmr and mmout/mmo are aliases; links
   send "mm <area> ...", and "mmout <area>" names an area to leave.
+
+  7.0: Rose Ether puts its arrival list up in 454 as well as in 455 and
+  444.  454 is a maze room, the first one north of the entrance.  The
+  version goes 6.9 -> 7.0 and not 6.10 because MUSHclient reads
+  version= as a decimal number: 6.10 is 6.1, which is BEHIND 6.9, and
+  mpm compares numerically and would never offer the update.
 
   6.9: A REFUSED MOVE IS NOT A WALL FOR EVER.  mm_blocked () marks an
   exit that would not let us through with walked["!<room>,<dir>"], and
@@ -1279,7 +1285,13 @@ local AREAS = {
       [455] = { "n", "s", "u" },
     },
     leaves = { {444,"u"}, {455,"u"}, },
-    auto = { [455]=true, [444]=true },
+    -- 454 is a MAZE room, unlike the other two.  It is one seeded step
+    -- north of the entrance, so it is where you land first more often
+    -- than anywhere else in the ether, and Eric asked for the list
+    -- there.  Harmless in a shuffling room: the arrival list is gated on
+    -- "not running", so a sweep or an mmout passing through 454 prints
+    -- nothing - only you walking in by hand does.  7.0.
+    auto = { [455]=true, [444]=true, [454]=true },
     entrance = { goto_room = 455 },
     bridges = {  },
     sections = {  },
@@ -2833,7 +2845,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "6.9"
+local VERSION  = "7.0"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
