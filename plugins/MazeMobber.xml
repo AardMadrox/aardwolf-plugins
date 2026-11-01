@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="7.0"
+   version="7.1"
    >
 </plugin>
 
@@ -78,6 +78,20 @@ COMMANDS
   exit, so every speedwalk through it was hijacked into a walk to
   Artificer's Mayhem.  Only mm, mmr and mmout/mmo are aliases; links
   send "mm <area> ...", and "mmout <area>" names an area to leave.
+
+  7.1: 6.9 WAS TOO BROAD AND BROKE THE NENUKON.  Reopening refused exits
+  is right in Rose Ether and wrong everywhere else, so it is now opt-in
+  per area (A.moving_walls, Rose Ether only) and capped at twelve rounds.
+  What went wrong: the map wipe refills exits[] from A.exitdirs, the
+  UNION of every direction a room has ever shown.  Nenukon 31796's union
+  is {e,n,s} while the room itself says "east south", so reopening put
+  north back, move ()'s wall guard reads exits[] and let it through, the
+  MUD refused it, mm_blocked () crossed it off, reopen_crossed () put it
+  back - fifty six wipes of walking into one wall, then "Stopped."  The
+  "!<room>,<dir>" marker surviving everything is not an oversight; it is
+  the only thing that stops a wall being offered again.  There is no way
+  to tell a moving wall from a fixed one off the exit line, so the area
+  table says which it is.
 
   7.0: Rose Ether puts its arrival list up in 454 as well as in 455 and
   444.  454 is a maze room, the first one north of the entrance.  The
@@ -1285,6 +1299,12 @@ local AREAS = {
       [455] = { "n", "s", "u" },
     },
     leaves = { {444,"u"}, {455,"u"}, },
+    -- THE ONLY AREA WITH THIS FLAG, and read the note in reopen_crossed ()
+    -- before adding it to another one.  The ether "is at some points
+    -- impassable" and the impassable points move, so a direction that
+    -- refuses a move here is not a wall - it is gas that will thin out.
+    -- Everywhere else a refusal is a wall and stays crossed off.  7.1.
+    moving_walls = true,
     -- 454 is a MAZE room, unlike the other two.  It is one seeded step
     -- north of the entrance, so it is where you land first more often
     -- than anywhere else in the ether, and Eric asked for the list
@@ -2845,7 +2865,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "7.0"
+local VERSION  = "7.1"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -3825,35 +3845,52 @@ local function reopen_crossed ()
       end
     end
   end
-  -- AND THE REFUSED MOVES, which until 6.9 this did not touch at all.
-  -- mm_blocked () crosses an exit off three ways: edges[from][dir] = -1,
-  -- cleared by the loop above; exits[from][dir] = nil, which the next map
-  -- wipe puts back out of A.exitdirs; and walked["!from,dir"], which
-  -- NOTHING ever cleared - not this, not the wipe, not stall_reset ().
-  -- So one refused move killed that exit for the whole run, here of all
-  -- places, where the entire job is to try the crossed off ones again.
+  -- AND THE REFUSED MOVES - BUT ONLY IN AN AREA WHOSE WALLS THEMSELVES
+  -- MOVE, which is A.moving_walls, which is Rose Ether and nothing else.
+  -- READ THE WHOLE OF THIS BEFORE WIDENING IT.  6.9 did it everywhere and
+  -- that was wrong; 7.1 narrowed it after it broke the Nenukon.
   --
-  -- Rose Ether is the case that found it.  The gas there "is at some
-  -- points impassable" and which points move, so east out of 454 being
-  -- refused now says nothing about east in a minute.  Three refusals left
-  -- 454 with west and 448 with east, pointing at each other: untried ()
-  -- went nil everywhere, bfs could reach nothing else, and mmout bounced
-  -- 448-454-448 through thirty four map wipes before giving up.
+  -- mm_blocked () crosses a refused exit off three ways: edges[from][dir]
+  -- = -1, cleared by the loop above; exits[from][dir] = nil; and
+  -- walked["!from,dir"], which nothing else ever clears.  That marker is
+  -- not an oversight, it is what stops the walk offering a wall again -
+  -- the map wipe refills exits[] from A.exitdirs, which is the UNION of
+  -- every direction a room has ever shown, so without the marker every
+  -- wipe hands the wall straight back.
   --
-  -- Only an exit the area's own table says the room can have is put back,
-  -- so a direction tried off a stale guess is not invented into a room
-  -- that never had it.  Clearing fields of walked while walking it is
-  -- fine; no key is added.
-  for k in pairs (walked) do
-    local from, d = tostring (k):match ("^!(%d+),(%a+)$")
-    if from then
-      walked[k] = nil
-      from = tonumber (from)
-      for _, have in ipairs ((A and A.exitdirs[from]) or {}) do
-        if have == d then
-          exits[from] = exits[from] or {}
-          exits[from][d] = true
-          n = n + 1
+  -- Nenukon 31796 is the room that proves it.  A.exitdirs says {e,n,s};
+  -- the room itself says "Exits: east south".  North is in the union and
+  -- is not there.  Reopening it put north back into exits[31796], which
+  -- is exactly what move ()'s wall guard reads, so the guard passed it
+  -- through, the MUD said "Alas, you cannot go that way", mm_blocked ()
+  -- crossed it off, this reopened it, and round again - fifty six map
+  -- wipes of walking into one wall before the run gave up.
+  --
+  -- In Rose Ether the same reopen is right, because there the refusal is
+  -- not a wall: the gas "is at some points impassable" and the impassable
+  -- points move, so east out of 454 being refused now says nothing about
+  -- east in a minute.  There is no way to tell those two apart from the
+  -- exit line - 31796 lists north as readily as 454 lists east - so it is
+  -- the AREA that says which it is, not a guess.
+  --
+  -- Capped as well.  Even where retrying is right it must not be the
+  -- whole run: twelve fresh tries at every refused exit is plenty for the
+  -- gas to shift, and it leaves MAXSTEPS doing the bounding rather than
+  -- this.  Clearing fields of walked while walking it is fine; no key is
+  -- added.
+  if A and A.moving_walls and (walked.wallopen or 0) < 12 then
+    walked.wallopen = (walked.wallopen or 0) + 1
+    for k in pairs (walked) do
+      local from, d = tostring (k):match ("^!(%d+),(%a+)$")
+      if from then
+        walked[k] = nil
+        from = tonumber (from)
+        for _, have in ipairs ((A and A.exitdirs[from]) or {}) do
+          if have == d then
+            exits[from] = exits[from] or {}
+            exits[from][d] = true
+            n = n + 1
+          end
         end
       end
     end
