@@ -14,7 +14,7 @@
    purpose="Aardwolf Character Development Tracking (Rewrite of SharpTracker)"
    save_state="y"   
    requires="4.70"
-   version="2.8"
+   version="3.1"
    >
 <description trim="n">
 		<![CDATA[
@@ -43,7 +43,7 @@ THIRD PARTY PLUGIN WITH LOCAL PATCHES. This is Nokfah's DullTracker (a
   single digit: 2.8, 2.9, then 3.0 - never 2.10, which reads as 2.1).
   The exception is a comment-only change: leave the version alone then,
   so mpm offers nobody a pointless reinstall that resets their saved
-  state. The published history is 2.1, 2.5, 2.7, 2.8 - all local.
+  state. The version history is 2.1, 2.5, 2.7, 2.8, 2.9, 3.0, 3.1 - all local.
 
 WHAT IT DOES
   Aardwolf character development tracking: campaigns, quests, global
@@ -156,11 +156,18 @@ THE LOCAL PATCHES, in the order they appear
      or on levels rushed through, expect a level to show no figures until
      it has a sample of its own.
 
-     The level is read from GMCP at the COMPLETION line, while SnD files
-     its row under the level the run was TAKEN at. Those disagree only for
-     a run you level up during, and the campaign path has carried the same
-     seam since it was written. If it ever matters, the taken level is on
-     SnD's own open row and SnDTrueStart already reads it.
+     THE LEVEL IS THE ONE THE RUN WAS TAKEN AT (fixed 2026-11-02). It used
+     to be read from GMCP at the COMPLETION line, so a campaign taken at
+     level 1 and finished at 2 reported "lvl 2" - and compared itself
+     against level 2's rows while SnD had filed it under level 1. Levelling
+     more than once during a run put it out by more.
+
+     The taken level is now captured into levelTaken[timer] when the timer
+     STARTS. TakenLevel reads it, and falls back in order to level_taken on
+     SnD's own open row (SnDOpenLevel) - which covers a reload mid-run, when
+     dull never saw the start - and then to the current GMCP level, which is
+     the old behaviour and the last resort. Both the campaign and the quest
+     path go through it, and on campaigns it also picks the time cap.
 
      If per level turns out too thin to be useful, the banded middle
      ground is to compare within a range instead of an exact match -
@@ -178,6 +185,26 @@ THE LOCAL PATCHES, in the order they appear
      That matters: if the read fails, the figures silently go back to
      pooling every level, and a line headed "lvl 134" would be a lie. No
      level read, no label, pooled figures printed plainly.
+
+  5. "dull reload", AND A VERSION CONSTANT TO GO WITH IT.
+     Editing this file used to mean reloading it from File > Plugins.
+     ReloadSelf does it from in game. A plugin cannot reload itself from
+     its own script space - ReloadPlugin tears that space down, so
+     anything scheduled there dies with it and nothing happens - so it
+     bounces the call off the WORLD's script space using the client's
+     script prefix, which is the same thing Search and Destroy's
+     "snd reload" does. No prefix set, no reload: it says so and points
+     at File > Plugins rather than failing silently.
+
+     Reloading mid-campaign is safe now. SnDTrueStart recovers the start
+     time and SnDOpenLevel the taken level, both off SnD's open row, so a
+     run reloaded through still reports its real duration and level.
+
+     HelpVersion now returns a local VERSION constant instead of
+     GetPluginInfo(id, 19). The version index is ambiguous - the client
+     package uses both 18 and 19 - and after a reload the banner is the
+     only way to tell which build loaded, so it has to be right. KEEP
+     VERSION IN STEP WITH version= at the top of the file.
 
 THE XPR FIGURES, which are easy to get wrong
   XPR is SECONDS PER 1000 EXP, so LOWER is faster.
@@ -205,6 +232,8 @@ DATA AND STATE
 
 WHEN EDITING
   * Search this file for "LOCAL PATCH" before doing anything else.
+  * Bump version= AND the local VERSION constant - they are two places
+    and the banner after "dull reload" is read off the constant.
   * The plugin builds many of its triggers at runtime with AddTriggerEx
     and trigger_flag constants, so not every trigger is visible in the XML.
   * The file includes constants.lua, but trigger_flag and timer_flag are
@@ -552,6 +581,14 @@ WHEN EDITING
 	>
 	</alias>
 
+	<!-- LOCAL PATCH: reload the plugin after editing the file - see ReloadSelf -->
+	<alias
+		name="reload_self" match="^dull reload$"
+		regexp="y" enabled="y"
+		script="ReloadSelf"
+	>
+	</alias>
+
 	<!-- Reporting -->
 	<alias
 		name="report_session" match="^dull session( [a-z ]+)?$"
@@ -809,6 +846,13 @@ WHEN EDITING
 <script>
 <![CDATA[
 	require "serialize"
+
+	-- LOCAL PATCH: the version printed in the load banner and the help title. It is kept
+	-- here rather than read from GetPluginInfo because the version index is ambiguous - the
+	-- client package uses both 18 and 19 - and because after `dull reload` the banner is the
+	-- only way to tell which build actually loaded. KEEP IT IN STEP WITH version= at the
+	-- top of this file.
+	local VERSION = "3.1"
 	
 	local defaultSettings = {
 		channel = "default",
@@ -967,6 +1011,13 @@ WHEN EDITING
 	-----------------
 	-- Timers
 	-----------------
+
+	-- LOCAL PATCH: the level each run was TAKEN at, keyed the same way as timers
+	-- (cp, quest, ...), captured when the timer starts. The old code read the level at
+	-- the COMPLETION line, which is one level too high for any run you level up during.
+	-- nil means "never saw the start" and TakenLevel falls back - see TakenLevel below.
+	local levelTaken = {}
+
 	local timers
 	timers = {
 		cp = { 
@@ -1605,10 +1656,31 @@ WHEN EDITING
 		ColourNote(CLR_MSG, "", tail or "")
 	end
 
+	-- --- LOCAL PATCH - `dull reload` ------------------------------------------
+	--
+	-- A plugin cannot reload itself from its own script space: ReloadPlugin tears that
+	-- space down, so anything scheduled there dies with it and nothing happens. The script
+	-- prefix makes the client run the text in the WORLD's script space instead, which is
+	-- not the thing being destroyed. Same bounce Search and Destroy's `snd reload` uses.
+	--
+	-- The plugin id is quoted with string.char(39) so there is not a single backslash
+	-- escape in the line - the nested quoting is where this goes wrong when edited.
+	function ReloadSelf()
+		local prefix = GetAlphaOption("script_prefix")
+		if (prefix == nil or prefix == "") then
+			DTEcho("No script prefix is set in the client, so I cannot reload myself. Use File > Plugins, select DullTracker and press Reload.")
+			return
+		end
+
+		DTEcho("Reloading v", HelpVersion(), "...")
+
+		local q = string.char(39)
+		Execute(prefix ..
+			'DoAfterSpecial(1, "ReloadPlugin(' .. q .. GetPluginID() .. q .. ')", sendto.script)')
+	end
+
 	function HelpVersion()
-		local v = string.format("%.2f", GetPluginInfo(GetPluginID(), 19) or 0)
-		v = string.gsub(v, "0$", "")
-		return v
+		return VERSION
 	end
 
 	function HelpTitle(text)
@@ -1665,10 +1737,12 @@ WHEN EDITING
 		HelpSection("History")
 		HelpCmd("dull <type> -h <#>",          "cp gq quest lvl pup dbl timed")
 		HelpNote("CP, quest and gq reports also show your fastest and average time,")
-		HelpNote("as [best 2m 29s | avg 5m 32s]. CP and quest times come from Search")
-		HelpNote("and Destroy's history; gq times are recorded here from now on. A run")
-		HelpNote("you wandered off from counts as the cap (cp 6m at 200+, 5m below,")
-		HelpNote("quest 2m) so one abandoned run can't drag the average.")
+		HelpNote("as [lvl 134 best 2m 29s | avg 5m 32s]. CP and quest times come from")
+		HelpNote("Search and Destroy's history, compared only against your other runs")
+		HelpNote("at the level you TOOK that one at; gq times are recorded here from")
+		HelpNote("now on. A run you wandered off from is left out of the figures")
+		HelpNote("entirely - over cp 6m at 200+, 5m below, quest 2m, gq 45m - so an")
+		HelpNote("abandoned run can't drag the average toward the cap.")
 
 		HelpSection("Timed session")
 		HelpCmd("dull timer <minutes>",        "start a timed session, reports when it ends")
@@ -1712,6 +1786,7 @@ WHEN EDITING
 		HelpCmd("dull save session",           "snapshot this session")
 		HelpCmd("dull restore session",        "put back the snapshot (after a crash)")
 		HelpCmd("dull refresh",                "refresh the info bar")
+		HelpCmd("dull reload",                 "reload the plugin after editing the file")
 		ColourNote("", "", "")
 	end
 	
@@ -2241,7 +2316,12 @@ WHEN EDITING
 			gqCompleted = false
 		end
 
-		timers[triggerAttr[name]["field"]].start = os.time()		
+		timers[triggerAttr[name]["field"]].start = os.time()
+
+		-- LOCAL PATCH: remember the level this run was taken at, for the figures it will
+		-- be compared against later (see TakenLevel). A failed read leaves it nil, which
+		-- is the signal to fall back rather than to trust a wrong level.
+		levelTaken[triggerAttr[name]["field"]] = tonumber(GetGmcp("char.status.level"))
 	end
 	
 	function EndTimer(name, line, wildcards)			
@@ -2449,6 +2529,59 @@ WHEN EDITING
 		return fallback
 	end
 
+	-- The level SnD filed the still-open run under. Same row SnDTrueStart reads, same
+	-- guard on how old it may be, and the same fall-through to nil when there is no SnD,
+	-- no db, or nothing open - so this can only ever add a level, never change one.
+	function SnDOpenLevel(historyType)
+		if (sqlite3 == nil) then return nil end
+
+		local probe = io.open(GetInfo(66) .. "/SnDdb.db", "r")
+		if (probe == nil) then return nil end
+		probe:close()
+
+		local level, started = nil, nil
+		local ok = pcall(function()
+			local db = sqlite3.open(GetInfo(66) .. "/SnDdb.db")
+			if (db == nil) then return end
+			local sql = string.format(
+				"SELECT level_taken, start_time FROM history WHERE type = %d AND status = %d" ..
+				" ORDER BY id DESC LIMIT 1", historyType, SND_STATUS_OPEN)
+			for r in db:nrows(sql) do
+				level = tonumber(r.level_taken)
+				started = tonumber(r.start_time)
+			end
+			db:close_vm()
+		end)
+		if (not ok or level == nil or started == nil) then return nil end
+
+		-- an abandoned row can sit open for months; don't read a level off one
+		if ((os.time() - started) > SND_OPEN_START_MAX) then return nil end
+		return level
+	end
+
+	-- --- LOCAL PATCH - THE LEVEL THE RUN WAS TAKEN AT --------------------------
+	--
+	-- A campaign taken at level 1 and finished at level 2 is a level 1 campaign: that is
+	-- how SnD files its row, so that is what the stored figures have to be filtered on,
+	-- and what the "lvl N" on the line has to say. Reading the level at the completion
+	-- line (what this used to do) reported the wrong level AND compared the run against
+	-- the wrong level's rows - off by one for most, by more for a long run.
+	--
+	-- In order of trust:
+	--   1. levelTaken[timer]  - read from GMCP as the run was taken, this session.
+	--   2. SnDOpenLevel()     - SnD's own open row, for a run dull was reloaded during.
+	--   3. the current level  - the old behaviour, and wrong by a level if you levelled
+	--                           during the run, but better than no level at all.
+	function TakenLevel(timer, historyType)
+		local level = levelTaken[timer]
+		if (level ~= nil) then return level end
+
+		level = SnDOpenLevel(historyType)
+		if (level ~= nil) then return level end
+
+		return tonumber(GetGmcp("char.status.level"))
+	end
+
 	-- Folds the run just finished into the stored figures and formats " [best X | avg Y]".
 	-- Returns "" when there is nothing to compare against yet.
 	--
@@ -2512,7 +2645,7 @@ WHEN EDITING
 	-- Campaigns are compared against your other campaigns AT THE SAME LEVEL, which is also
 	-- what picks the cap: level 200+ gets the longer allowance, everything below the shorter.
 	function CPTimeStats(seconds)
-		local level = tonumber(GetGmcp("char.status.level"))
+		local level = TakenLevel("cp", SND_TYPE_CP)
 		local cap = TIME_CAP_CP
 		local where = ""
 
@@ -2528,7 +2661,7 @@ WHEN EDITING
 	end
 
 	function QuestTimeStats(seconds)
-		local level = tonumber(GetGmcp("char.status.level"))
+		local level = TakenLevel("quest", SND_TYPE_QUEST)
 		local where = ""
 
 		if (level ~= nil) then
