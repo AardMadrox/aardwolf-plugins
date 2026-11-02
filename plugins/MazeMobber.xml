@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="7.2"
+   version="7.3"
    >
 </plugin>
 
@@ -79,6 +79,11 @@ COMMANDS
   Artificer's Mayhem.  Only mm, mmr and mmout/mmo are aliases; links
   send "mm <area> ...", and "mmout <area>" names an area to leave.
 
+  7.3: documentation only. 7.2's closing claim that MarketWatch and three
+  others carried the same latent bug was wrong, and it was published. The
+  corrected finding is in the 7.2 note below; the short version is that the
+  bug needs links ABOVE the last line, which only this list has.
+
   7.2: THE LIST WINDOW OPENS SCROLLED TO THE TOP.  A text window follows
   its newest line like a console, so a list taller than WIN_MAX_H opened
   at the BOTTOM - and TextRect:draw () only puts a hotspot on the lines it
@@ -89,9 +94,18 @@ COMMANDS
   same fix another of my list windows already carries. Scrolling by hand
   was never affected: that redraws, and a redraw re-adds the hotspots for
   whatever is on screen.
-  STILL TO DO ELSEWHERE: MarketWatch has clickable rows in a fit_contents
-  window with no set_scroll, so it has the same latent bug. BlootReport,
-  GQChecker and Pendant each have a link or two in one as well.
+  WHAT DECIDES WHETHER A WINDOW HAS THIS BUG IS WHERE ITS LINKS SIT, not
+  whether it calls set_scroll. The window follows to the BOTTOM, so the
+  LAST line always keeps its hotspot and only lines near the top lose
+  theirs. This list has a title on line 1 and clickable rows under it, so
+  the rows went first. A window whose links are its last line - a row of
+  buttons under some text - is immune, and scrolling it to the top would
+  CREATE the bug by pushing the buttons off the bottom. 7.3 corrected a
+  claim 7.2 made here that MarketWatch, BlootReport and two of my windows
+  that are not published had the same latent bug: checked properly, none of
+  them do. All four put their links on the last line - MarketWatch and
+  BlootReport anchored at the bottom where they stay clickable, the other
+  two never more than two lines long. Do not "fix" them.
 
   7.1: 6.9 WAS TOO BROAD AND BROKE THE NENUKON.  Reopening refused exits
   is right in Rose Ether and wrong everywhere else, so it is now opt-in
@@ -2882,7 +2896,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "7.2"
+local VERSION  = "7.3"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
