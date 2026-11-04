@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="Target"
+   author="Eric"
+   id="8d619a4eff390535d5f34da3"
+   language="Lua"
+   purpose="Reports the mob you are fighting, its HP percent and your room to a channel"
+   date_written="2026-11-04"
+   requires="4.59"
+   version="1.1"
+   save_state="n"
+   >
+</plugin>
+
+<!--
+MAINTAINER NOTES (added 2026-11-04)
+====================================================================
+WHAT IT DOES
+  While you are fighting, "target <channel>" sends one line to that
+  channel:
+    [Target Report] Enemy: [the Fractal Anomaly] | HP: [14%] |
+      Area: fractal | Room: Fractals of the Weave | vnum: [40600]
+  Brackets x099, the "Target Report" name x045, labels white, values x048.
+  Out of combat nothing is sent; you get a local notice instead.
+
+COMMANDS
+  target say|gt|ft|clan|reply|spo   send the report to that channel
+  target  or  target help           help
+
+HOW IT WORKS
+  Everything comes from GMCP, read at the moment you type the command:
+    char.status  state (8 = fighting), enemy, enemypct
+    room.info    zone (area keyword), name, num
+  GMCP is read through GMCP_handler's gmcpdata_as_string into a LOCAL
+  variable. gmcphelper's gmcp() is not used on purpose: it assigns a
+  global "data" and, when the read fails, hands back whatever the last
+  successful read left there, so a failed read could report a stale room.
+
+  The channel name is sent as the command word: "say <msg>", "gt <msg>",
+  "ft <msg>", "clan <msg>", "reply <msg>", "spo <msg>".
+
+  Fighting means state 8 AND a non-empty enemy name. Unmappable rooms
+  (num -1) report vnum [none].
+
+DATA AND STATE
+  None. save_state is off; there are no settings.
+
+WHEN EDITING
+  * esc() doubles any @ in mob or room names so the MUD cannot read it as
+    a colour code. Keep it on every GMCP string put in the message.
+  * Add a channel by adding its word to CHANNELS and to the alias regex.
+-->
+
+<aliases>
+  <alias script="aliasReport" match="^target\s+(?P&lt;chan&gt;say|gt|ft|clan|reply|spo)$" enabled="y" regexp="y" ignore_case="y" sequence="100"></alias>
+  <alias script="aliasHelp"   match="^target(\s+help)?$" enabled="y" regexp="y" ignore_case="y" sequence="100"></alias>
+</aliases>
+
+<script>
+<![CDATA[
+
+local VERSION  = "1.1"
+local TAG      = "Target"
+
+local CLR_TAG  = "#875FFF"   -- x099
+local CLR_NAME = "#00D7FF"   -- x045
+local CLR_MSG  = "#FFFFFF"   -- W
+local CLR_HI   = "#00FF87"   -- x048
+
+local GMCP_ID  = "3e7dedbe37e44942dd46d264"
+
+-- channel word typed after "target" -> what it is, for the help screen
+local CHANNELS = {
+  { key = "clan",  label = "clan channel"           },
+  { key = "ft",    label = "ft channel"             },
+  { key = "gt",    label = "group channel"          },
+  { key = "reply", label = "reply to your last tell" },
+  { key = "say",   label = "say in the room"        },
+  { key = "spo",   label = "spouse channel"         },
+}
+table.sort (CHANNELS, function (a, b) return a.key < b.key end)
+
+local function echo (msg)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ", CLR_MSG, "", msg)
+end
+
+-- Read one GMCP section into a local table. nil if GMCP has nothing yet.
+local function gmcpRead (what)
+  local ok, rc, s = pcall (CallPlugin, GMCP_ID, "gmcpdata_as_string", what)
+  if not ok or rc ~= error_code.eOK or type (s) ~= "string" or s == "" then return nil end
+  local f = loadstring ("return " .. s)
+  if not f then return nil end
+  local ok2, val = pcall (f)
+  if ok2 then return val end
+  return nil
+end
+
+-- Aardwolf colour codes start with @; double any @ so names print literally.
+local function esc (s) return (tostring (s):gsub ("@", "@@")) end
+
+local function buildMessage ()
+  local status = gmcpRead ("char.status")
+  if type (status) ~= "table" then
+    return nil, "No GMCP status yet. Try again in a moment."
+  end
+  local enemy = status.enemy and tostring (status.enemy) or ""
+  if tonumber (status.state) ~= 8 or enemy == "" then
+    return nil, "You are not fighting anything."
+  end
+  local pct = tonumber (status.enemypct)
+  local hp  = pct and (pct .. "%") or "?"
+
+  local room = gmcpRead ("room.info")
+  if type (room) ~= "table" then room = {} end
+  local zone = (room.zone and tostring (room.zone) ~= "") and tostring (room.zone) or "unknown"
+  local name = (room.name and tostring (room.name) ~= "") and tostring (room.name) or "unknown"
+  local num  = tonumber (room.num)
+  local vnum = (num and num > 0) and tostring (num) or "none"
+
+  return "@x099[@x045Target Report@x099] "
+      .. "@WEnemy: @x099[@x048" .. esc (enemy) .. "@x099] "
+      .. "@W| HP: @x099[@x048" .. hp .. "@x099] "
+      .. "@W| Area: @x048" .. esc (zone) .. " "
+      .. "@W| Room: @x048" .. esc (name) .. " "
+      .. "@W| vnum: @x099[@x048" .. vnum .. "@x099]@w"
+end
+
+function aliasReport (name, line, wildcards)
+  local chan = wildcards.chan:lower ()
+  local msg, err = buildMessage ()
+  if not msg then
+    echo (err)
+    return
+  end
+  Send (chan .. " " .. msg)
+end
+
+function aliasHelp ()
+  print ("")
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", "v" .. VERSION .. " help")
+  ColourNote (CLR_MSG, "", "  While fighting, reports the mob, its HP and your room to a channel.")
+  print ("")
+  for _, c in ipairs (CHANNELS) do
+    ColourNote (CLR_HI, "", string.format ("  %-16s", "target " .. c.key), CLR_MSG, "", c.label)
+  end
+  ColourNote (CLR_HI, "", string.format ("  %-16s", "target"), CLR_MSG, "", "this help")
+  print ("")
+end
+
+function OnPluginInstall ()
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", "v" .. VERSION .. " loaded. Type ", CLR_HI, "", "target", CLR_MSG, "", " for help.")
+end
+
+]]>
+</script>
+</muclient>
