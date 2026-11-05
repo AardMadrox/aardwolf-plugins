@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-06-27"
    requires="4.00"
-   version="1.3"
+   version="1.4"
    >
 <description trim="y">
 <![CDATA[
@@ -75,6 +75,13 @@ HOW IT WORKS
 
   parse_field matches a field on its own line, and the callers pass case
   insensitive character classes so NAME, Name and name all work.
+
+  THE NAME SHOWN IN THE LIST comes from the plugin name= attribute,
+  unless the file has a line of its own holding mpm_name="Some Name",
+  normally inside its MAINTAINER NOTES comment. MUSHclient refuses to
+  load a plugin whose name= has a space, so this is the only way to
+  list one with a space. It changes the listing and nothing else: the
+  file, the id and the version checks are unaffected. Added in 1.4.
 
   VERSION COMPARISON IS NUMERIC, and this is the single most important
   thing to understand here. MUSHclient stores a plugin's version as a
@@ -207,7 +214,10 @@ function mpm_on_plugin(retval, page, status, headers, full_status, request_url)
       local entry = {}
       entry.url       = request_url
       entry.file      = file_from_url(request_url)
-      entry.name      = parse_field(page, "[Nn][Aa][Mm][Ee]") or entry.file:gsub("%.xml$", "")
+      -- A plugin name cannot contain a space, so a plugin may carry its own
+      -- listing name on a line reading mpm_name="Some Name".  1.4.
+      entry.name      = parse_field(page, "mpm_name") or parse_field(page, "[Nn][Aa][Mm][Ee]")
+                        or entry.file:gsub("%.xml$", "")
       entry.ghver     = parse_field(page, "[Vv][Ee][Rr][Ss][Ii][Oo][Nn]") or "0"
       entry.id        = parse_field(page, "[Ii][Dd]") or ""
       entry.installed = entry.id ~= "" and IsPluginInstalled(entry.id) or false

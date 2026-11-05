@@ -18,6 +18,9 @@
 <!--
 MAINTAINER NOTES (added 2026-11-04)
 ====================================================================
+NAME SHOWN IN THE PLUGIN MANAGER
+  mpm_name="Finger Notes"
+
 WHAT IT DOES
   Lets you keep a private note on any player. Whenever you finger that
   player, online or offline, the note prints as the last thing in the
@@ -66,9 +69,10 @@ DATA AND STATE
   save_state is off. If only the .tmp exists at load, it is used.
 
 WHEN EDITING
-  * name= is Finger_Notes because that is what the plugin manager lists.
-    It cannot be "Finger Notes": MUSHclient refuses to load a plugin
-    whose name has anything but letters, numbers and underscores.
+  * name= cannot be "Finger Notes": MUSHclient refuses to load a plugin
+    whose name has anything but letters, numbers and underscores. The
+    mpm_name line at the top of these notes is what gives the plugin
+    manager the version with a space. Keep it on a line of its own.
   * Other plugins may trigger on the 60 dash rule too. Do NOT add
     StopEvaluatingTriggers to fnote_footer: it would starve them.
     Gagging alone does not, since triggers in other plugins still run.
