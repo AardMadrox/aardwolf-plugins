@@ -14,7 +14,7 @@
    purpose="Create, manage, and use colorful text gradients."
    date_written="2023-05-29 13:36:58"
    requires="5.07"
-   version="1.4"
+   version="1.5"
    >
 <description trim="y">
 <![CDATA[
@@ -37,6 +37,7 @@ the Aard color string for restrings, descriptions and group names.
 COMMANDS
 Everything is under grad. grad help lists them all, grad list is the way in.
 grad100 send freshness say Hello keeps the colored text to 100 characters.
+string @x99Hi@w doubles every @ and copies it to the clipboard. grad string too.
 
 HOW IT WORKS
 Everything is in this one file so the plugin manager can install it: the first
@@ -53,6 +54,8 @@ a reinstall does not lose them. A brand new database gets four starter gradients
 so the help examples work; an existing database is never touched.
 
 WHEN EDITING
+SetClipboard can stop the client with a modal box and gives no return code, so
+it stays on typed commands only, never a trigger or timer.
 A color code reads up to 3 digits, so a short code in front of a digit must be
 written in full: @x99 before 69 is @x09969. A 3 digit code followed by a digit
 is already fine. Both the generator and the limit renderer obey this.
@@ -68,6 +71,15 @@ themselves; a help line starting with grad prints as a command.
   <alias
    script="gradients_dispatch"
    match="^[ ]*grad(ients)? (.*)"
+   enabled="y"
+   regexp="y"
+   send_to="12"
+   sequence="100"
+  >
+  </alias>
+  <alias
+   script="gradients_string_alias"
+   match="^[ ]*string (.*)"
    enabled="y"
    regexp="y"
    send_to="12"
@@ -2370,7 +2382,7 @@ dofile(GetInfo(60) .. "aardwolf_colors.lua")
 local utils = require("utils")
 local sqlite3 = require("sqlite3")
 
-local VERSION = "1.4"
+local VERSION = "1.5"
 
 ----------------------------------------------------------
 
@@ -2447,6 +2459,22 @@ Examples:
   grad send pastelbow tell bob womble time!
 
   grad send purplish gt Hey group look at my colored text zomg.]],
+    },
+    String = {
+      command = "string <color string>",
+      summary = "Doubles every @ in a color string and copies it to the clipboard.",
+      body = [[Takes a color string, doubles every @ in it, and puts the result on your
+clipboard ready to paste. Quotes around the string are optional and get dropped.
+
+Useful when a color string has to survive being read twice, like when a group
+inviter plugin renames a group. grad string does the same thing.
+
+Examples:
+  string @x99H@x45i@w
+
+  string "@x99H@x45i@w"
+
+Both copy @@x99H@@x45i@@w to the clipboard.]],
     },
     Limit = {
       command = "grad<number> send|print <gradient name> ...",
@@ -4606,7 +4634,7 @@ local function gradients_help(args)
       elseif option then
         ColourTell(CLR_HI, "", option)
         ColourNote(CLR_MSG, "", rest)
-      elseif line:match("^%s*grad") then
+      elseif line:match("^%s*grad") or line:match("^%s+string ") then
         ColourNote(CLR_HI, "", line)
       elseif line:match("^Examples?:$") then
         ColourNote(CLR_NAME, "", line)
@@ -4817,6 +4845,28 @@ local function gradients_report(args)
   Send(command .. " " .. grad)
 end
 
+---Doubles every @ in a color string and copies the result to the clipboard.
+---Only ever runs from something typed: SetClipboard can stop the client with a
+---modal box, so it must never be called from a trigger or timer.
+---@param args string
+local function gradients_string(args)
+  local text = trim(args or "")
+
+  text = text:match('^"(.*)"$') or text
+
+  if #text == 0 then
+    reportError("Nothing to Copy", "Give me a color string to copy, like: string @@x99H@@x45i@@w")
+    return
+  end
+
+  local doubled = text:gsub("@", "@@")
+
+  SetClipboard(doubled)
+
+  -- Doubled again for the echo, which uses up one layer.
+  echo("Copied to the clipboard, paste it in: " .. AC_HI .. doubled:gsub("@", "@@"))
+end
+
 ---Prints version information.
 local function gradients_about()
   header("Gradients v" .. VERSION)
@@ -4865,6 +4915,7 @@ function gradients_dispatch(_, _, raw)
     report = gradients_report,
     sampler = gradients_sampler,
     send = gradients_send,
+    string = gradients_string,
     view = gradients_view,
   }
 
@@ -4892,6 +4943,12 @@ function gradients_dispatch(_, _, raw)
   else
     method(commandArgs)
   end
+end
+
+---Entry point for the bare string command.
+---@param raw string[] [1] is everything after the word string.
+function gradients_string_alias(_, _, raw)
+  gradients_string(raw[1])
 end
 
 ---Entry point for grad<number>: grad send or grad print with a length limit.
