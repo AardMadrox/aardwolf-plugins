@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="7.3"
+   version="7.5"
    >
 </plugin>
 
@@ -78,6 +78,34 @@ COMMANDS
   exit, so every speedwalk through it was hijacked into a walk to
   Artificer's Mayhem.  Only mm, mmr and mmout/mmo are aliases; links
   send "mm <area> ...", and "mmout <area>" names an area to leave.
+
+  7.5: THE NUMBERED MAPPER EXITS WORK AGAIN (astral12, prosper3).  The
+  numbered custom exits in the mapper database are named <area keyword>
+  <number>, and the mapper walks a custom exit by Executing its name, so an
+  alias has to catch it.  6.6 removed the bare area words as aliases - the
+  mapper was sending Elemental Chaos's "mayhem" exit through Execute and
+  getting a walk to Artificer's Mayhem - and the numbered form went with
+  them, which killed every astral1-12, prosper1-16, mayhem1, nott1 and
+  prom1 exit in the mapper.  The comment on mm_number had claimed
+  "prosper3, sahu2" matched there ever since; its pattern was ^(mm)(\d+)$
+  and only ever matched "mm1".  Restored as its own alias with the digits
+  REQUIRED, so the bare words are still ordinary words and the Elemental
+  Chaos collision stays fixed.  No Lua changed: mm_command already resolved
+  the keyword and a bare number.
+
+  7.4: MMOUT WANDERS INSTEAD OF FORGETTING THE MAP.  mmo out of the
+  Nenukon's Pit of Monuhi walked the same five-move circuit thirteen times.
+  Reading the saved map explained it exactly: standing at 31798, only 5 of
+  the 50 rooms the map knew were reachable, and NEITHER way out (31784,
+  31818) was one of them.  31797 had no outbound links at all - nothing can
+  be seeded out of a maze room - so the router dead-ended there every time,
+  decided it had explored everything it could reach, and wiped the map.
+  The wipe is what made it a loop: it throws away the maze links just
+  learned, which are the only thing that could ever build a route out, and
+  re-seeds the same five-room pocket.  So on an out walk, before wiping,
+  take a real exit of the room with wander_step () and keep the map.  The
+  sweep below has done exactly this, for exactly this reason, since the
+  Gauntlet.  Gated on out_walk so a plain hunt is untouched.
 
   7.3: documentation only. 7.2's closing claim that MarketWatch and three
   others carried the same latent bug was wrong, and it was published. The
@@ -656,13 +684,44 @@ WHEN EDITING
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
   </alias>
-  <!-- The same thing with the number stuck on: mm1, prosper3, sahu2.  The
-       alias above cannot cover it, because after the command word it wants
-       either the end of the line or a space, so "mm1" falls through it.
-       Digits only, which is what keeps this off mmo, mmout and mmr. -->
+  <!-- The same thing with the number stuck on: mm1.  The alias above
+       cannot cover it, because after the command word it wants either the
+       end of the line or a space, so "mm1" falls through it.  Digits only,
+       which is what keeps this off mmo, mmout and mmr.  The AREA keyword
+       with a number on it - astral12, prosper3 - is the alias below; this
+       comment used to claim those matched here, and they never did. -->
   <alias
     match="^(mm)(\d+)$"
     script="mm_command" name="mm_number"
+    enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
+  >
+  </alias>
+
+  <!-- THE AREA KEYWORD WITH A NUMBER ON IT: astral12, prosper3, sahu2.
+       THIS IS WHAT THE MAPPER SENDS, and it is the only thing that makes
+       the numbered custom exits in the mapper database work.  Those exits
+       are NAMED <area keyword><number> - astral12 is 27898 -> 27919,
+       Falling into Darkness - and the mapper walks a custom exit by
+       Executing its name, so with no alias to catch it the name goes
+       through to the MUD as a command and the exit is simply dead.
+       6.6 took the bare area words out as aliases for a good reason: the
+       mapper sends custom exits through Execute, and Elemental Chaos has a
+       plain "mayhem" exit, so every speedwalk across it was swallowed here
+       and turned into a walk to Artificer's Mayhem.  The NUMBERED form got
+       dropped along with them, which nothing needed - and that killed
+       every astral1-12, prosper1-16, mayhem1, nott1 and prom1 exit in the
+       mapper at a stroke.  Restored in 7.5.
+       Digits are REQUIRED, so the bare words stay ordinary words and the
+       Elemental Chaos collision cannot come back: "mayhem" does not match
+       this, only "mayhem1" does, and every <word><number> custom exit in
+       the database is one of these areas' own.
+       mm_command already handles it - it resolves the keyword through
+       BYCMD and a bare number argument through pick () - so only the way
+       in was ever missing.  Longest keyword first, so ft1 cannot be read
+       as a shorter word with stray digits. -->
+  <alias
+    match="^(goldrush|gallows|nenukon|prosper|astral|dunoir|infamy|mayhem|gaunt|gwill|times|dark|dead|hele|nott|prom|sahu|scar|vale|ft1|nix|xyl)(\d+)$"
+    script="mm_command" name="mm_area_number"
     enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="100"
   >
   </alias>
@@ -3895,7 +3954,7 @@ local function reopen_crossed ()
   -- is exactly what move ()'s wall guard reads, so the guard passed it
   -- through, the MUD said "Alas, you cannot go that way", mm_blocked ()
   -- crossed it off, this reopened it, and round again - fifty six map
-  -- wipes of walking into one wall before the run gave up.
+  -- wipes of walking into one wall before it was stopped by hand.
   --
   -- In Rose Ether the same reopen is right, because there the refusal is
   -- not a wall: the gas "is at some points impassable" and the impassable
@@ -4441,6 +4500,36 @@ function advance ()
         return advance ()
       end
     end
+    -- (7.4) The map has nothing left to offer, but the map is not the
+    -- area.  Walking out of the Nenukon's Pit of Monuhi, only five of the
+    -- fifty rooms the map knew were reachable from the pit, and neither
+    -- way out was among them: 31797 had no outbound links at all, because
+    -- nothing can be seeded OUT of a maze room, so the router dead-ended
+    -- there every single time.  The wipe below then threw away the maze
+    -- links just learned, re-seeded the same five-room pocket and did it
+    -- again - thirteen rounds of an identical five-move circuit before it
+    -- was stopped by hand.  The way out of the pit is genuinely walkable;
+    -- it was only ever missing from the map.  So take a real exit of this
+    -- room instead and KEEP what has been learned, which is the only
+    -- thing that can ever build a route out.  wander_step () prefers an
+    -- exit never walked, then the one walked longest ago, so this covers
+    -- the place rather than bouncing.  Same call the sweep makes below
+    -- for the same reason.  Falls through to the wipe when the room has
+    -- no exit left to offer, and max_steps () still bounds the run.
+    -- Gated on out_walk: a plain "<area> <mob>" hunt is untouched, which
+    -- is the lesson from 6.9 - a change made for one area broke another.
+    if out_walk then
+      local d = wander_step ()
+      if d then
+        if debug_on then
+          note ("@x099[@x045MM@x099]@w nothing untried and no route out " ..
+                "from @x048" .. cur .. "@w - wandering @x048" .. d ..
+                "@w rather than forgetting the map.")
+        end
+        move (d)
+        return
+      end
+    end
     -- "Explored everything I can reach" is only ever true of the map we
     -- happen to be holding, and in a maze that reshuffles that map is
     -- exactly what goes stale - the room IS reachable, just not by the
@@ -4458,6 +4547,20 @@ function advance ()
       stop ("Nowhere left to walk from here and it is not found - stopped. " ..
             "Walk out and back in.", true)
       return
+    end
+    if debug_on then
+      local ex, kn = {}, {}
+      for _, d in ipairs (DIRS) do
+        if exits[cur] and exits[cur][d] then table.insert (ex, d) end
+        if edges[cur] and edges[cur][d] then
+          table.insert (kn, d .. "=" .. edges[cur][d])
+        end
+      end
+      note ("@x099[@x045MM@x099]@w wiping at @x048" .. cur ..
+            "@w  exits=" .. (table.concat (ex, ",") ~= "" and
+            table.concat (ex, ",") or "-") .. "  links=" ..
+            (table.concat (kn, ",") ~= "" and table.concat (kn, ",") or "-") ..
+            "  out_walk=" .. tostring (out_walk))
     end
     walked.lastwipe = walked.n
     wipes = wipes + 1
