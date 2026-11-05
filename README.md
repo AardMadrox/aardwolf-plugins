@@ -29,6 +29,7 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 | **PortalMapper** | Lets you point to a bag, and then it maps all portals to mapper. Will set up dualweap if no wish, and wearportal if you have wish.
 | **RankTracker** | Shows your top 100 rankings, shows those around you, and shows top 10 in ranks. Works on channels as well.
 | **Target** | Reports what you are fighting to a channel: `target say`, `target gt`, `target ft`, `target clan`, `target reply` or `target spo` sends `[Target Report] Enemy: [the Fractal Anomaly] \| HP: [14%] \| Area: fractal \| Room: Fractals of the Weave \| vnum: [40600]` with the mob's name, its health left, the area, the room name and room number, all read live from GMCP. Out of combat it sends nothing and just tells you. `target` shows help. ⚠️ New — still needs live testing. |
+| **Finger Notes** | Keep your own note on any player and see it at the bottom of their `finger`, online or offline. `fnote <player> <note>` adds or replaces a note, `fnote <player>` shows it, `fnote clear <player>` removes it and `fnote list` shows them all. Long notes wrap to fit the finger box. Notes are saved in `FNotes_data.txt` beside the plugin. |
 
 ## Easiest way to install & stay updated: the Plugin Manager
 

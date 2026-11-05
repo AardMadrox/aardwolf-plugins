@@ -1,0 +1,414 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="Finger_Notes"
+   author="Eric"
+   id="540dabf2eb1c6cad148ef381"
+   language="Lua"
+   purpose="Keep your own note on a player and show it at the bottom of their finger"
+   date_written="2026-11-04"
+   requires="4.59"
+   version="1.1"
+   save_state="n"
+   >
+</plugin>
+
+<!--
+MAINTAINER NOTES (added 2026-11-04)
+====================================================================
+WHAT IT DOES
+  Lets you keep a private note on any player. Whenever you finger that
+  player, online or offline, the note prints as the last thing in the
+  finger, just above the closing rule. Players with no note get a
+  completely normal finger.
+
+COMMANDS
+  fnote <player> <note>   add a note, or replace the one already there
+  fnote <player>          show the note
+  fnote clear <player>    remove the note
+  fnote list              every note
+  fnote help  or  fnote   help
+  fnote reload            reload the plugin
+
+HOW IT WORKS
+  Two triggers:
+    fnote_header   always on. Matches "Player : Name (Online)" and the
+                   Offline form. If Name has a note it records the
+                   player and switches fnote_footer on.
+    fnote_footer   normally OFF. Matches the 60 dash closing rule, gags
+                   it, prints the note, then reprints the rule.
+
+  A line cannot be inserted above text that has already arrived, which
+  is why the rule is gagged and reprinted. It uses send_to 14 ("script
+  after omit"): anything printed from plain send_to 12 would be omitted
+  along with the line. TriggerStyleRuns is only supplied in that mode,
+  and it is how the rule keeps its original colours.
+
+  The footer trigger stays off unless a note is due, so an ordinary
+  finger and any other 60 dash line are never touched.
+
+  If a finger never reaches its rule (lost link), the pending player
+  would otherwise leak onto some later line. Each header clears the
+  previous pending player, and the footer ignores one older than
+  PENDING_SECS.
+
+  Wrapping is done here rather than left to the client, so long notes
+  stay inside the 60 column finger box with continuation lines lined up
+  under the first word. A single word longer than the line is split.
+
+DATA AND STATE
+  FNotes_data.txt beside the plugin. One note per line:
+  lowercase name, tab, note. Plain text, safe to read or hand edit while
+  the plugin is unloaded. Saved at once on every change through a temp
+  file, not SetVariable, so a reload or a client hang cannot lose notes.
+  save_state is off. If only the .tmp exists at load, it is used.
+
+WHEN EDITING
+  * name= is Finger_Notes because that is what the plugin manager lists.
+    It cannot be "Finger Notes": MUSHclient refuses to load a plugin
+    whose name has anything but letters, numbers and underscores.
+  * Other plugins may trigger on the 60 dash rule too. Do NOT add
+    StopEvaluatingTriggers to fnote_footer: it would starve them.
+    Gagging alone does not, since triggers in other plugins still run.
+  * Notes go through ColourNote, not the Aardwolf @ colour path, so an
+    @ in a note prints literally. Do not switch it to cnote.
+  * "clear <player>" only counts as the clear command with exactly one
+    word after it, so "fnote clear likes cats" is a note on a player
+    named Clear. The same goes for list, help and reload on their own.
+  * HELP is sorted at load. Keep adding to it in any order.
+  * This comment cannot contain a double hyphen.
+  * Bump version= and VERSION together.
+-->
+
+<aliases>
+  <alias script="FNote_Cmd" match="^fnote(?:\s+(.*?))?\s*$" enabled="y" regexp="y" ignore_case="y" sequence="100"></alias>
+</aliases>
+
+<triggers>
+  <trigger
+     name="fnote_header"
+     match="^-+ Player : (\S+) \(.+\) -+$"
+     enabled="y"
+     regexp="y"
+     keep_evaluating="y"
+     script="FNote_Header"
+     sequence="100">
+  </trigger>
+  <trigger
+     name="fnote_footer"
+     match="^-{60}$"
+     enabled="n"
+     regexp="y"
+     keep_evaluating="y"
+     omit_from_output="y"
+     send_to="14"
+     sequence="100"
+  ><send>FNote_Footer("%0")</send></trigger>
+</triggers>
+
+<script>
+<![CDATA[
+
+local VERSION  = "1.1"
+local TAG      = "FNotes"
+
+local CLR_TAG  = "#875FFF"   -- x099
+local CLR_NAME = "#00D7FF"   -- x045
+local CLR_MSG  = "#FFFFFF"   -- W
+local CLR_HI   = "#00FF87"   -- x048
+
+local WIDTH        = 60      -- finger output is 60 columns wide
+local PENDING_SECS = 5       -- longest a finger may take to reach its rule
+
+local DATA_NAME = "FNotes_data.txt"
+
+local HELP = {
+  { cmd = "fnote <player> <note>", desc = "add a note, or replace the existing one" },
+  { cmd = "fnote <player>",        desc = "show the note on a player"               },
+  { cmd = "fnote clear <player>",  desc = "remove the note on a player"             },
+  { cmd = "fnote help",            desc = "this help"                               },
+  { cmd = "fnote list",            desc = "show every note"                         },
+  { cmd = "fnote reload",          desc = "reload the plugin"                       },
+}
+table.sort (HELP, function (a, b) return a.cmd < b.cmd end)
+
+local gNotes     = {}    -- lowercase name -> note text
+local gPending   = nil   -- lowercase name waiting for the closing rule
+local gPendingAt = 0     -- os.time() the header was seen
+
+local function echo (msg)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ", CLR_MSG, "", msg)
+end
+
+-- Echo with one highlighted value in the middle of the sentence.
+local function echoHi (before, value, after)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", before, CLR_HI, "", value, CLR_MSG, "", after or "")
+end
+
+local function displayName (key)
+  return key:sub (1, 1):upper () .. key:sub (2)
+end
+
+----------------------------------------------------------------------
+-- Word wrap
+----------------------------------------------------------------------
+
+function FNote_Wrap (text, width)
+  local lines, cur = {}, ""
+  for word in text:gmatch ("%S+") do
+    -- A word too long for any line is split, filling whole lines.
+    while #word > width do
+      if cur ~= "" then
+        lines [#lines + 1] = cur
+        cur = ""
+      end
+      lines [#lines + 1] = word:sub (1, width)
+      word = word:sub (width + 1)
+    end
+    if cur == "" then
+      cur = word
+    elseif #cur + 1 + #word <= width then
+      cur = cur .. " " .. word
+    else
+      lines [#lines + 1] = cur
+      cur = word
+    end
+  end
+  if cur ~= "" then
+    lines [#lines + 1] = cur
+  end
+  return lines
+end
+
+-- "label: text", wrapped, continuation lines under the first word.
+local function printBlock (label, labelColour, text)
+  local head  = label .. ": "
+  local lines = FNote_Wrap (text, WIDTH - #head)
+  ColourNote (labelColour, "", label, CLR_TAG, "", ": ", CLR_MSG, "", lines [1] or "")
+  local indent = string.rep (" ", #head)
+  for i = 2, #lines do
+    ColourNote (CLR_MSG, "", indent .. lines [i])
+  end
+end
+
+local function printNote (key)
+  printBlock ("Note", CLR_NAME, gNotes [key])
+end
+
+----------------------------------------------------------------------
+-- Storage
+----------------------------------------------------------------------
+
+local function dataPath ()
+  local pluginFile = GetPluginInfo (GetPluginID (), 6) or ""
+  local pluginDir  = pluginFile:match ("^(.*[\\/])") or ""
+  return pluginDir .. DATA_NAME
+end
+
+local function loadNotes ()
+  gNotes = {}
+  local path = dataPath ()
+  local f = io.open (path, "rb") or io.open (path .. ".tmp", "rb")
+  if not f then return end
+  for row in f:lines () do
+    local key, text = row:match ("^([^\t]+)\t(.-)%s*$")
+    if key and text ~= "" then
+      gNotes [key:lower ()] = text
+    end
+  end
+  f:close ()
+end
+
+local function saveNotes ()
+  local keys = {}
+  for key in pairs (gNotes) do keys [#keys + 1] = key end
+  table.sort (keys)
+
+  local rows = {}
+  for _, key in ipairs (keys) do
+    rows [#rows + 1] = key .. "\t" .. gNotes [key] .. "\n"
+  end
+
+  local path = dataPath ()
+  local tmp  = path .. ".tmp"
+  local f, err = io.open (tmp, "wb")
+  if not f then
+    echo ("Could not save notes: " .. tostring (err))
+    return false
+  end
+  f:write (table.concat (rows))
+  f:close ()
+  os.remove (path)
+  local ok, rerr = os.rename (tmp, path)
+  if not ok then
+    echo ("Could not save notes: " .. tostring (rerr))
+    return false
+  end
+  return true
+end
+
+----------------------------------------------------------------------
+-- Finger display
+----------------------------------------------------------------------
+
+function FNote_Header (name, line, wildcards)
+  local key = wildcards [1]:lower ()
+  if gNotes [key] then
+    gPending   = key
+    gPendingAt = os.time ()
+    EnableTrigger ("fnote_footer", true)
+  else
+    gPending = nil
+    EnableTrigger ("fnote_footer", false)
+  end
+end
+
+-- Runs after the rule has been gagged (send_to 14), so printing order is
+-- simply: note, blank line, rule.
+function FNote_Footer (rule)
+  EnableTrigger ("fnote_footer", false)
+
+  local key = gPending
+  gPending = nil
+  if key and gNotes [key] and os.time () - gPendingAt <= PENDING_SECS then
+    printNote (key)
+    Note ("")
+  end
+
+  local runs = TriggerStyleRuns
+  if type (runs) == "table" and runs [1] and runs [1].text then
+    for _, v in ipairs (runs) do
+      ColourTell (RGBColourToName (v.textcolour), RGBColourToName (v.backcolour), v.text)
+    end
+    Note ("")
+  else
+    Note (rule)
+  end
+end
+
+----------------------------------------------------------------------
+-- Commands
+----------------------------------------------------------------------
+
+local function showHelp ()
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", "Version ", CLR_HI, "", VERSION,
+              CLR_MSG, "", " - your own notes, shown when you finger a player")
+  local pad = 0
+  for _, h in ipairs (HELP) do pad = math.max (pad, #h.cmd) end
+  for _, h in ipairs (HELP) do
+    ColourNote (CLR_HI, "", "  " .. h.cmd .. string.rep (" ", pad - #h.cmd + 2),
+                CLR_MSG, "", h.desc)
+  end
+end
+
+local function showList ()
+  local keys = {}
+  for key in pairs (gNotes) do keys [#keys + 1] = key end
+  table.sort (keys)
+  if #keys == 0 then
+    echo ("No notes yet.")
+    return
+  end
+  echoHi ("Notes: ", tostring (#keys))
+  for _, key in ipairs (keys) do
+    printBlock (displayName (key), CLR_HI, gNotes [key])
+  end
+end
+
+local function clearNote (key)
+  if not gNotes [key] then
+    echoHi ("No note set for ", displayName (key), ".")
+    return
+  end
+  local old = gNotes [key]
+  gNotes [key] = nil
+  if saveNotes () then
+    echoHi ("Cleared the note for ", displayName (key), ".")
+  else
+    gNotes [key] = old
+  end
+end
+
+local function setNote (key, text)
+  local old = gNotes [key]
+  gNotes [key] = text
+  if not saveNotes () then
+    gNotes [key] = old
+    return
+  end
+  if old then
+    echoHi ("Replaced the note for ", displayName (key), ". It was:")
+    ColourNote (CLR_MSG, "", "  " .. old)
+    echo ("It now reads:")
+  else
+    echoHi ("Note set for ", displayName (key), ":")
+  end
+  printNote (key)
+end
+
+function FNote_Cmd (name, line, wildcards)
+  local args  = (wildcards [1] or ""):gsub ("%s+", " ")
+  local lower = args:lower ()
+
+  if args == "" or lower == "help" then
+    showHelp ()
+    return
+  end
+  if lower == "list" then
+    showList ()
+    return
+  end
+  if lower == "reload" then
+    echo ("Reloading...")
+    Execute (GetAlphaOption ("script_prefix") ..
+             'DoAfterSpecial(1, "ReloadPlugin(\'' .. GetPluginID () .. '\')", sendto.script)')
+    return
+  end
+
+  local who = lower:match ("^clear (%a+)$")
+  if who then
+    clearNote (who)
+    return
+  end
+
+  local player, text = args:match ("^(%a+) (.+)$")
+  if not player then
+    player, text = args:match ("^(%a+)$"), ""
+  end
+  if not player then
+    echo ("That is not a player name. Type fnote help for the commands.")
+    return
+  end
+  player = player:lower ()
+
+  if text == "" then
+    if gNotes [player] then
+      printNote (player)
+    else
+      echoHi ("No note set for ", displayName (player), ".")
+    end
+    return
+  end
+
+  setNote (player, text)
+end
+
+function OnPluginInstall ()
+  loadNotes ()
+  local count = 0
+  for _ in pairs (gNotes) do count = count + 1 end
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", "Version ", CLR_HI, "", VERSION,
+              CLR_MSG, "", " loaded with ", CLR_HI, "", tostring (count),
+              CLR_MSG, "", count == 1 and " note. Type " or " notes. Type ",
+              CLR_HI, "", "fnote",
+              CLR_MSG, "", " for help.")
+end
+
+]]>
+</script>
+</muclient>
