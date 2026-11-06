@@ -7,10 +7,10 @@
    author="Eric"
    id="d6634259c460dd095f541e32"
    language="Lua"
-   purpose="Finds the good moonlight room during SKD taunt phase - NEW, still needs live testing"
+   purpose="Finds the good moonlight room during the SKD taunt phase"
    date_written="2026-07-23"
    requires="4.00"
-   version="1.0"
+   version="1.2"
    save_state="n"
 >
 </plugin>
@@ -18,8 +18,8 @@
 <!--
 MAINTAINER NOTES (added 2026-09-09)
 ====================================================================
-STATUS: still flagged in purpose= as needing live testing, and that flag
-  has not been cleared, so treat the behaviour below as unconfirmed.
+STATUS: the sweep hunt and its routing are proven in live runs. This
+  standalone build of them (v1.2) was checked by simulation.
 
 WHAT IT DOES
   Finds the GOOD moonlight room during the Sea King's Dominion taunt
@@ -35,7 +35,10 @@ COMMANDS
   ml                 gtell the good moonlight from the room you are in
   mlf                auto walk the arena and find it hands free
   mlf stop           abort a running hunt
-  mlf bounces <n>    set the clean entry count (1 to 99, default 5)
+  mlf method         toggle the hunt method: sweep <-> bounce
+  mlf method sweep|bounce   pick one directly
+  mlf bounces <n>    bounce method only: clean entry count (1 to 99,
+                     default 5)
   mlf help           help
 
 HOW IT WORKS
@@ -48,8 +51,22 @@ HOW IT WORKS
   Once two bad rooms are known, good_ml_line treats any OTHER moonlit
   room you walk into as the good one by elimination and gtells it.
 
-  THE HUNT (mlf). A state machine that walks the twelve arena rooms and
-  bounce tests each moonlit one, exactly the way a person would:
+  THE HUNT (mlf). A state machine that walks the twelve arena rooms. It
+  has two methods, saved in the config file and toggled with "mlf method".
+
+  SWEEP (default, new in v1.2). Never re tests a room. Keeps circling the
+  arena until TWO bad (caress) rooms have been seen, then goes to the
+  remaining moonlit room and calls it good by elimination. good_ml_line
+  records every shimmer in hunt_moonlit, including rooms only passed
+  through on the way somewhere, so the third room is usually already
+  known when the second bad one turns up. Once all three moonlit rooms
+  have been seen, sweep_advance stops walking the full circuit and hops
+  between just the moonlit rooms not yet known bad. If the room it heads
+  to as good caresses instead ("goto_good" mode), it resumes the sweep.
+  SWEEP_MAX_LAPS and SWEEP_MAX_VISITS stop it running forever.
+
+  BOUNCE (the old way). Bounce tests each moonlit room, exactly the way a
+  person would:
     walk into a room, wait HUNT_PEEK (0.25s), then judge
     caress seen           the room is bad, move on
     not moonlit           skip it
@@ -59,10 +76,26 @@ HOW IT WORKS
                           counting clean entries; after HUNT_BOUNCES of
                           them with no caress, call it good
 
-  NAVIGATION IS STRICTLY ONE MOVE AT A TIME. hunt_go() issues exactly one
-  "mapper goto" and arms a watchdog; no further movement is sent until
-  GMCP room.info confirms arrival at hunt_await. This is the core of the
-  design and is what stops the hunt walking into walls.
+  NAVIGATION IS STRICTLY ONE MOVE AT A TIME. hunt_go() sends exactly one
+  step and arms a watchdog; no further movement is sent until GMCP
+  room.info confirms arrival at hunt_await. This is the core of the
+  design and is what stops the hunt walking into walls. Steps are bare
+  directions taken from arena_exits (the real exits, read from the mapper
+  database), not "mapper goto", so there is no per-room "Going to:" line
+  and no dependence on the mapper's pathfinding.
+
+  AVOIDING KNOWN BAD MOONLIGHT. A bad room hurts every time you enter it,
+  so the hunt paths for itself (arena_bfs / arena_route) and treats a room
+  already marked bad as a wall. The eight main rooms are a ring, so there
+  is nearly always a way round - if the bad room sits in the direction we
+  were heading, the walk loops the other way instead of running through
+  it, and says so. Only when EVERY route crosses a bad room (an alcove
+  behind one, for instance) is it crossed, and that is announced too.
+  hunt_route_to() re-plans at every step, so a bad room discovered
+  mid-walk re-routes the rest of the walk; hunt_hops holds the steps left
+  and hunt_dest the room they lead to, and hunt_arrived() only judges a
+  room once the hops run out. hunt_next() also skips circuit rooms already
+  known bad, since they never need re-visiting.
 
   hunt_move_watchdog uses hunt_move_tok as a token so a stale watchdog
   from an earlier move cannot abort a newer one. HUNT_MOVE_TIMEOUT is 6
@@ -82,26 +115,31 @@ HOW IT WORKS
   room NOT already known to be bad, so you take less avoidable pain.
 
 DATA AND STATE
-  save_state is "n". The bounce count is saved to
+  save_state is "n". The bounce count and hunt method are saved to
   SKDMoonlight_config.txt next to the plugin, located with
   GetPluginInfo(GetPluginID(), 20), because SetVariable state is lost on a
   manual reinstall. Nothing else persists.
 
   ml_rooms is the hardcoded map of the twelve arena room numbers to their
   compass label and adjacent tank spots. GMCP room numbers arrive as
-  STRINGS, so the keys are strings; do not change them to numbers.
+  STRINGS, so the keys are strings; do not change them to numbers. The
+  tank lists are advice text for the gtell only - navigation uses
+  arena_exits, which is the real arena map (ring of eight plus four
+  alcoves) taken from the mapper database.
 
 WHEN EDITING
   * hunt_order is a full circuit of the arena. cmd_mlhunt rotates it so
     the hunt starts from wherever you are standing.
-  * HUNT_MAX_LAPS is 3; after three fruitless circuits the hunt gives up
-    rather than running forever.
+  * HUNT_MAX_LAPS is 3 (bounce) and SWEEP_MAX_LAPS is 10 (sweep, which
+    never re tests so it needs more passes for the random caress to
+    fire); after that many fruitless circuits the hunt gives up rather
+    than running forever.
   * bad_ml_line NEVER drives navigation. It only records facts. All
     movement decisions belong to the hunt state machine. Keep that split.
-  * DEAD CODE: hunt_alas_line() exists to re path after a blocked move,
-    but there is no trigger in the XML that calls it. If blocked moves
-    are a real problem, add a trigger for the "Alas, you cannot go that
-    way" line pointing at it; otherwise the function can be deleted.
+  * hunt_alas_line() re sends the current step after a blocked move and
+    gives up after 3 in a row. It now HAS its trigger ("Alas, you cannot
+    go that way") - it was dead code until v1.1, which matters more now
+    that steps are bare directions rather than mapper gotos.
   * cnote uses ColoursToStyles and stylesToANSI, pulled in with an
     explicit dofile of aardwolf_colors.lua. They are not free inside a
     plugin, so that line must stay.
@@ -113,6 +151,8 @@ WHEN EDITING
   <alias match="^mlf stop$"              enabled="y" regexp="y" sequence="200" script="cmd_mlhunt_stop"></alias>
   <alias match="^mlf help$"              enabled="y" regexp="y" sequence="200" script="cmd_help"></alias>
   <alias match="^mlf bounces (\d+)$"     enabled="y" regexp="y" sequence="200" script="cmd_set_bounces"></alias>
+  <alias match="^mlf method$"            enabled="y" regexp="y" sequence="200" script="cmd_set_method"></alias>
+  <alias match="^mlf method (sweep|bounce)$" enabled="y" regexp="y" sequence="200" script="cmd_set_method"></alias>
 </aliases>
 
 <triggers>
@@ -131,6 +171,16 @@ WHEN EDITING
    match="^.*moonlight.*caresses your cheek.*$"
    regexp="y"
    script="bad_ml_line"
+   sequence="100"
+  >
+  </trigger>
+
+  <!-- Blocked move during a hunt - re-send the step, give up after a few -->
+  <trigger
+   enabled="y"
+   match="^Alas, you cannot go that way\.$"
+   regexp="y"
+   script="hunt_alas_line"
    sequence="100"
   >
   </trigger>
@@ -211,7 +261,7 @@ local ml_rooms = {
   ["28379"] = { label = "NA", tank = {"N"} },
   ["28380"] = { label = "N",  tank = {"NA", "NW", "NE"} },
   ["28381"] = { label = "NW", tank = {"N", "W"} },
-  ["28383"] = { label = "W",  tank = {"NW", "SA", "SW"} },
+  ["28383"] = { label = "W",  tank = {"NW", "WA", "SW"} },
   ["28384"] = { label = "WA", tank = {"W"} },
   ["28387"] = { label = "SW", tank = {"W", "S"} },
   ["28389"] = { label = "S",  tank = {"SA", "SW", "SE"} },
@@ -222,8 +272,26 @@ local ml_rooms = {
   ["28382"] = { label = "NE", tank = {"N", "E"} },
 }
 
-local label_to_room = {}
-for num, d in pairs(ml_rooms) do label_to_room[d.label] = num end
+-- Arena geography, read straight off the mapper database (NOT inferred
+-- from the tank lists above): an eight room ring - N, NE, E, SE, S, SW,
+-- W, NW - with one dead-end alcove hanging off each of N, E, S and W.
+-- Each entry is the single direction that takes you from this room into
+-- that one. This is what lets the hunt route AROUND a room already known
+-- to be bad moonlight instead of walking straight through it.
+local arena_exits = {
+  ["28379"] = { {dir = "s", to = "28380"} },                                                        -- NA
+  ["28380"] = { {dir = "e", to = "28382"}, {dir = "w", to = "28381"}, {dir = "n", to = "28379"} },  -- N
+  ["28381"] = { {dir = "e", to = "28380"}, {dir = "s", to = "28383"} },                             -- NW
+  ["28382"] = { {dir = "w", to = "28380"}, {dir = "s", to = "28385"} },                             -- NE
+  ["28383"] = { {dir = "n", to = "28381"}, {dir = "s", to = "28387"}, {dir = "w", to = "28384"} },  -- W
+  ["28384"] = { {dir = "e", to = "28383"} },                                                        -- WA
+  ["28385"] = { {dir = "n", to = "28382"}, {dir = "s", to = "28388"}, {dir = "e", to = "28386"} },  -- E
+  ["28386"] = { {dir = "w", to = "28385"} },                                                        -- EA
+  ["28387"] = { {dir = "n", to = "28383"}, {dir = "e", to = "28389"} },                             -- SW
+  ["28388"] = { {dir = "n", to = "28385"}, {dir = "w", to = "28389"} },                             -- SE
+  ["28389"] = { {dir = "e", to = "28388"}, {dir = "w", to = "28387"}, {dir = "s", to = "28390"} },  -- S
+  ["28390"] = { {dir = "n", to = "28389"} },                                                        -- SA
+}
 
 local ml_bad       = {}    -- set: room -> true for known bad-moonlight rooms
 local ml_bad_queue = {}    -- same rooms in sighting order (max 2 kept)
@@ -244,12 +312,22 @@ local HUNT_MAX_LAPS  = 3
 -- single entry can never prove a room good - we bounce in/out and only
 -- call a room good after HUNT_BOUNCES clean entries with no caress.
 local HUNT_BOUNCES   = 5    -- clean in/out entries to call a moonlit room good (adjustable: mlf bounces N)
+-- Hunt method: "sweep" (circle until 2 bad rooms seen, third is good) or
+-- "bounce" (the old in/out testing). Toggle with: mlf method
+local hunt_method    = "sweep"
+local SWEEP_MAX_LAPS = 10   -- sweep never re-tests, so allow more laps
+local SWEEP_MAX_VISITS = 60 -- focused sweep: cap on room visits once the 3 moonlit rooms are known
+local hunt_visits    = 0
+local hunt_moonlit   = {}    -- sweep: set of rooms seen moonlit this hunt
 local HUNT_PEEK      = 0.25 -- short window after each entry to catch the (instant) caress
 local HUNT_MOVE_TIMEOUT = 6 -- seconds before a stuck move aborts the hunt
--- Navigation is strictly one move at a time: we only ever issue the
--- next mapper goto once room.info confirms arrival at hunt_await.
-local hunt_await     = nil   -- room number we are waiting to arrive at
-local hunt_mode      = nil   -- "walk" | "bounce_out" | "bounce_in"
+-- Navigation is strictly one move at a time: we only ever send the next
+-- step once room.info confirms arrival at hunt_await. Steps come from
+-- arena_exits, so a walk can be routed round known bad moonlight.
+local hunt_await     = nil   -- room number we are waiting to arrive at (the next STEP)
+local hunt_mode      = nil   -- "walk" | "bounce_out" | "bounce_in" | "goto_good"
+local hunt_dest      = nil   -- room this walk is actually heading for
+local hunt_hops      = {}    -- the steps still to take to reach hunt_dest
 local hunt_move_tok  = 0     -- token so a stale watchdog can't fire
 local eval_room      = nil   -- room we've arrived in and are judging
 local eval_shimmer   = false -- shimmer (moonlit) seen in eval_room
@@ -269,6 +347,7 @@ function hunt_abort(reason)
     eval_room = nil
     hunt_await = nil
     hunt_mode = nil
+    hunt_hops = {}
     test_room = nil
     hunt_note(reason .. " - hunt @x196aborted@w. Type @x048mlf@w to go again.")
   end
@@ -324,8 +403,15 @@ end
 function good_ml_line(name, line, wildcards)
   if hunting then
     -- shimmer = this room is moonlit; note it for the room we're judging
-    if eval_room and gmcp("room.info.num") == eval_room then
+    local here = gmcp("room.info.num")
+    if eval_room and here == eval_room then
       eval_shimmer = true
+    end
+    -- sweep: remember EVERY moonlit room we see, including ones we are only
+    -- passing through on the way to the next stop, so it is already known
+    -- when the 2 bad rooms turn up.
+    if hunt_method == "sweep" and here and ml_rooms[here] then
+      hunt_moonlit[here] = true
     end
     return
   end
@@ -348,27 +434,136 @@ function cmd_ml(name, line, wildcards)
 end
 
 -- ===========================================================
---  Moonlight hunt: mlf walks the arena, and in each moonlit room it
---  bounces in and out - the way a person does it - because the caress
---  is a RANDOM chance per entry (instant when it fires). Every entry:
---    * caress this entry  -> BAD moonlight, move on to the next room
---    * clean entry        -> count it; after HUNT_BOUNCES clean entries
---                            with no caress, call it GOOD and stop here
---  Once 2 bad rooms are known, the next moonlit room is GOOD by
---  elimination (no bouncing). Non-moonlit rooms are skipped after a
---  quick glance. Navigation is strictly one move at a time. Laps
---  repeat (up to 3) if nothing found.
+--  Moonlight hunt: mlf walks the arena. The caress is a RANDOM chance
+--  per entry (instant when it fires), so one clean entry proves nothing.
+--  Two methods (mlf method):
+--    SWEEP (default): never re-tests. Keep circling until 2 bad rooms
+--      have caressed, then the remaining moonlit room is GOOD by
+--      elimination. Up to 10 laps.
+--    BOUNCE: in each moonlit room, bounce in and out - the way a person
+--      does it. Caress = BAD, move on; HUNT_BOUNCES clean entries with
+--      no caress = GOOD. Up to 3 laps.
+--  Either way, once 2 bad rooms are known the next moonlit room is GOOD
+--  (no more testing), non-moonlit rooms are skipped after a quick glance,
+--  and navigation is strictly one move at a time.
 -- ===========================================================
 
--- Issue exactly one move and arm a watchdog. No other movement command
--- may be sent until room.info confirms arrival at this target.
-function hunt_go(room, mode)
-  hunt_await = room
-  hunt_mode = mode
+-- ---- Pain-aware routing ---------------------------------------------
+-- A known bad moonlight room hurts EVERY time you set foot in it, so we
+-- path over arena_exits ourselves instead of letting the mapper draw the
+-- shortest line. Known bad rooms are treated as walls, and because the
+-- eight main rooms form a ring there is nearly always a way round: we
+-- loop the other way rather than take another caress. Only when every
+-- route crosses a bad room (an alcove sitting behind one, say) do we
+-- walk through it.
+
+-- Shortest list of steps from `from` to `to`. With avoid_bad set, known
+-- bad rooms are not walked THROUGH - the destination itself is always
+-- allowed. Returns a list of room numbers, each one move from the last,
+-- or nil if there is no such route.
+local function arena_bfs(from, to, avoid_bad)
+  if from == to then return {} end
+  local prev, queue, head = {}, {from}, 1
+  local seen = {[from] = true}
+  while head <= #queue do
+    local cur = queue[head]
+    head = head + 1
+    for _, ex in ipairs(arena_exits[cur] or {}) do
+      local nxt = ex.to
+      if nxt == to then
+        local path, p = {to}, cur
+        while p ~= from do
+          table.insert(path, 1, p)
+          p = prev[p]
+        end
+        return path
+      end
+      if not seen[nxt] and not (avoid_bad and ml_bad[nxt]) then
+        seen[nxt] = true
+        prev[nxt] = cur
+        table.insert(queue, nxt)
+      end
+    end
+  end
+  return nil
+end
+
+-- The route to walk: the detour round the bad rooms when one exists,
+-- otherwise the direct line. Also returns whether the route is clean
+-- (false = forced to cross a bad room) and the direct distance, so the
+-- caller can say when it is taking the long way.
+local function arena_route(from, to)
+  if not arena_exits[from] or not arena_exits[to] then return nil end
+  local direct = arena_bfs(from, to, false)
+  local direct_len = direct and #direct or 0
+  local clean = arena_bfs(from, to, true)
+  if clean then return clean, true, direct_len end
+  return direct, false, direct_len
+end
+
+-- The direction from `from` into `to`, or nil if they are not neighbours.
+local function arena_dir(from, to)
+  for _, ex in ipairs(arena_exits[from] or {}) do
+    if ex.to == to then return ex.dir end
+  end
+  return nil
+end
+
+-- Send exactly one move and arm the watchdog. Nothing else may move
+-- until room.info confirms arrival at hunt_await. A single step is sent
+-- as a bare direction (silent and instant); only if we somehow do not
+-- know the exit does the mapper get asked to path it.
+local function hunt_hop()
+  local nxt = table.remove(hunt_hops, 1)
+  hunt_await = nxt
   hunt_move_tok = hunt_move_tok + 1
   local tok = hunt_move_tok
   DoAfterSpecial(HUNT_MOVE_TIMEOUT, "hunt_move_watchdog(" .. tok .. ")", 12)
-  Execute("mapper goto " .. room)
+  local here = gmcp("room.info.num")
+  local dir = here and arena_dir(here, nxt)
+  if dir then
+    Send(dir)
+  else
+    Execute("mapper goto " .. nxt)
+  end
+end
+
+-- Plan the walk from where we stand to `room` and take the first step.
+-- Called again at every step along the way, so a bad room discovered
+-- mid-walk re-routes whatever is left of it.
+local function hunt_route_to(room, announce)
+  local here = gmcp("room.info.num")
+  local hops, clean, direct = nil, true, 0
+  if here then hops, clean, direct = arena_route(here, room) end
+  local label = (ml_rooms[room] and ml_rooms[room].label) or room
+  if hops then
+    hunt_hops = hops
+  else
+    hunt_hops = {room}   -- unknown ground: hand it to the mapper
+  end
+  if announce and hops and #hops > 0 then
+    if not clean then
+      hunt_note("No way round the bad moonlight - crossing it to reach @x045" ..
+                label .. "@w.")
+    elseif direct > 0 and #hops > direct then
+      hunt_note("Looping round the bad moonlight to @x045" .. label ..
+                "@w (" .. #hops .. " rooms the long way, not " .. direct .. ").")
+    end
+  end
+  if #hunt_hops == 0 then
+    -- already standing in the target room: judge it where we are
+    hunt_await = room
+    DoAfterSpecial(0.1, "hunt_arrived(" .. string.format("%q", room) .. ")", 12)
+    return
+  end
+  hunt_hop()
+end
+
+-- Walk to `room` in `mode`, keeping out of known bad moonlight on the way.
+function hunt_go(room, mode)
+  hunt_mode = mode
+  hunt_dest = room
+  hunt_route_to(room, true)
 end
 
 -- If a move never lands (mapper confused, blocked, etc.) abort cleanly
@@ -385,32 +580,46 @@ function hunt_next()
   test_room = nil
   test_partner = nil
   test_count = 0
-  hunt_index = hunt_index + 1
-  if hunt_index > #hunt_route then
-    -- circuit done without finding the good room - go around again
-    hunt_laps = hunt_laps + 1
-    if hunt_laps >= HUNT_MAX_LAPS then
-      hunting = false
-      hunt_await = nil
-      hunt_mode = nil
-      hunt_note("Walked the arena " .. HUNT_MAX_LAPS .. " times without finding good moonlight - giving up. @x048mlf@w to retry.")
+  -- Step along the circuit, skipping any room already known to be bad
+  -- moonlight: it never needs visiting again this cycle, and walking in
+  -- would only buy another caress.
+  for _ = 1, #hunt_route do
+    hunt_index = hunt_index + 1
+    if hunt_index > #hunt_route then
+      -- circuit done without finding the good room - go around again
+      hunt_laps = hunt_laps + 1
+      local max_laps = (hunt_method == "sweep") and SWEEP_MAX_LAPS or HUNT_MAX_LAPS
+      if hunt_laps >= max_laps then
+        hunting = false
+        hunt_await = nil
+        hunt_mode = nil
+        hunt_note("Walked the arena " .. max_laps .. " times without finding good moonlight - giving up. @x048mlf@w to retry.")
+        return
+      end
+      if hunt_method == "sweep" then
+        hunt_note("Lap done, only " .. #ml_bad_queue .. " bad room(s) found so far - going around again.")
+      else
+        hunt_note("Lap done, no good moonlight found yet - going around again.")
+      end
+      hunt_index = 1
+    end
+    if not ml_bad[hunt_route[hunt_index]] then
+      hunt_go(hunt_route[hunt_index], "walk")
       return
     end
-    hunt_note("Lap done, no good moonlight found yet - going around again.")
-    hunt_index = 1
   end
-  hunt_go(hunt_route[hunt_index], "walk")
+  hunt_go(hunt_route[hunt_index], "walk")  -- every room marked bad (cannot happen with 2 marks)
 end
 
--- Pick an adjacent tank room to bounce out to, preferring one not
--- already known bad so we take less avoidable pain.
+-- Pick a neighbouring room to bounce out to (real exits, not the tank
+-- list), preferring one not already known bad so we take less avoidable
+-- pain.
 local function pick_partner(room)
-  local tanks = ml_rooms[room].tank
-  for _, lbl in ipairs(tanks) do
-    local r = label_to_room[lbl]
-    if r and not ml_bad[r] then return r end
+  local exits = arena_exits[room] or {}
+  for _, ex in ipairs(exits) do
+    if not ml_bad[ex.to] then return ex.to end
   end
-  return label_to_room[tanks[1]]
+  return exits[1] and exits[1].to
 end
 
 function cmd_mlhunt(name, line, wildcards)
@@ -439,14 +648,18 @@ function cmd_mlhunt(name, line, wildcards)
   hunt_laps = 0
   hunt_await = nil
   hunt_mode = nil
+  hunt_hops = {}
+  hunt_dest = nil
   eval_room = nil
   eval_shimmer = false
   eval_caressed = false
   test_room = nil
   test_partner = nil
   test_count = 0
+  hunt_moonlit = {}
+  hunt_visits = 0
   hunt_alas = 0
-  hunt_note("Moonlight hunt started - walking the arena. @x048mlf stop@w to abort.")
+  hunt_note("Moonlight hunt started (" .. hunt_method .. " method) - walking the arena. @x048mlf stop@w to abort.")
   hunt_next()
 end
 
@@ -459,7 +672,13 @@ function hunt_alas_line(name, line, wildcards)
     hunt_abort("Navigation blocked (kept hitting walls)")
     return
   end
-  Execute("mapper goto " .. hunt_await)
+  local here = gmcp("room.info.num")
+  local dir = here and arena_dir(here, hunt_await)
+  if dir then
+    Send(dir)
+  else
+    Execute("mapper goto " .. hunt_await)
+  end
 end
 
 function cmd_mlhunt_stop(name, line, wildcards)
@@ -468,6 +687,7 @@ function cmd_mlhunt_stop(name, line, wildcards)
     eval_room = nil
     hunt_await = nil
     hunt_mode = nil
+    hunt_hops = {}
     test_room = nil
     hunt_note("Moonlight hunt @x196aborted@w.")
   else
@@ -481,13 +701,119 @@ local function hunt_stop_good(room, reason)
   hunting = false
   hunt_await = nil
   hunt_mode = nil
+  hunt_hops = {}
   ml_announced = room
   gtell(ml_message(ml_rooms[room]))
   hunt_note(reason .. " - @x045" .. ml_rooms[room].label ..
             "@w is @x048good moonlight@w, stopping here.")
 end
 
--- HUNT_PEEK after each entry, judge what we saw.
+-- Sweep helper: the moonlit rooms we've seen that are not known bad.
+local function sweep_candidates()
+  local c = {}
+  for _, r in ipairs(hunt_order) do
+    if hunt_moonlit[r] and not ml_bad[r] then table.insert(c, r) end
+  end
+  return c
+end
+
+-- Sweep method: never re-test. Caress = bad. Once 2 bad rooms are known the
+-- remaining moonlit room is good - go straight to it if we already saw it,
+-- otherwise keep circling and the next non-bad moonlit room is it.
+-- If both bad rooms are known and we have already seen the third moonlit
+-- room (even just walking through it), head straight there.
+local function sweep_resolve()
+  if #ml_bad_queue < 2 then return false end
+  for _, r in ipairs(sweep_candidates()) do
+    if r ~= eval_room then
+      hunt_note("Both bad rooms known - heading to the room passed earlier, @x045" ..
+                ml_rooms[r].label .. "@w.")
+      hunt_go(r, "goto_good")
+      return true
+    end
+  end
+  return false
+end
+
+-- Sweep advance: until all 3 moonlit rooms are known, keep circling the whole
+-- arena. Once they are, only the moonlit rooms NOT yet known bad matter, so
+-- hop between just those (a few moves) instead of walking all 12 rooms again.
+local function sweep_advance()
+  local seen = 0
+  for _ in pairs(hunt_moonlit) do seen = seen + 1 end
+  if seen >= 3 then
+    local c = sweep_candidates()
+    if #c >= 1 then
+      hunt_visits = hunt_visits + 1
+      if hunt_visits > SWEEP_MAX_VISITS then
+        hunting = false
+        hunt_await = nil
+        hunt_mode = nil
+        hunt_note("Checked the moonlit rooms " .. SWEEP_MAX_VISITS .. " times without finding the second bad one - giving up. @x048mlf@w to retry.")
+        return
+      end
+      local function pos(r)
+        for i, rr in ipairs(hunt_order) do if rr == r then return i end end
+        return 0
+      end
+      local cur = pos(eval_room)
+      local pick = c[1]
+      for _, r in ipairs(c) do
+        if pos(r) > cur then pick = r break end
+      end
+      if pick ~= eval_room then
+        hunt_go(pick, "walk")
+        return
+      end
+    end
+  end
+  hunt_next()
+end
+
+local function hunt_judge_sweep()
+  -- every shimmer seen is a moonlit room, bad (caress) or not
+  if eval_shimmer or eval_caressed then hunt_moonlit[eval_room] = true end
+  if hunt_mode ~= "goto_good" and sweep_resolve() then return end
+  if eval_caressed then
+    hunt_note("@x045" .. ml_rooms[eval_room].label .. "@w caressed - @x196BAD@w (" ..
+              #ml_bad_queue .. "/2 known).")
+    if hunt_mode == "goto_good" then
+      hunt_note("The room we expected to be good caressed - resuming the sweep.")
+    end
+    if #ml_bad_queue >= 2 then
+      local c = sweep_candidates()
+      if #c >= 1 then
+        hunt_note("Both bad rooms known - heading to @x045" .. ml_rooms[c[1]].label .. "@w.")
+        hunt_go(c[1], "goto_good")
+        return
+      end
+    end
+    sweep_advance()
+    return
+  end
+  if hunt_mode == "goto_good" then
+    hunt_stop_good(eval_room, "Both bad moonlights found")
+    return
+  end
+  if not eval_shimmer then
+    sweep_advance()
+    return
+  end
+  if ml_bad[eval_room] then
+    sweep_advance()
+    return
+  end
+  hunt_moonlit[eval_room] = true
+  if #ml_bad_queue >= 2 then
+    hunt_stop_good(eval_room, "Both bad moonlights found")
+    return
+  end
+  hunt_note("@x045" .. ml_rooms[eval_room].label .. "@w is moonlit, no caress - noted, moving on.")
+  sweep_advance()
+end
+
+-- HUNT_PEEK after each entry, judge what we saw. Sweep has its own judge
+-- above; the rest of this function is the bounce method:
 --   caress            -> BAD, move on
 --   moonlit, walk-in  -> if the 2 bad rooms are already known, this other
 --                        moonlit room is GOOD by elimination (no bouncing);
@@ -496,6 +822,11 @@ end
 --                        with no caress, call it GOOD
 function hunt_judge()
   if not hunting or not eval_room then return end
+  if hunt_method == "sweep" then
+    hunt_judge_sweep()
+    return
+  end
+  -- ---- bounce method ----
   if eval_caressed then
     local bad = eval_room
     hunt_note("@x045" .. ml_rooms[bad].label .. "@w caressed - @x196BAD@w, moving on.")
@@ -531,6 +862,29 @@ function hunt_judge()
   end
 end
 
+-- Arrival at the room we were waiting for. A stop part way along a route
+-- just takes the next step (and re-paths, in case a bad room turned up
+-- while we were walking); only arrival at hunt_dest gets judged.
+function hunt_arrived(room_num)
+  if not hunting then return end
+  if not room_num or room_num ~= hunt_await then return end  -- passing through / not there yet
+  hunt_await = nil
+  hunt_alas = 0
+  if #hunt_hops > 0 then
+    hunt_route_to(hunt_dest, false)
+    return
+  end
+  if hunt_mode == "bounce_out" then
+    hunt_go(test_room, "bounce_in")  -- at the partner, straight back in
+    return
+  end
+  -- walk, goto_good or bounce_in arrival: judge this entry once the lines have printed
+  eval_room = room_num
+  eval_shimmer = false
+  eval_caressed = false
+  DoAfterSpecial(HUNT_PEEK, "hunt_judge()", 12)
+end
+
 -- GMCP drives the hunt: room.info = arrival (only acted on when it
 -- matches the room we're waiting for), char.status = combat check.
 function OnPluginBroadcast(msg, id, name, text)
@@ -543,29 +897,18 @@ function OnPluginBroadcast(msg, id, name, text)
     return
   end
   if text ~= "room.info" then return end
-  local room_num = gmcp("room.info.num")
-  if room_num ~= hunt_await then return end  -- passing through / not there yet
-  hunt_await = nil
-  hunt_alas = 0
-  if hunt_mode == "bounce_out" then
-    hunt_go(test_room, "bounce_in")  -- at the partner, straight back in
-    return
-  end
-  -- walk or bounce_in arrival: judge this entry once the lines have printed
-  eval_room = room_num
-  eval_shimmer = false
-  eval_caressed = false
-  DoAfterSpecial(HUNT_PEEK, "hunt_judge()", 12)
+  hunt_arrived(gmcp("room.info.num"))
 end
 
--- Bounce count is user-tunable and saved next to the plugin so it
--- survives reinstalls (SetVariable would not).
+-- Bounce count and hunt method are user-tunable and saved next to the
+-- plugin so they survive reinstalls (SetVariable would not).
 local BOUNCES_FILE = GetPluginInfo(GetPluginID(), 20) .. "SKDMoonlight_config.txt"
 
 function save_bounces()
   local f = io.open(BOUNCES_FILE, "w")
   if f then
     f:write("bounces=" .. HUNT_BOUNCES .. "\n")
+    f:write("method=" .. hunt_method .. "\n")
     f:close()
   end
 end
@@ -576,8 +919,29 @@ function load_bounces()
     for l in f:lines() do
       local n = l:match("^bounces=(%d+)")
       if n then HUNT_BOUNCES = tonumber(n) end
+      local m = l:match("^method=(%a+)")
+      if m == "sweep" or m == "bounce" then hunt_method = m end
     end
     f:close()
+  end
+end
+
+function cmd_set_method(name, line, wildcards)
+  local m = wildcards and wildcards[1]
+  if m == "sweep" or m == "bounce" then
+    hunt_method = m
+  else
+    hunt_method = (hunt_method == "sweep") and "bounce" or "sweep"
+  end
+  save_bounces()
+  if hunt_method == "sweep" then
+    cnote("@x099[@x045SKDMoonlight@x099]@w Moonlight hunt method: @x048SWEEP@w - circle the arena until 2 bad rooms are seen, then the third is good.")
+  else
+    cnote("@x099[@x045SKDMoonlight@x099]@w Moonlight hunt method: @x048BOUNCE@w - bounce in/out of each moonlit room (@x048" ..
+          HUNT_BOUNCES .. "@w clean entries = good).")
+  end
+  if hunting then
+    cnote("@x099[@x045SKDMoonlight@x099]@w Takes effect on the next @x048mlf@w (@x048mlf stop@w first to restart now).")
   end
 end
 
@@ -602,15 +966,15 @@ function cmd_help(name, line, wildcards)
   cnote("")
   cnote("@wCommands:@w")
   cnote("  @Wml@w                  gtell good moonlight from the room you're standing in")
-  cnote("  @Wmlf@w                 auto-walk the arena; in each moonlit room bounce in/out -")
-  cnote("                      a caress = bad, move on. Once @x0482@w bad rooms are known the")
-  cnote("                      next moonlight is auto-flagged good; otherwise no caress in")
-  cnote("                      @x048" .. HUNT_BOUNCES .. "@w entries = good. Stops standing in the good room.")
+  cnote("  @Wmlf@w                 auto-walk the arena (method now: @x048" .. string.upper(hunt_method) .. "@w), stop in the good room")
+  cnote("                      @x048SWEEP@w: circle until @x0482@w bad rooms caress, the third moonlit room is good")
+  cnote("                      @x048BOUNCE@w: bounce in/out of each moonlit room, no caress in @x048" .. HUNT_BOUNCES .. "@w entries = good")
   cnote("  @Wmlf stop@w            abort a running hunt")
-  cnote("  @Wmlf bounces <#>@w     set the no-caress entry count (now @x048" .. HUNT_BOUNCES .. "@w)")
+  cnote("  @Wmlf method@w          toggle sweep <-> bounce (or @Wmlf method sweep|bounce@w)")
+  cnote("  @Wmlf bounces <#>@w     set the bounce-method no-caress entry count (now @x048" .. HUNT_BOUNCES .. "@w)")
   cnote("  @Wmlf help@w            this help")
   cnote("")
-  cnote("@D(The hunt uses the Aardwolf mapper to move. It stops itself if a taunt lands,")
+  cnote("@D(The hunt walks the arena itself, around known bad rooms. It stops itself if a taunt lands,")
   cnote("@D the phase changes, or you get attacked.)@w")
   cnote("")
 end
