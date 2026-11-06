@@ -7,10 +7,10 @@
    author="Eric"
    id="8d619a4eff390535d5f34da3"
    language="Lua"
-   purpose="Reports the mob you are fighting, its HP percent and your room to a channel"
+   purpose="Reports your room to a channel, plus the mob and its HP percent when fighting"
    date_written="2026-11-04"
    requires="4.59"
-   version="1.1"
+   version="1.2"
    save_state="n"
    >
 </plugin>
@@ -24,7 +24,10 @@ WHAT IT DOES
     [Target Report] Enemy: [the Fractal Anomaly] | HP: [14%] |
       Area: fractal | Room: Fractals of the Weave | vnum: [40600]
   Brackets x099, the "Target Report" name x045, labels white, values x048.
-  Out of combat nothing is sent; you get a local notice instead.
+  Out of combat it sends the same line without the Enemy and HP parts:
+    [Target Report] Area: fractal | Room: Fractals of the Weave |
+      vnum: [40600]
+  (Before v1.2 it sent nothing out of combat.)
 
 COMMANDS
   target say|gt|ft|clan|reply|spo   send the report to that channel
@@ -42,8 +45,10 @@ HOW IT WORKS
   The channel name is sent as the command word: "say <msg>", "gt <msg>",
   "ft <msg>", "clan <msg>", "reply <msg>", "spo <msg>".
 
-  Fighting means state 8 AND a non-empty enemy name. Unmappable rooms
-  (num -1) report vnum [none].
+  Fighting means state 8 AND a non-empty enemy name; anything else gets
+  the room only report. Unmappable rooms (num -1) report vnum [none].
+  If GMCP has no room yet and you are not fighting, there is nothing
+  worth sending, so you get a local notice instead.
 
 DATA AND STATE
   None. save_state is off; there are no settings.
@@ -62,7 +67,7 @@ WHEN EDITING
 <script>
 <![CDATA[
 
-local VERSION  = "1.1"
+local VERSION  = "1.2"
 local TAG      = "Target"
 
 local CLR_TAG  = "#875FFF"   -- x099
@@ -103,29 +108,32 @@ local function esc (s) return (tostring (s):gsub ("@", "@@")) end
 
 local function buildMessage ()
   local status = gmcpRead ("char.status")
-  if type (status) ~= "table" then
-    return nil, "No GMCP status yet. Try again in a moment."
-  end
-  local enemy = status.enemy and tostring (status.enemy) or ""
-  if tonumber (status.state) ~= 8 or enemy == "" then
-    return nil, "You are not fighting anything."
-  end
-  local pct = tonumber (status.enemypct)
-  local hp  = pct and (pct .. "%") or "?"
+  if type (status) ~= "table" then status = {} end
+  local enemy    = status.enemy and tostring (status.enemy) or ""
+  local fighting = (tonumber (status.state) == 8 and enemy ~= "")
 
   local room = gmcpRead ("room.info")
-  if type (room) ~= "table" then room = {} end
+  if type (room) ~= "table" then
+    if not fighting then
+      return nil, "No GMCP room data yet. Try again in a moment."
+    end
+    room = {}
+  end
   local zone = (room.zone and tostring (room.zone) ~= "") and tostring (room.zone) or "unknown"
   local name = (room.name and tostring (room.name) ~= "") and tostring (room.name) or "unknown"
   local num  = tonumber (room.num)
   local vnum = (num and num > 0) and tostring (num) or "none"
 
-  return "@x099[@x045Target Report@x099] "
-      .. "@WEnemy: @x099[@x048" .. esc (enemy) .. "@x099] "
-      .. "@W| HP: @x099[@x048" .. hp .. "@x099] "
-      .. "@W| Area: @x048" .. esc (zone) .. " "
-      .. "@W| Room: @x048" .. esc (name) .. " "
-      .. "@W| vnum: @x099[@x048" .. vnum .. "@x099]@w"
+  local msg = "@x099[@x045Target Report@x099] "
+  if fighting then
+    local pct = tonumber (status.enemypct)
+    local hp  = pct and (pct .. "%") or "?"
+    msg = msg .. "@WEnemy: @x099[@x048" .. esc (enemy) .. "@x099] "
+              .. "@W| HP: @x099[@x048" .. hp .. "@x099] @W| "
+  end
+  return msg .. "@WArea: @x048" .. esc (zone) .. " "
+             .. "@W| Room: @x048" .. esc (name) .. " "
+             .. "@W| vnum: @x099[@x048" .. vnum .. "@x099]@w"
 end
 
 function aliasReport (name, line, wildcards)
@@ -142,7 +150,8 @@ function aliasHelp ()
   print ("")
   ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
               CLR_MSG, "", "v" .. VERSION .. " help")
-  ColourNote (CLR_MSG, "", "  While fighting, reports the mob, its HP and your room to a channel.")
+  ColourNote (CLR_MSG, "", "  Reports your area, room and room number to a channel.")
+  ColourNote (CLR_MSG, "", "  While fighting, it adds the mob and its HP.")
   print ("")
   for _, c in ipairs (CHANNELS) do
     ColourNote (CLR_HI, "", string.format ("  %-16s", "target " .. c.key), CLR_MSG, "", c.label)
