@@ -8,7 +8,7 @@
    language="Lua"
    purpose="re/rw/rn/rs/ru/rd retreat in one direction and keep retrying it on every failure"
    date_written="2026-08-28"
-   version="3.1"
+   version="3.2"
    >
 </plugin>
 
@@ -82,6 +82,14 @@ WHY THE TIME WINDOWS EXIST
   gFought is stamped AFTER the sweep, never before.  Stamping it
   first was the Crynn bug: it revived a leg the arm window should
   have dropped.
+  PENDING_SECS (120s) - all the windows above are measured from when
+    we SENT the retreat, but the MUD runs commands in order behind
+    spell lag.  With Auto_Caster stacking "c 541" the retreat ran ~30s
+    after it was typed (Dragon Nest, 2026-11-10): the fail line came in
+    past RETRY_WINDOW, was ignored, and nothing retried.  gPending
+    counts retreats sent but not yet answered (FAIL / stunned /
+    retreat-landed lines count one off).  While one is outstanding the
+    sweep keeps everything and the fail line is ours however late.
 
 OTHER THINGS WORTH KNOWING
   * The load line prints the VERSION local near the top of the script.
@@ -307,7 +315,7 @@ local CLR_HI   = "#00FF87"   -- x048
 local TAG = "RetreatFnSucks"
 
 -- Shown in the load line.  Keep in step with version= in the header above.
-local VERSION = "3.1"
+local VERSION = "3.2"
 
 local function echo (msg)
   ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
@@ -356,6 +364,13 @@ local ARM_SECS = 20
 -- Anything later is some other fight's business.
 local RETRY_WINDOW = 15
 
+-- A retreat we sent that the MUD has not answered yet is still sitting in
+-- the MUD's own command queue - behind spell lag, typically a run of auto-
+-- caster casts.  Its answer is ours however late it comes, so the windows
+-- above are not applied while one is outstanding.  This is only the hard
+-- cap, in case an answer line is never seen.
+local PENDING_SECS = 120
+
 local DIRS = {
   e = "east",
   w = "west",
@@ -385,6 +400,8 @@ local gLegSent = false   -- a leg is out there waiting to land; whichever
                          -- signal reports it first advances the queue once
 local gGmcp    = 0       -- room.info / char.status messages seen (retdebug)
 local gFought  = false   -- we have actually been in combat on this chain
+local gPending = 0       -- retreats sent that the MUD has not answered yet
+                         -- (still queued behind lag on the MUD side)
 
 -- Everything is off: moved on, fight over, cancelled, or plugin off.
 local function clearQueue ()
@@ -396,6 +413,12 @@ local function clearQueue ()
   gWalked  = false
   gLegSent = false
   gFought  = false
+  gPending = 0
+end
+
+-- The MUD answered one of our retreats (failed, landed, refused...).
+local function answered ()
+  if gPending > 0 then gPending = gPending - 1 end
 end
 
 -- Drop the queue once it can no longer mean anything.  Called before we read
@@ -403,6 +426,13 @@ end
 local function sweep ()
   if #gQueue == 0 then return end
   local now = os.time ()
+  -- A retreat still waiting its turn in the MUD's queue keeps everything
+  -- alive: the fight ending, the arm window and the stale timer were all
+  -- measured from when we SENT it, not from when the MUD will run it.
+  if gPending > 0 then
+    if now - gLast <= PENDING_SECS then return end
+    gPending = 0
+  end
   if now - gLast > STALE_SECS then clearQueue () return end
   -- Armed while nothing was fighting us and nothing ever started: let it go
   -- fairly quickly, so a direction typed minutes ago cannot jump into a
@@ -436,6 +466,7 @@ local function sendRetreat ()
   gWalked  = false
   gLegSent = true
   gLast    = os.time ()
+  gPending = gPending + 1
   Send ("retreat " .. gQueue[1])
 end
 
@@ -668,6 +699,7 @@ function RetreatDebug ()
                       .. (gWalked and ", walking" or ", retreating")
                       .. (gWaiting and ", held for verdict" or "")
                       .. ", tries " .. gTries)
+  helpLine ("pending", gPending .. " retreat(s) sent, not yet answered by the MUD")
   helpLine ("age",    (gLast == 0) and "-" or (os.time () - gLast) .. "s since last send")
 end
 
@@ -705,14 +737,21 @@ end
 -- send it again.  Only fires while a leg is armed, so the stun lines flying
 -- around an ordinary fight are ignored.
 function RetreatFailed (why)
+  -- Is this the answer to a retreat of ours still in the MUD's queue?  Read
+  -- it before the sweep, and count it off after, so the sweep still sees
+  -- the retreat as outstanding.
+  local ours = gPending > 0
+  local live = queueLive ()
+  answered ()
   if not gEnabled then return end
-  if not queueLive () then return end
+  if not live then return end
 
-  -- The line has to be answering a retreat WE sent moments ago.  Without this
-  -- an armed direction left over from earlier gets picked up by whatever
-  -- fight happens next - typing "re" outside a fight, portalling somewhere
-  -- else entirely, and having it fire there minutes later.
-  if os.time () - gLast > RETRY_WINDOW then
+  -- The line has to be answering a retreat WE sent.  Without this an armed
+  -- direction left over from earlier gets picked up by whatever fight
+  -- happens next - typing "re" outside a fight, portalling somewhere else
+  -- entirely, and having it fire there minutes later.  A retreat the MUD
+  -- had not answered yet is ours however long the lag held it (3.2).
+  if not ours and os.time () - gLast > RETRY_WINDOW then
     clearQueue ()
     return
   end
@@ -735,6 +774,7 @@ end
 -- the leg would sit at the front of the queue forever - swallowing the next
 -- direction you type instead of retreating with it.
 function RetreatLanded ()
+  answered ()
   if #gQueue > 0 and gLegSent then advanceQueue () end
 end
 
@@ -836,7 +876,7 @@ function OnPluginTelnetSubnegotiation (theType, data)
       -- own, so they still land here.
       if #gQueue > 0 and gLegSent and gWalked then
         advanceQueue ()
-      elseif #gQueue > 0 and not gFought then
+      elseif #gQueue > 0 and not gFought and gPending == 0 then
         -- Armed for a fight that never happened, and now we have walked,
         -- portalled or speedwalked somewhere else: it is not wanted here.
         clearQueue ()
