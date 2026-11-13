@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="7.5"
+   version="7.8"
    >
 </plugin>
 
@@ -106,6 +106,25 @@ COMMANDS
   take a real exit of the room with wander_step () and keep the map.  The
   sweep below has done exactly this, for exactly this reason, since the
   Gauntlet.  Gated on out_walk so a plain hunt is untouched.
+
+  7.8: THE LIST WINDOW STAYS ON TOP OF EVERY OTHER MINIWINDOW.  One row
+  still would not click after 7.2 - item 5 of the Botanical Gardens list,
+  and never a row near the top, so not 7.2's bug. The package layout
+  plugin (aard_layout.xml, add_title_dragger) lays a 15px INVISIBLE drag
+  bar along the top edge of the main text area: created transparent, so
+  nothing shows, but it still takes the mouse. It was at z-order 154, the
+  list at 35 (its slot from the z-order monitor), so whichever row lay
+  across that bar was dead. Which row depends on font size and where the
+  window sits, hence "item 4 or 5". MM_WinRaise () sets the list to z-order
+  99999 (what the package mapper uses for its config window) when it
+  opens, on every room move while it is up - the z-order monitor puts
+  every registered window back in its slot whenever ANY window is boosted
+  - and from the right-click "Bring To Front". Found with mm wincheck
+  (7.6/7.7, kept, not in help): row-by-row click spots, every overlapping
+  window with its z-order and the items it covers. mm wintop raises the
+  list by hand. WindowInfo code 22 read as z-order is from memory of the
+  MUSHclient docs, not the source; the 154-vs-35 reading matched what
+  happened (raising the list fixed the row), which is the evidence.
 
   7.3: documentation only. 7.2's closing claim that MarketWatch and three
   others carried the same latent bug was wrong, and it was published. The
@@ -2955,7 +2974,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "7.3"
+local VERSION  = "7.8"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -6486,10 +6505,29 @@ end
 -- room handler on every room (a global, so that handler takes on no more
 -- upvalues).  The area list, opened outside every area, is left alone.
 function MM_WinAreaCheck (num, zone)
-  if not gWin or not win_area then return end
+  if not gWin then return end
+  MM_WinRaise ()          -- something may have re-stacked it since (7.8)
+  if not win_area then return end
   local here = ROOM2AREA[num] or (zone and BYZONE[zone]) or nil
   if here and here.key == win_area then return end
   win_close ()
+end
+
+-- KEEP THE LIST ON TOP OF EVERY OTHER MINIWINDOW (7.8).  The package's
+-- main layout plugin lays an invisible drag bar, 15px tall, along the top
+-- edge of the main text area (aard_layout.xml add_title_dragger: created
+-- transparent, so it cannot be seen, but it still takes the mouse).  On
+-- Eric's screen it sat at z-order 154 and the list at 35 - the slot the
+-- z-order monitor hands it - so whichever list row lay across that bar
+-- (item 5 in the Botanical Gardens at Consolas 12) could not be clicked.
+-- Measured with mm wincheck; mm wintop (this, by hand) made the row work.
+-- 99999 is what the package mapper uses for its own config window
+-- (aardmapper.lua).  The z-order monitor puts every registered window
+-- back in its slot whenever ANY window is boosted or dropped, so this is
+-- re-applied on every room move while the list is up, and the library's
+-- right-click "Bring To Front" is pointed here too.
+function MM_WinRaise ()
+  if gWin then pcall (WindowSetZOrder, WIN_ID, 99999) end
 end
 
 -- The font changed: rebuild an open window so it takes the new one.
@@ -6551,6 +6589,9 @@ function win_open (rows)
       if prior then prior (self) end
       gWin = nil
     end
+    -- the right-click menu's "Bring To Front" would only boost it to the
+    -- top z-order slot, which is still under the layout's drag bar (7.8)
+    gWin.bring_to_front = function (self) MM_WinRaise () end
   end
 
   win_rows = rows
@@ -6600,6 +6641,7 @@ function win_open (rows)
   pcall (function () gWin:set_scroll (1) end)
   gWin:draw ()
   gWin:show ()
+  MM_WinRaise ()          -- above the layout's invisible drag bar (7.8)
   pcall (Repaint)
   return true
 end
@@ -6638,6 +6680,110 @@ end
 
 -- mm_command is defined above the window code and cannot see win_refont.
 function MM_FontApply () win_refont () end
+
+-- mm wincheck: a read-only report on the open list window, to find out
+-- why one row will not take a click (7.6).  It says, row by row, whether
+-- the row has a click spot and where, and names any other visible
+-- miniwindow that overlaps the list (whichever is on top takes the
+-- click).  Hover over the dead row, then press Enter on "mm wincheck":
+-- the "mouse is over" line says which spot, if any, the list thinks the
+-- mouse is on.  Changes nothing.
+function MM_WinCheck ()
+  local function say (s) ColourNote ("#00D7FF", "", "[wincheck] ", "#FFFFFF", "", s) end
+  if not gWin or not WindowInfo (WIN_ID, 5) then
+    say ("The list window is not open. Open it (mm win), then run this again.")
+    return
+  end
+  local L, T = WindowInfo (WIN_ID, 10) or 0, WindowInfo (WIN_ID, 11) or 0
+  local R, B = WindowInfo (WIN_ID, 12) or 0, WindowInfo (WIN_ID, 13) or 0
+  local tr = gWin.textrect or {}
+  say (string.format ("window %d,%d to %d,%d  lines shown %s-%s of %s  (fits %s)  line height %s",
+       L, T, R, B, tostring (tr.display_start_line), tostring (tr.display_end_line),
+       tostring (tr.num_wrapped_lines), tostring (tr.rect_lines), tostring (tr.line_height)))
+  say ("mouse is over spot: " .. tostring (WindowInfo (WIN_ID, 19)) ..
+       "   last mouse x,y in window: " .. tostring (WindowInfo (WIN_ID, 14)) ..
+       "," .. tostring (WindowInfo (WIN_ID, 15)))
+
+  -- (7.7) WindowInfo 22 is read as the stacking order (z-order) and 8 as
+  -- the create flags - 8 is confirmed by mw_theme_base.lua, 22 is from
+  -- memory of the MUSHclient docs and NOT verified.  Bigger z = on top.
+  say ("list z-order " .. tostring (WindowInfo (WIN_ID, 22)) ..
+       "  flags " .. tostring (WindowInfo (WIN_ID, 8)))
+
+  -- every click spot, grouped by the line it belongs to (the id ends
+  -- " <line> <start> <stop>", see TextRect:draw)
+  local spots, band = {}, {}
+  for _, hs in ipairs (WindowHotspotList (WIN_ID) or {}) do
+    local ln = hs:match (" (%d+) %d+ %d+$")
+    if ln then
+      ln = tonumber (ln)
+      local y1 = T + (WindowHotspotInfo (WIN_ID, hs, 2) or 0)
+      local y2 = T + (WindowHotspotInfo (WIN_ID, hs, 4) or 0)
+      spots[ln] = spots[ln] or {}
+      band[ln] = { y1, y2 }
+      table.insert (spots[ln], string.format ("x %d-%d y %d-%d",
+        L + (WindowHotspotInfo (WIN_ID, hs, 1) or 0), L + (WindowHotspotInfo (WIN_ID, hs, 3) or 0),
+        y1, y2))
+    end
+  end
+  local item = {}     -- line number -> the item number printed on it
+  for ln = (tr.display_start_line or 1), (tr.display_end_line or 0) do
+    local wl = tr.wrapped_lines and tr.wrapped_lines[ln]
+    local text = ""
+    if wl and wl[1] then
+      for _, s in ipairs (wl[1]) do text = text .. (s.text or "") end
+    end
+    item[ln] = text:match ("^%s*(%d+)%s")
+    local nlinks = (wl and wl[3]) and #wl[3] or 0
+    local got = spots[ln] and table.concat (spots[ln], "  ") or "NONE"
+    say (string.format ("line %2d  links %d  spots: %s  | %s", ln, nlinks, got,
+         text:gsub ("^%s+", ""):sub (1, 28)))
+  end
+
+  -- anything else on screen that covers part of the list, with the items
+  -- whose row it crosses
+  local hit = false
+  for _, id in ipairs (WindowList () or {}) do
+    if id ~= WIN_ID and WindowInfo (id, 5) then
+      local l, t = WindowInfo (id, 10) or 0, WindowInfo (id, 11) or 0
+      local r, b = WindowInfo (id, 12) or 0, WindowInfo (id, 13) or 0
+      if l < R and r > L and t < B and b > T then
+        hit = true
+        local pid = WindowInfo (id, 23)
+        local pname = (pid and pid ~= "") and (GetPluginInfo (pid, 1) or pid) or "world"
+        local covers = {}
+        for ln, yb in pairs (band) do
+          if t < yb[2] and b > yb[1] and l < 645 + L and item[ln] then
+            covers[#covers + 1] = tonumber (item[ln])
+          end
+        end
+        table.sort (covers)
+        say (string.format ("OVER: %s (%s) %d,%d-%d,%d z %s flags %s items %s",
+             id:sub (1, 40), tostring (pname), l, t, r, b,
+             tostring (WindowInfo (id, 22)), tostring (WindowInfo (id, 8)),
+             #covers > 0 and table.concat (covers, ",") or "-"))
+      end
+    end
+  end
+  if not hit then say ("No other visible window overlaps the list.") end
+  say ("end of report")
+end
+
+-- mm wintop: a test (7.7).  Puts the list window above every other
+-- miniwindow, the way the package mapper keeps its config window on top
+-- (aardmapper.lua: WindowSetZOrder (config_win, 99999)).  If the dead row
+-- clicks after this, the window was being stacked under something.
+function MM_WinTop ()
+  if not gWin or not WindowInfo (WIN_ID, 5) then
+    ColourNote ("#00D7FF", "", "[wincheck] ", "#FFFFFF", "", "The list window is not open. Open it (mm win) first.")
+    return
+  end
+  MM_WinRaise ()
+  pcall (Repaint)
+  ColourNote ("#00D7FF", "", "[wincheck] ", "#FFFFFF", "",
+    "List window moved to the top (z-order " .. tostring (WindowInfo (WIN_ID, 22)) ..
+    "). Now try clicking the dead item.")
+end
 
 -- The list in the main window: this area's, or the rows given.
 function menu_chat (rows)
@@ -6849,6 +6995,10 @@ function mm_command (name, line, wildcards)
   end
 
   if arg == "help" then show_help () return end
+
+  -- Diagnostic for a list row that will not click (7.6).  Not in help.
+  if arg == "wincheck" then MM_WinCheck () return end
+  if arg == "wintop" then MM_WinTop () return end
 
   -- Before the area is worked out: it is a setting, not something done in
   -- an area, and should not complain that you are not standing in a maze.
