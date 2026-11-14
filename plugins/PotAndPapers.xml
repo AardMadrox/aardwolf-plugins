@@ -1,0 +1,1546 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="PotAndPapers"
+   author="Eric"
+   id="951776408a91445a9baf95ff"
+   language="Lua"
+   purpose="Scribe and brew profiles in a miniwindow: one command makes a batch"
+   date_written="2026-11-13"
+   save_state="y"
+   requires="4.00"
+   version="1.4"
+   >
+<description trim="y">
+<![CDATA[
+PotAndPapers - a scroll scriber and potion brewer.
+
+  pnp config       the profile window (click any value to change it)
+  pnp help         every command
+
+Each profile is a command of your own, scribe or brew, a spell, how many
+spells go on one scroll or potion (1x to 4x), how many to make, a
+nickname, and what to run when the batch is done (sleep by default;
+pnp after <command> changes the default for new profiles).
+
+  sinc             make the profile's usual number
+  sinc 8           make 8
+
+A batch is one command.  A session is every batch until an hour has
+passed since the last scribe or brew.
+]]>
+</description>
+</plugin>
+
+<!--
+MAINTAINER NOTES (added 2026-11-13)
+====================================================================
+WHAT IT DOES
+  A replacement for Nok3_Alchemist. Profiles live in a themed
+  miniwindow; each profile scribes scrolls or brews potions, has its own
+  command that makes a batch, then runs an after command (data.default_after
+  for new profiles: "sleep" on a fresh install). Tracks the batch, the session and a lifetime total per profile.
+  Was called Scribe (v1.0, scribing only); renamed in 1.1 with the SAME
+  plugin id, so its saved profiles and stats carry over.
+
+COMMANDS
+  pnp config               open the window (chat list if the theme library is missing)
+  pnp help                 full list (sorted at load)
+  <profile cmd> [n]        make n, or the profile's own number
+
+NAMES IN ECHOES
+  Every echo names a profile by its label, type + per + "x" + nickname,
+  e.g. Scribe 2xReverse or Brew 3xIncomp (1.2: the type tells a scroll
+  profile from a potion one with the same nickname; counts were always
+  kept per profile id, never per label). The window's Name column shows
+  the short form (3xIncomp) because Type has its own column. The nickname defaults from the spell (NICKS
+  table, else the first word capitalised) and follows the spell when the
+  spell changes, unless it was edited by hand.
+
+HOW IT WORKS
+  A batch: get a blank (blank scroll / empty vial) from the bag, hold it,
+  scribe or brew the spell. Each "imbued" line adds a spell; at the
+  profile's count the item is removed and put in the bag. A fail line
+  counts a tried item and starts the next blank. The batch ends when the
+  asked number are MADE (successes, not tries), then runs the after
+  command. The get / hold / rem / put wording and the result lines are
+  copied from Nok3_Alchemist (scribe: imbued scroll, scroll vanishes,
+  bursts into flames; brew: imbued potion, potion vanishes, explodes
+  violently). The scribe lines have since been seen working live; the
+  brew lines have not been checked against the game yet.
+
+  "You lost your concentration while trying to scribe the new magic."
+  (seen live, 1.3) sends the same spell again: no spell added, nothing
+  counted. The trigger also takes "...trying to brew..." - that wording
+  is a GUESS, to be corrected if the real brew line differs.
+  MAX_RETRY losses in a row end the batch as stalled.
+
+  A spell with no result for WATCH_SECS seconds (out of mana, out of
+  blanks, asleep...) ends the batch as "stalled" and still runs the after
+  command, on the theory that mana is the usual reason.
+
+  Profile commands are real aliases made with AddAlias (flags as plain
+  numbers, from the gammon docs; alias_flag is not used anywhere in the
+  package so it could not be checked). Named pnp_run_<profile id>.
+
+SPELLS
+  The pick list is KNOWN_SPELLS plus data.spells, which grows whenever a
+  new spell is typed in (or pnp spell add). pnp spell del drops one.
+
+SESSIONS
+  A session opens on the first batch and stays open until SESSION_GAP
+  (one hour) after the last spell sent. 10 minutes after a batch ends
+  with nothing new, the session so far is echoed; another batch inside
+  the hour adds to the same session. At the hour it is closed, echoed,
+  and moved to history (last 30 kept). An expired session found on load
+  is closed quietly; one found by a redraw is closed with its echo.
+  pnp end and the [end session] button close it early (not during a
+  batch); a session with nothing made is just dropped, not kept in history.
+
+DATA AND STATE
+  Everything is one table, SetVariable "data" (serialize.save_simple),
+  flushed with SaveState() on every change so a hang or reinstall loses
+  nothing. On first run the bag is borrowed from Nok3_Alchemist's
+  alch_settings if that plugin is installed. Profiles from 1.0 have no
+  kind or nick; load_data fills them in (scribe, nickname from spell).
+
+WINDOW PROTECTIONS (same as MazeMobber's list window)
+  * ThemedTextWindow; links run Lua; every link only schedules PnP_Do on
+    a 0.1s timer, so nothing (dialogs, redraws, deletes) happens inside
+    the hotspot callback.
+  * zombie guard: a handle the library no longer knows is dropped.
+  * set_scroll after fit_contents (links sit near the top), keeping the
+    old scroll position on redraws.
+  * WindowSetZOrder 99999 after every show, on room.info / char.status,
+    and as the Bring To Front action, to sit above the layout plugin's
+    invisible drag bar (z 154).
+  * leftover window deleted on install and close; chat fallback.
+
+WHEN EDITING
+  * Nok3_Alchemist also answers sinc / binc and friends with a number. A
+    warning is printed 3s after load if it is enabled and a profile uses
+    one of its names.
+  * The default after command (1.4) is "sleep" on a fresh install. Data
+    saved before 1.4 that already used sleepx keeps sleepx as its default.
+-->
+
+<aliases>
+  <alias
+   match="^pnp(?:\s+(.*?))?\s*$"
+   enabled="y"
+   regexp="y"
+   ignore_case="y"
+   script="PnP_Command"
+   sequence="100"
+  >
+  </alias>
+</aliases>
+
+<triggers>
+  <!-- scribing -->
+  <trigger
+   enabled="n"
+   group="pnp_scribe"
+   keep_evaluating="y"
+   match="^You have imbued a new spell to the scroll\."
+   regexp="y"
+   script="PnP_Success"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="n"
+   group="pnp_scribe"
+   keep_evaluating="y"
+   match="^The magic enchantment has failed \-\-\- the scroll vanishes\.$"
+   regexp="y"
+   script="PnP_Fail"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="n"
+   group="pnp_scribe"
+   keep_evaluating="y"
+   match="^.* bursts into flames!$"
+   regexp="y"
+   script="PnP_Fail"
+   sequence="100"
+  >
+  </trigger>
+
+  <!-- lost concentration: send the same spell again (scribe wording seen
+       live 2026-11-13; brew wording is a guess, harmless if wrong) -->
+  <trigger
+   enabled="n"
+   group="pnp_retry"
+   keep_evaluating="y"
+   match="^You lost your concentration while trying to (scribe|brew) the new magic\.$"
+   regexp="y"
+   script="PnP_Retry"
+   sequence="100"
+  >
+  </trigger>
+
+  <!-- brewing -->
+  <trigger
+   enabled="n"
+   group="pnp_brew"
+   keep_evaluating="y"
+   match="^You have imbued a new spell to the potion\."
+   regexp="y"
+   script="PnP_Success"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="n"
+   group="pnp_brew"
+   keep_evaluating="y"
+   match="^The magic enchantment has failed \-\-\- the potion vanishes\.$"
+   regexp="y"
+   script="PnP_Fail"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="n"
+   group="pnp_brew"
+   keep_evaluating="y"
+   match="^.* explodes violently!$"
+   regexp="y"
+   script="PnP_Fail"
+   sequence="100"
+  >
+  </trigger>
+</triggers>
+
+<script>
+<![CDATA[
+
+require "aardwolf_colors"
+require "serialize"
+pcall (require, "themed_miniwindows")
+
+local VERSION = "1.4"
+local PNAME   = "PotAndPapers"
+local GMCP_ID = "3e7dedbe37e44942dd46d264"
+local ALCH_ID = "f7d314c12df89a4093baedfa"   -- Nok3_Alchemist
+
+-- Colour scheme
+local CLR_TAG  = "#875FFF"   -- x099 brackets, dim text
+local CLR_NAME = "#00D7FF"   -- x045 names
+local CLR_MSG  = "#FFFFFF"   -- W    message text
+local CLR_HI   = "#00FF87"   -- x048 values, commands, clickables
+local CLR_BAD  = "#FF5F5F"   -- x203 failures
+
+local IDLE_ECHO   = 600      -- seconds after a batch with nothing new: echo the session so far
+local SESSION_GAP = 3600     -- seconds after the last spell: the session closes
+local WATCH_SECS  = 12       -- a spell with no result by now: the batch has stalled
+local MAX_RETRY   = 10       -- lost concentration this many times in a row: stop
+
+-- what each kind of profile does
+local KIND = {
+  scribe = { label = "Scribe", verb = "scribe", item = "scroll", items = "scrolls",
+             blank = "blank scroll ", group = "pnp_scribe" },
+  brew   = { label = "Brew",   verb = "brew",   item = "potion", items = "potions",
+             blank = "empty vial ",   group = "pnp_brew" },
+}
+
+local KNOWN_SPELLS = { "curse", "incomplete healing", "party heal", "regeneration",
+                       "remove curse", "reverse align" }
+
+-- the default nickname for a spell
+local NICKS = {
+  ["incomplete healing"] = "Incomp",
+  ["reverse align"]      = "Reverse",
+  ["curse"]              = "Curse",
+  ["party heal"]         = "PartyHeal",
+  ["regeneration"]       = "Regen",
+  ["remove curse"]       = "RemCurse",
+}
+
+-- commands that must never become a profile
+local RESERVED = {}
+for w in ([[pnp scribe brew sleepx wakex sleep wake get put hold rem remove wear look
+           say quaff recite cast give drop sac sell buy list help where who]]):gmatch ("%S+") do
+  RESERVED[w] = true
+end
+
+-- what Nok3_Alchemist answers to
+local ALCH_CMDS = {}
+for w in ([[alch binc brc breg bscroll bvial qinc qrc qreg sinc scur srev sph sreg
+           rinc rcur rrev rph rreg]]):gmatch ("%S+") do
+  ALCH_CMDS[w] = true
+end
+
+-- ===========================================================
+--  Timers: DoAfterSpecial refuses anything under 0.1s and says
+--  nothing, so every timer goes through here.
+-- ===========================================================
+function PnP_After (delay, code)
+  if not delay or delay < 0.1 then delay = 0.1 end
+  local rc = DoAfterSpecial (delay, code, 12)
+  if rc ~= 0 then
+    ColourNote (CLR_BAD, "", "[" .. PNAME .. "] A timer was refused (code " .. tostring (rc) ..
+                             "): " .. tostring (code))
+  end
+end
+
+-- ===========================================================
+--  Echoes
+-- ===========================================================
+local function esc (s) return (tostring (s == nil and "" or s):gsub ("@", "@@")) end
+local function cnote (s) AnsiNote (stylesToANSI (ColoursToStyles (s))) end
+local function note (msg) cnote ("@x099[@x045" .. PNAME .. "@x099]@w " .. msg) end
+local function warn (msg) cnote ("@x099[@x045" .. PNAME .. "@x099]@w @x203" .. msg .. "@w") end
+local function hi (s) return "@x048" .. esc (s) .. "@w" end
+local function nm (s) return "@x045" .. esc (s) .. "@w" end
+local function trim (s) return (tostring (s or ""):gsub ("^%s+", ""):gsub ("%s+$", "")) end
+
+local function pct (made, tried)
+  if not tried or tried <= 0 then return "-" end
+  return string.format ("%.1f%%", made * 100 / tried)
+end
+
+local function auto_nick (spell)
+  spell = tostring (spell or ""):lower ()
+  if NICKS[spell] then return NICKS[spell] end
+  local w = spell:match ("^(%a+)") or "Spell"
+  return w:sub (1, 1):upper () .. w:sub (2)
+end
+
+local function kind (p) return KIND[p.kind] or KIND.scribe end
+-- 3xIncomp (the window's Name column, beside its own Type column)
+local function short_label (p) return tostring (p.per) .. "x" .. tostring (p.nick) end
+-- Scribe 3xIncomp / Brew 3xIncomp (every echo)
+local function label (p) return kind (p).label .. " " .. short_label (p) end
+
+-- ===========================================================
+--  Saved data
+-- ===========================================================
+local function default_data ()
+  return {
+    bag = "",
+    next_id = 3,
+    default_after = "sleep",
+    profiles = {
+      { id = 1, cmd = "sinc",  kind = "scribe", spell = "incomplete healing", nick = "Incomp",
+        per = 3, total = 8, after = "sleep", made = 0, tried = 0 },
+      { id = 2, cmd = "sinc2", kind = "scribe", spell = "incomplete healing", nick = "Incomp",
+        per = 2, total = 8, after = "sleep", made = 0, tried = 0 },
+    },
+    spells = {},
+    history = {},
+    font = "Consolas", fontsize = 12, winheight = 600,
+  }
+end
+
+local function load_data ()
+  local d
+  local v = GetVariable ("data")
+  if v and v ~= "" then
+    local f = loadstring ("return " .. v)
+    if f then
+      local ok, t = pcall (f)
+      if ok and type (t) == "table" then d = t end
+    end
+    if not d then
+      SetVariable ("data_unreadable", v)    -- kept, in case it can be rescued by hand
+      ColourNote (CLR_BAD, "", "[" .. PNAME .. "] Saved profiles could not be read - starting from defaults.")
+    end
+  end
+  if not d then
+    d = default_data ()
+    -- borrow the bag Nok3_Alchemist already knows
+    local a = GetPluginVariable (ALCH_ID, "alch_settings")
+    local bag = type (a) == "string" and a:match ('bag%s*=%s*"([^"]*)"')
+    if bag and bag ~= "" then d.bag = bag end
+  end
+  d.bag       = d.bag or ""
+  d.profiles  = d.profiles or {}
+  d.spells    = d.spells or {}
+  d.history   = d.history or {}
+  d.font      = d.font or "Consolas"
+  d.fontsize  = tonumber (d.fontsize) or 12
+  d.winheight = tonumber (d.winheight) or 600
+  local top = 0
+  for _, p in ipairs (d.profiles) do
+    p.made  = tonumber (p.made) or 0
+    p.tried = tonumber (p.tried) or 0
+    p.per   = tonumber (p.per) or 1
+    p.total = tonumber (p.total) or 1
+    p.after = p.after or ""
+    p.kind  = KIND[p.kind] and p.kind or "scribe"      -- 1.0 profiles were all scribing
+    p.nick  = (p.nick and p.nick ~= "") and p.nick or auto_nick (p.spell)
+    if (p.id or 0) > top then top = p.id end
+  end
+  d.next_id = math.max (tonumber (d.next_id) or 1, top + 1)
+  -- the after command new profiles get (1.4); data from before 1.4 that
+  -- already used sleepx keeps it as the default
+  if type (d.default_after) ~= "string" then
+    d.default_after = "sleep"
+    for _, p in ipairs (d.profiles) do
+      if p.after == "sleepx" then d.default_after = "sleepx" end
+    end
+  end
+  return d
+end
+
+local data = load_data ()
+
+-- no_flush: from OnPluginSaveState, which is already writing the file
+local function save (no_flush)
+  SetVariable ("data", serialize.save_simple (data))
+  if not no_flush then pcall (SaveState) end
+end
+
+local function by_id (id)
+  for i, p in ipairs (data.profiles) do
+    if p.id == id then return p, i end
+  end
+end
+
+local function by_cmd (c)
+  c = trim (c):lower ()
+  for i, p in ipairs (data.profiles) do
+    if p.cmd == c then return p, i end
+  end
+end
+
+-- every spell on offer: the built-in ones plus any added
+local function all_spells ()
+  local seen, t = {}, {}
+  for _, s in ipairs (KNOWN_SPELLS) do seen[s] = true; t[#t + 1] = s end
+  for _, s in ipairs (data.spells) do
+    if not seen[s] then seen[s] = true; t[#t + 1] = s end
+  end
+  table.sort (t)
+  return t
+end
+
+local function remember_spell (s)
+  for _, k in ipairs (KNOWN_SPELLS) do if k == s then return end end
+  for _, k in ipairs (data.spells) do if k == s then return end end
+  data.spells[#data.spells + 1] = s
+end
+
+-- a new spell for a profile: the nickname follows, unless it was set by hand
+local function set_spell (p, s)
+  if p.nick == auto_nick (p.spell) then p.nick = auto_nick (s) end
+  p.spell = s
+  remember_spell (s)
+end
+
+-- ===========================================================
+--  State
+-- ===========================================================
+local run      = nil    -- the batch in progress
+local run_gen  = 0
+local idle_gen = 0      -- voids the session timers when a new batch starts
+local gstate   = 0      -- GMCP char.status state
+local win_refresh       -- the window, defined below
+
+-- ===========================================================
+--  Sessions
+-- ===========================================================
+local function sorted_per (s)
+  local t = {}
+  for _, e in pairs (s.per or {}) do t[#t + 1] = e end
+  table.sort (t, function (a, b) return tostring (a.label) < tostring (b.label) end)
+  return t
+end
+
+local function session_echo (s, head)
+  note (head .. " " .. hi (s.made) .. " made / " .. hi (s.tried) .. " tried  " ..
+        hi (pct (s.made, s.tried)) .. "   (since " .. os.date ("%H:%M", s.start) .. ")")
+  for _, e in ipairs (sorted_per (s)) do
+    cnote (string.format ("        %s  %s made / %s tried  %s",
+           nm (e.label or e.cmd), hi (e.made), hi (e.tried), hi (pct (e.made, e.tried))))
+  end
+end
+
+local function close_session (quiet)
+  local s = data.session
+  if not s then return end
+  data.session = nil
+  if (s.tried or 0) > 0 then
+    table.insert (data.history, 1, s)
+    while #data.history > 30 do table.remove (data.history) end
+  end
+  save ()
+  if not quiet and (s.tried or 0) > 0 then
+    session_echo (s, "Session closed:")
+    note ("The next batch starts a new session.")
+  end
+end
+
+local function session_expired ()
+  local s = data.session
+  return s ~= nil and not run and (os.time () - (s.last or 0)) >= SESSION_GAP
+end
+
+-- the open session, closing it (with its echo) if its hour is up
+local function current_session ()
+  if session_expired () then close_session (false) end
+  return data.session
+end
+
+local function open_session ()
+  if session_expired () then close_session (false) end
+  local now = os.time ()
+  if not data.session then
+    data.session = { start = now, last = now, made = 0, tried = 0, per = {} }
+  end
+  data.session.last = now
+  return data.session
+end
+
+-- after a batch: echo at 10 minutes, close at the hour
+-- no_echo: after a reload, where the 10 minute echo may already have been given
+local function arm_session_timers (no_echo)
+  local s = data.session
+  if not s then return end
+  idle_gen = idle_gen + 1
+  local left = (s.last + SESSION_GAP) - os.time ()
+  if not no_echo and left > IDLE_ECHO then
+    PnP_After (IDLE_ECHO, "PnP_IdleEcho (" .. idle_gen .. ")")
+  end
+  PnP_After (math.max (1, left + 1), "PnP_SessionEnd (" .. idle_gen .. ")")
+end
+
+-- pnp end / [end session]: close it now instead of waiting for the hour
+local function end_session ()
+  if run then
+    warn ("A batch is running - " .. hi ("pnp stop") .. " @x203it first, then end the session.")
+    return
+  end
+  if not data.session then note ("No session is open.") return end
+  idle_gen = idle_gen + 1           -- its 10 minute echo and hour close are void now
+  if (data.session.tried or 0) == 0 then
+    data.session = nil
+    save ()
+    note ("Session ended (nothing was made in it).")
+  else
+    close_session (false)
+  end
+  if win_refresh then win_refresh () end
+end
+
+function PnP_IdleEcho (g)
+  if g ~= idle_gen or run or not data.session then return end
+  local s = data.session
+  session_echo (s, "Session so far:")
+  local mins = math.max (1, math.floor (((s.last + SESSION_GAP) - os.time ()) / 60))
+  note ("A batch in the next " .. hi (mins .. " min") .. " adds to this session.")
+end
+
+function PnP_SessionEnd (g)
+  if g ~= idle_gen or run then return end
+  if session_expired () then
+    close_session (false)
+    if win_refresh then win_refresh () end
+  end
+end
+
+-- ===========================================================
+--  The batch
+-- ===========================================================
+local function keyword ()
+  return run.k.item .. " " .. (run.p.spell:gsub ("%s+", ""))
+end
+
+local function arm_watch ()
+  run.step = run.step + 1
+  PnP_After (WATCH_SECS, string.format ("PnP_Watch (%d, %d)", run.gen, run.step))
+end
+
+local function add_spell ()
+  run.session.last = os.time ()
+  SendNoEcho (run.k.verb .. " '" .. run.p.spell .. "'")
+  arm_watch ()
+end
+
+local function start_item ()
+  run.spells = 0
+  SendNoEcho ("get '" .. run.k.blank .. "' " .. data.bag)
+  SendNoEcho ("hold '" .. run.k.blank .. "'")
+  add_spell ()
+end
+
+local function record (ok)
+  local p, s = run.p, run.session
+  local n = ok and 1 or 0
+  run.tried, run.made = run.tried + 1, run.made + n
+  p.tried,   p.made   = p.tried + 1,   p.made + n
+  s.tried,   s.made   = s.tried + 1,   s.made + n
+  s.per = s.per or {}
+  local k = "p" .. p.id
+  local e = s.per[k] or { made = 0, tried = 0 }
+  s.per[k] = e
+  e.cmd, e.label, e.kind, e.spell, e.per = p.cmd, label (p), p.kind, p.spell, p.per
+  e.tried, e.made = e.tried + 1, e.made + n
+  save ()
+end
+
+local function batch_echo (ok)
+  local s = run.session
+  note (string.format ("%s %s   Batch %s %s   Session %s made %s",
+        nm (label (run.p)), ok and "@x048made@w  " or "@x203failed@w",
+        hi (run.made .. "/" .. run.target), hi (pct (run.made, run.tried)),
+        hi (s.made), hi (pct (s.made, s.tried))))
+end
+
+local function finish_batch (why)
+  local b = run
+  run = nil
+  run_gen = run_gen + 1
+  EnableTriggerGroup ("pnp_scribe", false)
+  EnableTriggerGroup ("pnp_brew", false)
+  EnableTriggerGroup ("pnp_retry", false)
+
+  local word = (why == "done" and "done") or (why == "stalled" and "stalled") or "stopped"
+  note (string.format ("Batch %s: %s  %s made of %s, %s tried  %s",
+        word, nm (label (b.p)), hi (b.made), hi (b.target), hi (b.tried), hi (pct (b.made, b.tried))))
+  if why ~= "done" and b.spells > 0 then
+    note ("The " .. b.k.item .. " in your hand has " .. hi (b.spells .. " of " .. b.p.per) ..
+          " spells on it.")
+  end
+  save ()
+  arm_session_timers ()
+  if win_refresh then win_refresh () end
+  if why ~= "stopped" and b.p.after ~= "" then
+    note ("Running " .. hi (b.p.after) .. ".")
+    Execute (b.p.after)
+  end
+end
+
+local function start_batch (p, n)
+  if run then
+    warn ("A batch of " .. nm (label (run.p)) .. " @x203is running - " .. hi ("pnp stop") .. " @x203first.")
+    return
+  end
+  if data.bag == "" then
+    warn ("Set the bag first: click Bag in " .. hi ("pnp config") .. "@x203, or " ..
+          hi ("pnp bag <id>") .. "@x203.")
+    return
+  end
+  n = math.floor (tonumber (n) or p.total)
+  if n < 1 or n > 999 then warn ("Make between 1 and 999.") return end
+  local k = kind (p)
+  if gstate == 9 then warn ("You look asleep - the " .. k.verb .. " will fail until you wake.") end
+  if gstate == 8 then warn ("You are fighting - the " .. k.verb .. " may fail.") end
+
+  idle_gen = idle_gen + 1           -- this batch belongs to the open session: no echo, no close
+  local s = open_session ()
+  run_gen = run_gen + 1
+  run = { p = p, k = k, target = n, made = 0, tried = 0, spells = 0, step = 0,
+          retries = 0, gen = run_gen, session = s }
+  save ()
+  EnableTriggerGroup ("pnp_scribe", p.kind == "scribe")
+  EnableTriggerGroup ("pnp_brew",   p.kind == "brew")
+  EnableTriggerGroup ("pnp_retry",  true)
+  note (string.format ("Batch: %s x %s  (%s %s, %s), then %s",
+        hi (n), nm (label (p)), k.verb, esc (p.spell), hi (p.cmd),
+        p.after ~= "" and hi (p.after) or "nothing"))
+  start_item ()
+  if win_refresh then win_refresh () end
+end
+
+local function stop_batch ()
+  if not run then note ("No batch is running.") return end
+  finish_batch ("stopped")
+end
+
+-- "You lost your concentration while trying to scribe the new magic."
+-- Nothing was added and nothing was lost: send the same spell again.
+function PnP_Retry (name, line, w)
+  if not run then return end
+  if w and w[1] and w[1] ~= run.k.verb then return end   -- the other kind's line
+  run.step = run.step + 1           -- the watchdog for that spell is answered
+  run.retries = run.retries + 1
+  if run.retries > MAX_RETRY then
+    warn ("Lost concentration " .. MAX_RETRY .. " times in a row - stopping.")
+    finish_batch ("stalled")
+    return
+  end
+  add_spell ()
+end
+
+function PnP_Success ()
+  if not run then return end
+  run.step = run.step + 1           -- the watchdog for that spell is answered
+  run.retries = 0
+  run.spells = run.spells + 1
+  if run.spells < run.p.per then
+    add_spell ()
+    if win_refresh then win_refresh () end
+    return
+  end
+  local kw = keyword ()
+  SendNoEcho ("rem '" .. kw .. "'")
+  SendNoEcho ("put '" .. kw .. "' " .. data.bag)
+  run.spells = 0
+  record (true)
+  batch_echo (true)
+  if run.made >= run.target then
+    finish_batch ("done")
+  else
+    start_item ()
+    if win_refresh then win_refresh () end
+  end
+end
+
+function PnP_Fail ()
+  if not run then return end
+  run.step = run.step + 1
+  run.retries = 0
+  run.spells = 0
+  record (false)
+  batch_echo (false)
+  start_item ()
+  if win_refresh then win_refresh () end
+end
+
+function PnP_Watch (g, step)
+  if not run or run.gen ~= g or run.step ~= step then return end
+  warn ("No result from " .. run.k.verb .. " in " .. WATCH_SECS .. "s - out of mana or " ..
+        (run.p.kind == "brew" and "empty vials" or "blank scrolls") .. "?")
+  finish_batch ("stalled")
+end
+
+-- ===========================================================
+--  Profile commands (real aliases, one per profile)
+-- ===========================================================
+local alias_names = {}
+local ALIAS_FLAGS = 1 + 32 + 128 + 16384   -- enabled, ignore case, regexp, temporary
+
+local function register_aliases ()
+  for _, n in ipairs (alias_names) do DeleteAlias (n) end
+  alias_names = {}
+  for _, p in ipairs (data.profiles) do
+    local name = "pnp_run_" .. p.id
+    local rc = AddAlias (name, "^" .. p.cmd .. "(?:\\s+(\\d+))?\\s*$", "", ALIAS_FLAGS, "PnP_AliasRun")
+    if rc == 0 then
+      alias_names[#alias_names + 1] = name
+    else
+      warn ("Could not make the command " .. hi (p.cmd) .. " @x203(error " .. tostring (rc) .. ").")
+    end
+  end
+end
+
+function PnP_AliasRun (name, line, w)
+  local id = tonumber (name:match ("^pnp_run_(%d+)$") or "")
+  local p = id and by_id (id)
+  if not p then return end
+  start_batch (p, tonumber (w[1] or ""))
+end
+
+function PnP_AlchCheck ()
+  if not (IsPluginInstalled (ALCH_ID) and GetPluginInfo (ALCH_ID, 17)) then return end
+  local clash = {}
+  for _, p in ipairs (data.profiles) do
+    if ALCH_CMDS[p.cmd] then clash[#clash + 1] = p.cmd end
+  end
+  if #clash == 0 then return end
+  warn ("Nok3_Alchemist is loaded and also answers " .. hi (table.concat (clash, ", ")) ..
+        "@x203. Remove Alchemist from your plugins, or rename those profiles.")
+end
+
+-- ===========================================================
+--  Asking for values (dialogs)
+-- ===========================================================
+local function check_cmd (c, except_id)
+  c = trim (c):lower ()
+  if not c:match ("^%a%w*$") or #c < 2 or #c > 15 then
+    return nil, "A command is 2 to 15 letters or digits, starting with a letter."
+  end
+  if RESERVED[c] then return nil, "'" .. c .. "' is already a game or plugin command." end
+  local p = by_cmd (c)
+  if p and p.id ~= except_id then return nil, "Another profile already uses '" .. c .. "'." end
+  return c
+end
+
+local function check_spell (v)
+  v = trim (v):lower ():gsub ("%s+", " ")
+  if v == "" then return nil, "Give a spell name." end
+  if v:find ("[';@]") then return nil, "A spell name cannot contain ' ; or @" end
+  return v
+end
+
+local function check_nick (v)
+  v = trim (v)
+  if not v:match ("^%a[%w]*$") or #v > 15 then
+    return nil, "A nickname is up to 15 letters or digits, no spaces, starting with a letter."
+  end
+  return v
+end
+
+local function ask_cmd (default, except_id)
+  local v = utils.inputbox ("Command for this profile (type it, with an optional number, to make a batch):",
+                            PNAME, default or "")
+  if not v then return nil end
+  local c, err = check_cmd (v, except_id)
+  if not c then utils.msgbox (err, PNAME, "ok", "!", 1) return nil end
+  return c
+end
+
+local function ask_kind (default)
+  local t = { "Scribe - scrolls", "Brew - potions" }
+  local k = utils.listbox ("Scribe scrolls or brew potions?", PNAME, t, default == "brew" and 2 or 1)
+  if not k then return nil end
+  return k == 2 and "brew" or "scribe"
+end
+
+-- the list, plus a way to type a spell that is not on it yet
+local function ask_spell (default)
+  local spells = all_spells ()
+  local t = {}
+  for i, s in ipairs (spells) do t[i] = s end
+  local NEW = #spells + 1
+  t[NEW] = "+ Add a new spell (type its name)..."
+  local dflt = NEW
+  for i, s in ipairs (spells) do if s == default then dflt = i end end
+  local k = utils.listbox ("Spell (pick one, or add a new one at the bottom):", PNAME, t, dflt)
+  if not k then return nil end
+  if k ~= NEW then return t[k] end
+  local v = utils.inputbox ("Name of the spell (its full name, as you would cast it):", PNAME, "")
+  if not v then return nil end
+  local s, err = check_spell (v)
+  if not s then utils.msgbox (err, PNAME, "ok", "!", 1) return nil end
+  remember_spell (s)
+  return s
+end
+
+local function ask_per (default, what)
+  local t = {}
+  for i = 1, 4 do t[i] = i .. "x - " .. i .. " spell" .. (i > 1 and "s" or "") .. " per " .. what end
+  return utils.listbox ("How many spells on each " .. what .. "?", PNAME, t, default or 3)
+end
+
+local function ask_total (default, what)
+  local v = utils.inputbox ("How many " .. what .. " to make when no number is typed (1 to 999)?",
+                            PNAME, tostring (default or 8))
+  if not v then return nil end
+  local n = tonumber (trim (v))
+  if not n or n < 1 or n > 999 then
+    utils.msgbox ("Give a number from 1 to 999.", PNAME, "ok", "!", 1)
+    return nil
+  end
+  return math.floor (n)
+end
+
+local function ask_after (default)
+  local v = utils.inputbox ("Command to run when the batch is done (blank for nothing):",
+                            PNAME, default or "sleep")
+  if not v then return nil end
+  return trim (v)
+end
+
+local function ask_nick (p)
+  local v = utils.inputbox ("Nickname for echoes - it shows as " .. kind (p).label .. " " .. p.per ..
+                            "x<nickname>, e.g. " .. label (p) .. ".\nBlank goes back to the default (" ..
+                            auto_nick (p.spell) .. ").",
+                            PNAME, p.nick)
+  if not v then return nil end
+  if trim (v) == "" then return auto_nick (p.spell) end
+  local n, err = check_nick (v)
+  if not n then utils.msgbox (err, PNAME, "ok", "!", 1) return nil end
+  return n
+end
+
+local function profile_line (p)
+  local k = kind (p)
+  return string.format ("%s (%s): %s %dx %s, makes %d, then %s.", nm (label (p)), hi (p.cmd),
+         k.verb, p.per, esc (p.spell), p.total, p.after ~= "" and hi (p.after) or "nothing")
+end
+
+local function new_profile ()
+  local c = ask_cmd ("", nil)
+  if not c then return end
+  local kd = ask_kind ("scribe")
+  if not kd then return end
+  local spell = ask_spell ("incomplete healing")
+  if not spell then return end
+  local per = ask_per (3, KIND[kd].item)
+  if not per then return end
+  local p = { id = data.next_id, cmd = c, kind = kd, spell = spell, nick = auto_nick (spell),
+              per = per, total = 8, after = data.default_after, made = 0, tried = 0 }
+  data.next_id = data.next_id + 1
+  data.profiles[#data.profiles + 1] = p
+  register_aliases ()
+  save ()
+  note ("New profile " .. profile_line (p))
+  PnP_AlchCheck ()
+end
+
+local function busy (p)
+  if run and run.p == p then
+    warn ("Not while " .. nm (label (p)) .. " @x203is running - " .. hi ("pnp stop") .. " @x203first.")
+    return true
+  end
+  return false
+end
+
+-- ===========================================================
+--  The window
+--  Built like MazeMobber's list window: TextRect links run Lua;
+--  a link only schedules the work, so nothing happens inside the
+--  hotspot callback; zombie guard; scroll set after fit_contents;
+--  raised above the layout's invisible drag bar on every show.
+-- ===========================================================
+local WIN_ID  = "PotAndPapers_win"
+local gWin    = nil
+local win_gen = 0
+
+local function win_line (segs)
+  local styles, links, pos = {}, {}, 1
+  for _, sg in ipairs (segs) do
+    if sg.text ~= "" then
+      styles[#styles + 1] = { text = sg.text, textcolour = ColourNameToRGB (sg.colour or CLR_MSG) }
+      if sg.code then
+        links[#links + 1] = { start = pos, stop = pos + #sg.text - 1,
+                              text = sg.code, label = sg.tip }
+      end
+      pos = pos + #sg.text
+    end
+  end
+  return styles, links
+end
+
+function PnP_WinRaise ()
+  if gWin then pcall (WindowSetZOrder, WIN_ID, 99999) end
+end
+
+function PnP_WinDestroy (tok)
+  if tok and tok ~= win_gen then return end
+  local w = gWin
+  gWin = nil
+  if w then pcall (function () w:delete (true) end) end
+  pcall (WindowDelete, WIN_ID)
+  pcall (Repaint)
+end
+
+-- A link click: never act inside the window's own callback.
+function PnP_Click (action, id)
+  PnP_After (0.1, string.format ("PnP_Do (%q, %d)", tostring (action), tonumber (id) or 0))
+end
+
+local function sp (n) return string.rep (" ", math.max (0, n)) end
+
+local function win_lines ()
+  local L = {}
+  local function add (segs) L[#L + 1] = segs end
+
+  add { { text = PNAME .. " v" .. VERSION .. " - click any value to change it", colour = CLR_NAME } }
+  add { { text = "  Bag  ", colour = CLR_TAG },
+        { text = data.bag ~= "" and data.bag or "(not set - click)", colour = CLR_HI,
+          code = 'PnP_Click("bag",0)', tip = "Bag the blanks come from and the finished ones go to" },
+        { text = "     After, for new profiles  ", colour = CLR_TAG },
+        { text = data.default_after ~= "" and data.default_after or "(nothing)", colour = CLR_NAME,
+          code = 'PnP_Click("defafter",0)', tip = "The after command a new profile starts with" } }
+  add { { text = " " } }
+
+  local wc, wn, ws, wa = #"Command", #"Name", #"Spell", #"After"
+  for _, p in ipairs (data.profiles) do
+    wc = math.max (wc, #p.cmd)
+    wn = math.max (wn, #short_label (p))
+    ws = math.max (ws, #p.spell)
+    wa = math.max (wa, #(p.after ~= "" and p.after or "-"))
+  end
+  wc, wn, ws, wa = wc + 2, wn + 2, ws + 2, wa + 2
+  add { { text = "  Command" .. sp (wc - 7) .. "Name" .. sp (wn - 4) .. "Type    Spell" .. sp (ws - 5) ..
+                 "Per  Make  After" .. sp (wa - 5) .. "Lifetime", colour = CLR_TAG } }
+
+  for _, p in ipairs (data.profiles) do
+    local id = p.id
+    local function c (a) return string.format ("PnP_Click(%q,%d)", a, id) end
+    local k     = kind (p)
+    local lab   = short_label (p)
+    local after = p.after ~= "" and p.after or "-"
+    local per   = p.per .. "x"
+    local tot   = tostring (p.total)
+    local life  = string.format ("%d/%d %s", p.made, p.tried, pct (p.made, p.tried))
+    local mine  = run and run.p == p
+    add {
+      { text = "  " },
+      { text = p.cmd,   colour = CLR_HI,   code = c ("cmd"),   tip = "Change the command" },
+      { text = sp (wc - #p.cmd) },
+      { text = lab,     colour = CLR_NAME, code = c ("nick"),  tip = "Change the nickname" },
+      { text = sp (wn - #lab) },
+      { text = k.label, colour = CLR_HI,   code = c ("kind"),  tip = "Switch between scribe and brew" },
+      { text = sp (8 - #k.label) },
+      { text = p.spell, colour = CLR_MSG,  code = c ("spell"), tip = "Change the spell" },
+      { text = sp (ws - #p.spell) },
+      { text = per,     colour = CLR_HI,   code = c ("per"),   tip = "Spells on each " .. k.item },
+      { text = sp (5 - #per) },
+      { text = tot,     colour = CLR_HI,   code = c ("total"), tip = "How many when no number is typed" },
+      { text = sp (6 - #tot) },
+      { text = after,   colour = CLR_NAME, code = c ("after"), tip = "Run when the batch is done" },
+      { text = sp (wa - #after) },
+      { text = life,    colour = CLR_MSG },
+      { text = sp (math.max (2, 18 - #life)) },
+      { text = mine and "[running]" or "[make]", colour = CLR_HI,
+        code = (not mine) and c ("run") or nil, tip = "Make " .. p.total .. " now" },
+      { text = " " },
+      { text = "[delete]", colour = CLR_TAG, code = c ("del"), tip = "Delete this profile" },
+    }
+  end
+  if #data.profiles == 0 then add { { text = "  (no profiles yet)", colour = CLR_TAG } } end
+
+  add { { text = " " } }
+  add { { text = "  " },
+        { text = "[new profile]", colour = CLR_HI, code = 'PnP_Click("new",0)', tip = "Add a profile" },
+        { text = "   " },
+        { text = "[stop]", colour = run and CLR_HI or CLR_TAG, code = 'PnP_Click("stop",0)',
+          tip = "Stop the batch (the after command is not run)" },
+        { text = "   " },
+        { text = "[end session]", colour = (data.session and not run) and CLR_HI or CLR_TAG,
+          code = 'PnP_Click("end",0)', tip = "Close the session now; the next batch starts a new one" } }
+  add { { text = " " } }
+
+  if run then
+    add { { text = "  Batch    ", colour = CLR_TAG },
+          { text = label (run.p) .. "  " .. run.made .. "/" .. run.target .. "  " .. pct (run.made, run.tried),
+            colour = CLR_HI },
+          { text = string.format ("   %d tried, this %s %d/%d spells",
+                                  run.tried, run.k.item, run.spells, run.p.per), colour = CLR_MSG } }
+  else
+    local ex = data.profiles[1] and (data.profiles[1].cmd .. " 8") or "sinc 8"
+    add { { text = "  Batch    ", colour = CLR_TAG },
+          { text = "idle - type a profile's command, e.g. " .. ex, colour = CLR_MSG } }
+  end
+
+  local s = current_session ()
+  if s then
+    add { { text = "  Session  ", colour = CLR_TAG },
+          { text = string.format ("%d made / %d tried  %s", s.made, s.tried, pct (s.made, s.tried)),
+            colour = CLR_HI },
+          { text = "   since " .. os.date ("%H:%M", s.start) ..
+                   (run and "" or (", closes " .. os.date ("%H:%M", s.last + SESSION_GAP))),
+            colour = CLR_MSG } }
+    for _, e in ipairs (sorted_per (s)) do
+      local l = tostring (e.label or e.cmd)
+      add { { text = "           " .. l .. sp (math.max (2, wn - #l)) ..
+                     string.format ("%d/%d  %s", e.made, e.tried, pct (e.made, e.tried)),
+              colour = CLR_MSG } }
+    end
+  else
+    local h = data.history[1]
+    if h then
+      add { { text = "  Last session  ", colour = CLR_TAG },
+            { text = string.format ("%d made / %d tried  %s", h.made, h.tried, pct (h.made, h.tried)),
+              colour = CLR_HI },
+            { text = "   " .. os.date ("%m/%d %H:%M", h.start) .. " to " .. os.date ("%H:%M", h.last),
+              colour = CLR_MSG } }
+    else
+      add { { text = "  Session  ", colour = CLR_TAG }, { text = "none yet", colour = CLR_MSG } }
+    end
+  end
+  return L
+end
+
+local function win_open (keep_scroll)
+  if type (ThemedTextWindow) ~= "function" then return false end
+  win_gen = win_gen + 1
+  -- zombie guard: a handle the library has forgotten is never reused
+  if gWin and not (ThemedWindowClass and ThemedWindowClass.window_map
+                   and ThemedWindowClass.window_map[WIN_ID]) then
+    gWin = nil
+    pcall (WindowDelete, WIN_ID)
+  end
+  if not gWin then
+    local ok, w = pcall (ThemedTextWindow,
+      WIN_ID,
+      386, 0,            -- first-run left, top (it remembers where you drag it)
+      760, 300,          -- width, height (fit_contents resizes it)
+      PNAME,             -- title
+      "center",
+      true,              -- title-bar close button
+      false,             -- resizeable
+      true,              -- text scrolls
+      false, false, false,
+      true,              -- autowrap
+      data.font, data.fontsize,
+      data.font, data.fontsize,
+      300,               -- max lines
+      nil,
+      true,              -- defer showing until drawn
+      false, nil,
+      "Close")
+    if not ok or not w then return false end
+    gWin = w
+    if gWin.textrect and gWin.textrect.font_bold then
+      gWin.textrect.font = gWin.textrect.font_bold
+    end
+    local prior = gWin.do_on_delete
+    gWin.do_on_delete = function (self)
+      if prior then prior (self) end
+      gWin = nil
+    end
+    gWin.bring_to_front = function (self) PnP_WinRaise () end
+  end
+
+  local keep = nil
+  if keep_scroll and gWin.textrect then keep = tonumber (gWin.textrect.display_start_line) end
+  gWin:clear (false)
+  for _, segs in ipairs (win_lines ()) do
+    local st, lk = win_line (segs)
+    gWin:add_text (st, false, lk)
+  end
+  pcall (function () gWin:fit_contents (1200, data.winheight) end)
+  -- the links start near the top: open at the top (or where it was)
+  pcall (function () gWin:set_scroll (keep or 1) end)
+  gWin:draw ()
+  gWin:show ()
+  PnP_WinRaise ()
+  pcall (Repaint)
+  return true
+end
+
+win_refresh = function ()
+  if gWin then win_open (true) end
+end
+
+local function win_refont ()
+  if not gWin then return end
+  win_gen = win_gen + 1
+  PnP_WinDestroy ()
+  win_open ()
+end
+
+-- ===========================================================
+--  Chat versions
+-- ===========================================================
+local function list_chat ()
+  note ("Profiles (bag " .. hi (data.bag ~= "" and data.bag or "not set") .. "):")
+  for _, p in ipairs (data.profiles) do
+    ColourTell (CLR_MSG, "", "   ")
+    Hyperlink (p.cmd, p.cmd, "Make " .. p.total, CLR_HI, "black", 0, 1)
+    ColourTell (CLR_MSG, "", "  ")
+    ColourTell (CLR_NAME, "", label (p))
+    ColourNote (CLR_MSG, "", string.format ("   %dx %s, makes %d, then %s   lifetime %d/%d %s",
+                p.per, p.spell, p.total, p.after ~= "" and p.after or "nothing",
+                p.made, p.tried, pct (p.made, p.tried)))
+  end
+  local s = current_session ()
+  if s then session_echo (s, "Session:") else note ("No session open.") end
+end
+
+local function history_chat ()
+  if #data.history == 0 then note ("No closed sessions yet.") return end
+  note ("Last sessions:")
+  for i = 1, math.min (10, #data.history) do
+    local h = data.history[i]
+    cnote (string.format ("   %s to %s   %s made / %s tried  %s",
+           hi (os.date ("%m/%d %H:%M", h.start)), os.date ("%H:%M", h.last),
+           hi (h.made), hi (h.tried), hi (pct (h.made, h.tried))))
+  end
+end
+
+local function spells_chat ()
+  local added = {}
+  for _, s in ipairs (data.spells) do added[s] = true end
+  local t = {}
+  for _, s in ipairs (all_spells ()) do t[#t + 1] = added[s] and hi (s) or esc (s) end
+  note ("Spells on offer: " .. table.concat (t, ", "))
+  note ("Added by you in " .. hi ("green") .. ". " .. hi ("pnp spell add <name>") .. " / " ..
+        hi ("pnp spell del <name>") .. ".")
+end
+
+local HELP = {
+  { "pnp config",                  "the profile window - click any value to change it" },
+  { "pnp add <cmd> <scribe|brew> <per> <make> <spell>", "new profile, e.g. pnp add sinc scribe 3 8 incomplete healing" },
+  { "pnp after <command|none>",    "the after command new profiles start with (default sleep)" },
+  { "pnp bag <id>",                "bag the blanks come from and the finished ones go to" },
+  { "pnp del <cmd>",               "delete a profile (and its lifetime totals)" },
+  { "pnp end",                     "end the session now; the next batch starts a new one" },
+  { "pnp font [name]",             "the window's font (no name: a picker)" },
+  { "pnp fontsize <n>",            "the window's font size" },
+  { "pnp help",                    "this list" },
+  { "pnp history",                 "the last 10 closed sessions" },
+  { "pnp list",                    "profiles and the session, in chat" },
+  { "pnp reload",                  "load this plugin again after an update" },
+  { "pnp session",                 "the session so far" },
+  { "pnp set <cmd> <what> <value>", "what: cmd, nick, type, spell, per, make or after (after none = nothing)" },
+  { "pnp spell add <name>",        "add a spell to the pick list" },
+  { "pnp spell del <name>",        "take an added spell off the pick list" },
+  { "pnp spells",                  "the spells on the pick list" },
+  { "pnp stop",                    "stop the batch (the after command is not run)" },
+  { "pnp winheight <px>",          "how tall the window may get" },
+  { "<profile cmd> [n]",           "make n, or the profile's own number" },
+}
+table.sort (HELP, function (a, b) return a[1] < b[1] end)
+
+local function show_help ()
+  note (PNAME .. " " .. hi ("v" .. VERSION))
+  for _, h in ipairs (HELP) do
+    cnote ("   " .. hi (h[1]) .. sp (42 - #h[1]) .. esc (h[2]))
+  end
+  cnote ("   A batch is one command; it ends when that many are MADE, then runs its after command.")
+  cnote ("   A session is every batch until an hour after the last spell; the session so far")
+  cnote ("   is echoed after 10 minutes with nothing new.")
+end
+
+-- ===========================================================
+--  Clicks and commands
+-- ===========================================================
+function PnP_Do (action, id)
+  local p = by_id (id)
+  if action == "bag" then
+    local v = utils.inputbox ("Bag (id or keyword) the blanks come from and the finished ones go to:",
+                              PNAME, data.bag)
+    if v and trim (v) ~= "" then
+      data.bag = trim (v)
+      save ()
+      note ("Bag: " .. hi (data.bag) .. ".")
+    end
+  elseif action == "defafter" then
+    local v = ask_after (data.default_after)
+    if v then
+      data.default_after = v
+      save ()
+      note ("New profiles will run " .. (v ~= "" and hi (v) or "nothing") .. " after a batch.")
+    end
+  elseif action == "new" then
+    new_profile ()
+  elseif action == "stop" then
+    stop_batch ()
+  elseif action == "end" then
+    end_session ()
+    return
+  elseif p then
+    if action == "run" then
+      start_batch (p)
+      return
+    elseif action == "del" then
+      if busy (p) then return end
+      local r = utils.msgbox ("Delete the profile " .. label (p) .. " (" .. p.cmd .. ")?\n\n" ..
+                              "Its lifetime totals (" .. p.made .. " made of " .. p.tried .. ") go with it.",
+                              PNAME, "yesno", "?", 2)
+      if r == "yes" then
+        local _, i = by_id (id)
+        table.remove (data.profiles, i)
+        register_aliases ()
+        save ()
+        note ("Deleted " .. nm (label (p)) .. " (" .. hi (p.cmd) .. ").")
+      end
+    elseif action == "cmd" then
+      local v = ask_cmd (p.cmd, p.id)
+      if v then p.cmd = v; register_aliases (); save (); PnP_AlchCheck () end
+    elseif action == "nick" then
+      local v = ask_nick (p)
+      if v then p.nick = v; save () end
+    elseif action == "kind" then
+      if busy (p) then return end
+      p.kind = (p.kind == "brew") and "scribe" or "brew"
+      save ()
+      note (nm (label (p)) .. " now " .. hi (kind (p).verb .. "s") .. ".")
+    elseif action == "spell" then
+      if busy (p) then return end
+      local v = ask_spell (p.spell)
+      if v then set_spell (p, v); save () end
+    elseif action == "per" then
+      if busy (p) then return end
+      local v = ask_per (p.per, kind (p).item)
+      if v then p.per = v; save () end
+    elseif action == "total" then
+      local v = ask_total (p.total, kind (p).items)
+      if v then p.total = v; save () end
+    elseif action == "after" then
+      local v = ask_after (p.after)
+      if v then p.after = v; save () end
+    end
+  end
+  win_refresh ()
+end
+
+local function set_field (p, what, val)
+  what = what:lower ()
+  if what == "cmd" or what == "command" then
+    local c, err = check_cmd (val, p.id)
+    if not c then warn (err) return end
+    p.cmd = c
+    register_aliases ()
+    PnP_AlchCheck ()
+  elseif what == "nick" or what == "name" then
+    if trim (val) == "" then
+      p.nick = auto_nick (p.spell)
+    else
+      local n, err = check_nick (val)
+      if not n then warn (err) return end
+      p.nick = n
+    end
+  elseif what == "type" or what == "kind" then
+    if busy (p) then return end
+    local v = trim (val):lower ()
+    if not KIND[v] then warn ("Type is " .. hi ("scribe") .. " @x203or " .. hi ("brew") .. "@x203.") return end
+    p.kind = v
+  elseif what == "spell" then
+    if busy (p) then return end
+    local s, err = check_spell (val)
+    if not s then warn (err) return end
+    set_spell (p, s)
+  elseif what == "per" then
+    if busy (p) then return end
+    local n = tonumber ((val:gsub ("[xX]", "")))
+    if not n or n < 1 or n > 4 then warn ("Per is 1 to 4.") return end
+    p.per = math.floor (n)
+  elseif what == "make" or what == "total" then
+    local n = tonumber (val)
+    if not n or n < 1 or n > 999 then warn ("Make is 1 to 999.") return end
+    p.total = math.floor (n)
+  elseif what == "after" then
+    local v = trim (val)
+    if v:lower () == "none" then v = "" end
+    p.after = v
+  else
+    warn ("I can set " .. hi ("cmd, nick, type, spell, per, make") .. " @x203or " .. hi ("after") .. "@x203.")
+    return
+  end
+  save ()
+  note (profile_line (p))
+  win_refresh ()
+end
+
+function PnP_Command (name, line, w)
+  local arg = trim (w[1])
+  local low = arg:lower ()
+
+  if low == "config" or low == "win" or low == "window" then
+    if not win_open () then list_chat () end
+    return
+  end
+  if low == "" or low == "help" then show_help () return end
+  if low == "list" then list_chat () return end
+  if low == "stop" then stop_batch () return end
+  if low == "end" then end_session () return end
+  if low == "history" then history_chat () return end
+  if low == "spells" then spells_chat () return end
+  if low == "session" then
+    local s = current_session ()
+    if s then session_echo (s, "Session so far:") else note ("No session open.") end
+    return
+  end
+
+  if low == "reload" then
+    if run then finish_batch ("stopped") end
+    note ("Reloading " .. PNAME .. " (now " .. hi ("v" .. VERSION) .. ") from disk...")
+    Execute (GetAlphaOption ("script_prefix") ..
+             'DoAfterSpecial(1, "ReloadPlugin(\'' .. GetPluginID () .. '\')", sendto.script)')
+    return
+  end
+
+  local da = arg:match ("^[Aa][Ff][Tt][Ee][Rr]%s*(.*)$")
+  if da then
+    da = trim (da)
+    if da == "" then
+      note ("New profiles run " .. (data.default_after ~= "" and hi (data.default_after) or "nothing") ..
+            " after a batch. Change it with " .. hi ("pnp after <command>") .. " (or " ..
+            hi ("pnp after none") .. ").")
+      return
+    end
+    if da:lower () == "none" then da = "" end
+    data.default_after = da
+    save ()
+    note ("New profiles will run " .. (da ~= "" and hi (da) or "nothing") ..
+          " after a batch. Existing profiles keep their own (" .. hi ("pnp set <cmd> after ...") .. ").")
+    win_refresh ()
+    return
+  end
+
+  local bag = arg:match ("^[Bb][Aa][Gg]%s+(.+)$")
+  if bag then
+    data.bag = trim (bag)
+    save ()
+    note ("Bag: " .. hi (data.bag) .. ".")
+    win_refresh ()
+    return
+  end
+
+  local sa = arg:match ("^[Ss][Pp][Ee][Ll][Ll]%s+[Aa][Dd][Dd]%s+(.+)$")
+  if sa then
+    local s, err = check_spell (sa)
+    if not s then warn (err) return end
+    remember_spell (s)
+    save ()
+    note ("Added " .. hi (s) .. " to the spell list.")
+    return
+  end
+  local sd = arg:match ("^[Ss][Pp][Ee][Ll][Ll]%s+[Dd][Ee][Ll]%s+(.+)$")
+  if sd then
+    local s = trim (sd):lower ()
+    for i, k in ipairs (data.spells) do
+      if k == s then
+        table.remove (data.spells, i)
+        save ()
+        note ("Took " .. hi (s) .. " off the spell list (profiles that use it keep it).")
+        return
+      end
+    end
+    warn ("'" .. esc (s) .. "' is not a spell you added (the built-in ones stay).")
+    return
+  end
+
+  local c, kd, per, make, spell = arg:match ("^[Aa][Dd][Dd]%s+(%S+)%s+(%a+)%s+(%S+)%s+(%d+)%s+(.+)$")
+  if c then
+    local cc, err = check_cmd (c, nil)
+    if not cc then warn (err) return end
+    kd = kd:lower ()
+    if not KIND[kd] then warn ("Type is " .. hi ("scribe") .. " @x203or " .. hi ("brew") .. "@x203.") return end
+    local n = tonumber ((per:gsub ("[xX]", "")))
+    if not n or n < 1 or n > 4 then warn ("Per is 1 to 4.") return end
+    local m = tonumber (make)
+    if m < 1 or m > 999 then warn ("Make is 1 to 999.") return end
+    local s, err2 = check_spell (spell)
+    if not s then warn (err2) return end
+    remember_spell (s)
+    local p = { id = data.next_id, cmd = cc, kind = kd, spell = s, nick = auto_nick (s),
+                per = math.floor (n), total = math.floor (m), after = data.default_after,
+                made = 0, tried = 0 }
+    data.next_id = data.next_id + 1
+    data.profiles[#data.profiles + 1] = p
+    register_aliases ()
+    save ()
+    note ("New profile " .. profile_line (p))
+    PnP_AlchCheck ()
+    win_refresh ()
+    return
+  end
+  if low:match ("^add") then
+    warn ("Use " .. hi ("pnp add <cmd> <scribe|brew> <per> <make> <spell>") .. "@x203, e.g. " ..
+          hi ("pnp add sinc scribe 3 8 incomplete healing") .. "@x203.")
+    return
+  end
+
+  local dc = arg:match ("^[Dd][Ee][Ll]%s+(%S+)$")
+  if dc then
+    local p, i = by_cmd (dc)
+    if not p then warn ("No profile " .. hi (dc) .. "@x203.") return end
+    if busy (p) then return end
+    table.remove (data.profiles, i)
+    register_aliases ()
+    save ()
+    note ("Deleted " .. nm (label (p)) .. " (lifetime " .. p.made .. "/" .. p.tried .. ").")
+    win_refresh ()
+    return
+  end
+
+  local sc, what, val = arg:match ("^[Ss][Ee][Tt]%s+(%S+)%s+(%S+)%s*(.*)$")
+  if sc then
+    local p = by_cmd (sc)
+    if not p then warn ("No profile " .. hi (sc) .. "@x203.") return end
+    set_field (p, what, val)
+    return
+  end
+
+  local wh = arg:match ("^[Ww][Ii][Nn][Hh][Ee][Ii][Gg][Hh][Tt]%s*(.*)$")
+  if wh then
+    local n = tonumber (wh)
+    if not n or n < 200 or n > 1600 then
+      warn ("Give a height from 200 to 1600 pixels. It is " .. data.winheight .. " now.")
+      return
+    end
+    data.winheight = math.floor (n)
+    save ()
+    note ("Window height: " .. hi (data.winheight) .. " pixels.")
+    win_refont ()
+    return
+  end
+
+  local fs = arg:match ("^[Ff][Oo][Nn][Tt][Ss][Ii][Zz][Ee]%s*(.*)$")
+  if fs then
+    local n = tonumber (fs)
+    if not n or n < 6 or n > 40 then
+      warn ("Give a size from 6 to 40. It is " .. data.fontsize .. " now.")
+      return
+    end
+    data.fontsize = math.floor (n)
+    save ()
+    note ("Window font: " .. hi (data.font .. " " .. data.fontsize) .. ".")
+    win_refont ()
+    return
+  end
+
+  local fn = arg:match ("^[Ff][Oo][Nn][Tt]%s*(.*)$")
+  if fn then
+    if fn == "" then
+      local ok, f = pcall (utils.fontpicker, data.font, data.fontsize, 0)
+      if not ok or not f then return end
+      data.font = f.name or data.font
+      data.fontsize = tonumber (f.size) or data.fontsize
+    else
+      data.font = fn
+    end
+    save ()
+    note ("Window font: " .. hi (data.font .. " " .. data.fontsize) .. ".")
+    win_refont ()
+    return
+  end
+
+  warn ("I do not know " .. hi (arg) .. "@x203. Type " .. hi ("pnp help") .. "@x203.")
+end
+
+-- ===========================================================
+--  GMCP: whether you are asleep / fighting, and a moment to keep
+--  the window on top
+-- ===========================================================
+function OnPluginTelnetSubnegotiation (t, d)
+  if t ~= 201 or type (d) ~= "string" then return end
+  local pkg, body = d:match ("^([%w%._]+)%s+(.*)$")
+  if pkg == "char.status" then
+    local s = tonumber (body:match ('"state"%s*:%s*(%d+)'))
+    if s then gstate = s end
+    PnP_WinRaise ()
+  elseif pkg == "room.info" then
+    PnP_WinRaise ()
+  end
+end
+
+-- ===========================================================
+--  Install / teardown
+-- ===========================================================
+function OnPluginInstall ()
+  pcall (WindowDelete, WIN_ID)        -- one left over from last session
+  pcall (WindowDelete, "Scribe_win")  -- the 1.0 name
+  register_aliases ()
+  if session_expired () then
+    close_session (true)
+  elseif data.session then
+    arm_session_timers (true)         -- the hour carries on across a reload
+  end
+  local gd = GetPluginVariable (GMCP_ID, "gmcpdata")
+  if gd and gd ~= "" then
+    local ok, _, val = pcall (CallPlugin, GMCP_ID, "gmcpval", "char.status")
+    if ok and type (val) == "string" then
+      local s = tonumber (val:match ("state%W+(%d+)"))
+      if s then gstate = s end
+    end
+  end
+  note (hi ("v" .. VERSION) .. " loaded - " .. hi ("pnp config") .. " for the window, " ..
+        hi ("pnp help") .. " for the rest.")
+  PnP_After (3, "PnP_AlchCheck ()")
+end
+
+function OnPluginClose ()
+  pcall (WindowDelete, WIN_ID)
+end
+
+function OnPluginDisable ()
+  if run then
+    run = nil
+    EnableTriggerGroup ("pnp_scribe", false)
+    EnableTriggerGroup ("pnp_brew", false)
+    EnableTriggerGroup ("pnp_retry", false)
+  end
+end
+
+function OnPluginSaveState ()
+  save (true)
+end
+
+]]>
+</script>
+
+</muclient>
