@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="7.8"
+   version="7.9"
    >
 </plugin>
 
@@ -67,6 +67,8 @@ COMMANDS
                of - and those are also the ones remind_out () speaks up
                in once you have arrived.
   mmr          pick a run back up after a fight or a warded door
+  mmo on the Deadlights battlefield (16916 16917 16918 16920) does
+               something else entirely: see 7.9 below.
 
   Sub commands include a mob name to hunt, "all <mob>" to ignore the room
   range, "here" to dump the room listing, "wait <secs>" to change the move
@@ -92,6 +94,24 @@ COMMANDS
   REQUIRED, so the bare words are still ordinary words and the Elemental
   Chaos collision stays fixed.  No Lua changed: mm_command already resolved
   the keyword and a bare number.
+
+  7.9: MMO ON THE DEADLIGHTS BATTLEFIELD.  The four PK maze rooms around
+  Reign of Anarchy (16919) are not a MazeMobber area and are not mapped.
+  A bare mmo standing in one of them (or in Reign itself, which just says
+  so) runs MM_BF_Start instead of the usual walk out.  Each room it sends
+  "exits", reads the room name behind each direction, and moves: Reign
+  of Anarchy if listed, else The Final Conflict, else a random other
+  battlefield room, capped at 30 moves.  The move is "retreat <dir>" if
+  char.status says state 8, else a plain walk; after that only the MUD's
+  lines steer it (FAIL or stunned sends it again, "You aren't fighting
+  anyone" turns it into a walk, "Not while you are fighting" into a
+  retreat, Alas or cannot retreat re-reads the exits).  A new room number
+  in room.info means the move landed.  All of its triggers are group
+  mm_bf, off unless the walk is running; mm stop ends it, so does leaving
+  the zone or two minutes with no answer.  Hooks into existing code are
+  global calls only (mm_out, OnPluginBroadcast, mm_command) because of the
+  upvalue ceiling.  UNTESTED LIVE: whether "exits" answers mid fight was
+  not verified.
 
   7.4: MMOUT WANDERS INSTEAD OF FORGETTING THE MAP.  mmo out of the
   Nenukon's Pit of Monuhi walked the same five-move circuit thirteen times.
@@ -876,6 +896,44 @@ WHEN EDITING
 
   <trigger match="^.+$" script="mm_rc_line" name="mm_rc_line"
     group="mm_rc" enabled="n" regexp="y" keep_evaluating="y" sequence="40">
+  </trigger>
+  <!-- 7.9: mmo on the Deadlights battlefield.  The whole group is off
+       except while that walk is running (MM_BF_Start / MM_BF_Stop). -->
+  <trigger match="^Obvious exits from \[ (.+) \]:$" script="MM_BF_Head"
+    name="mm_bf_head" group="mm_bf" enabled="n" regexp="y"
+    keep_evaluating="y" sequence="44">
+  </trigger>
+  <trigger match="^\s*(North|East|South|West|Up|Down)\s*:\s*(.+?)\s*$"
+    script="MM_BF_ExitLine" name="mm_bf_exit" group="mm_bf" enabled="n"
+    regexp="y" keep_evaluating="y" sequence="46">
+  </trigger>
+  <trigger match="^You FAIL to retreat\!$" script="MM_BF_Again"
+    name="mm_bf_fail" group="mm_bf" enabled="n" regexp="y"
+    keep_evaluating="y" sequence="50">
+  </trigger>
+  <trigger match="^You are stunned\!$" script="MM_BF_Again"
+    name="mm_bf_stun" group="mm_bf" enabled="n" regexp="y"
+    keep_evaluating="y" sequence="50">
+  </trigger>
+  <trigger match="^You aren't fighting anyone\.$" script="MM_BF_NotFighting"
+    name="mm_bf_nofight" group="mm_bf" enabled="n" regexp="y"
+    keep_evaluating="y" sequence="50">
+  </trigger>
+  <trigger match="^Not while you are fighting\!$" script="MM_BF_Fighting"
+    name="mm_bf_fighting" group="mm_bf" enabled="n" regexp="y"
+    keep_evaluating="y" sequence="50">
+  </trigger>
+  <trigger match="^You cannot retreat in that direction\!$" script="MM_BF_NoWay"
+    name="mm_bf_noret" group="mm_bf" enabled="n" regexp="y"
+    keep_evaluating="y" sequence="50">
+  </trigger>
+  <trigger match="^Alas, you cannot go that way\.$" script="MM_BF_NoWay"
+    name="mm_bf_alas" group="mm_bf" enabled="n" regexp="y"
+    keep_evaluating="y" sequence="50">
+  </trigger>
+  <trigger match="^You are entangled in an invisible web\.$" script="MM_BF_Web"
+    name="mm_bf_web" group="mm_bf" enabled="n" regexp="y"
+    keep_evaluating="y" sequence="50">
   </trigger>
 </triggers>
 
@@ -2974,7 +3032,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "7.8"
+local VERSION  = "7.9"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -5799,6 +5857,9 @@ function OnPluginBroadcast (msg, id, bname, text)
   if text ~= "room.info" then return end
   local ri = gmcp ("room.info")
   if type (ri) ~= "table" then return end
+  -- 7.9 battlefield walk.  A global call, because this handler is at
+  -- Lua's 60-upvalue ceiling.
+  MM_BF_Room (ri)
   local num = tonumber (ri.num)
   if not num then return end
 
@@ -6240,10 +6301,254 @@ function begin (kind, tgt, mobname, noscan, wide_search)
   end
 end
 
+-- ===========================================================
+--  7.9: mmo on the Deadlights battlefield
+--
+--  Four shuffling PK rooms (16916 On the Battlefield of Armageddon, 16917
+--  The War That Ends All Wars, 16918 The Final Conflict, 16920 Within the
+--  Conflict) sit around Reign of Anarchy (16919).  Nothing here is mapped,
+--  so instead of routing, every room is asked "exits", which names the
+--  room behind each exit.  Reign of Anarchy in the list wins; otherwise The
+--  Final Conflict; otherwise any other battlefield room, at random.
+--
+--  A move is a retreat when GMCP says we are fighting and a plain walk
+--  otherwise.  After that the MUD's own lines decide, never GMCP (the
+--  RetreatFnSucks lesson - a combat status proves nothing about whether a
+--  move went through):
+--    You FAIL to retreat! / You are stunned!   send it again
+--    You aren't fighting anyone.               the fight is over: walk it
+--    Not while you are fighting!               walk refused: retreat it
+--    Alas / cannot retreat that way            read the exits again
+--  A new room number in room.info means the move landed: ask again.
+-- ===========================================================
+local BF = { on = false, gen = 0, moves = 0, list = {}, tok = 0, seq = 0 }
+local BF_ROOMS = { [16916] = true, [16917] = true, [16918] = true,
+                   [16919] = true, [16920] = true }
+local BF_REIGN = 16919
+local BF_MAXMOVES = 30
+local BF_FULL = { n = "north", e = "east", s = "south", w = "west",
+                  u = "up", d = "down" }
+local BF_NAMES = { "battlefield of armageddon", "war that ends all wars",
+                   "final conflict", "within the conflict" }
+
+local function bf_has (s, what)
+  return (s or ""):lower ():find (what, 1, true) ~= nil
+end
+
+local function bf_is_field (s)
+  for _, n in ipairs (BF_NAMES) do
+    if bf_has (s, n) then return true end
+  end
+  return false
+end
+
+-- Anything that waits on the MUD re-arms this.  Two minutes with no answer
+-- at all and the walk lets go of its triggers rather than lingering.
+local function bf_touch ()
+  BF.seq = BF.seq + 1
+  DoAfterSpecial (120, "MM_BF_Idle (" .. BF.gen .. "," .. BF.seq .. ")", 12)
+end
+
+function MM_BF_Stop (msg)
+  if not BF.on then return false end
+  BF.on    = false
+  BF.phase = nil
+  BF.gen   = BF.gen + 1
+  EnableTriggerGroup ("mm_bf", false)
+  if msg then note (msg) end
+  return true
+end
+
+function MM_BF_Idle (g, seq)
+  if BF.on and g == BF.gen and seq == BF.seq then
+    MM_BF_Stop ("Battlefield: no answer from the MUD for two minutes - " ..
+                "stopped. @x048mmo@w to try again.")
+  end
+end
+
+local function bf_done ()
+  MM_BF_Stop ("You are in @x048Reign of Anarchy@w.")
+end
+
+local function bf_ask ()
+  local ri = gmcp ("room.info")
+  BF.room  = (type (ri) == "table") and tonumber (ri.num) or nil
+  BF.phase = "ask"
+  BF.list  = {}
+  BF.tok   = 0
+  bf_touch ()
+  SendNoEcho ("exits")
+end
+
+local function bf_send ()
+  if BF.method == "retreat" then
+    SendNoEcho ("retreat " .. BF_FULL[BF.dir])
+  else
+    SendNoEcho (BF_FULL[BF.dir])
+  end
+  bf_touch ()
+end
+
+local function bf_go (d, label)
+  BF.moves = BF.moves + 1
+  if BF.moves > BF_MAXMOVES then
+    MM_BF_Stop ("Battlefield: " .. BF_MAXMOVES .. " moves and still no " ..
+                "Reign of Anarchy - stopped.")
+    return
+  end
+  local st = gmcp ("char.status")
+  local fighting = type (st) == "table" and tonumber (st.state) == 8
+  BF.phase  = "move"
+  BF.dir    = d
+  BF.method = fighting and "retreat" or "walk"
+  note ("@x048" .. label .. "@w is @x048" .. BF_FULL[d] .. "@w - " ..
+        (fighting and "retreating." or "walking."))
+  bf_send ()
+end
+
+local function bf_decide ()
+  local fc, others = nil, {}
+  for _, e in ipairs (BF.list) do
+    if bf_has (e.name, "reign of anarchy") then
+      bf_go (e.dir, "Reign of Anarchy")
+      return
+    end
+    if not fc and bf_has (e.name, "final conflict") then fc = e end
+    if bf_is_field (e.name) then others[#others + 1] = e end
+  end
+  if fc then
+    bf_go (fc.dir, "The Final Conflict")
+    return
+  end
+  if #BF.list == 0 then
+    MM_BF_Stop ("Battlefield: the exits listing never came - stopped. " ..
+                "@x048mmo@w to try again.")
+    return
+  end
+  if #others == 0 then others = BF.list end
+  local e = others[math.random (#others)]
+  note ("Neither Reign of Anarchy nor The Final Conflict is in sight - " ..
+        "trying another room.")
+  bf_go (e.dir, e.name)
+end
+
+-- Called from mm_out for a bare mmo/mmout.  False means "not on the
+-- battlefield", and mm_out carries on as it always did.
+function MM_BF_Start ()
+  local ri = gmcp ("room.info")
+  if type (ri) ~= "table" then return false end
+  local num = tonumber (ri.num)
+  if not (BF_ROOMS[num] or ri.name == "Reign of Anarchy" or
+          (ri.zone == "deadlights" and bf_is_field (ri.name))) then
+    return false
+  end
+  if running then stop () end
+  MM_BF_Stop ()
+  if num == BF_REIGN or bf_has (ri.name, "reign of anarchy") then
+    note ("You are already in @x048Reign of Anarchy@w.")
+    return true
+  end
+  BF.on    = true
+  BF.moves = 0
+  BF.gen   = BF.gen + 1
+  EnableTriggerGroup ("mm_bf", true)
+  note ("Battlefield: heading for @x048Reign of Anarchy@w.")
+  bf_ask ()
+  return true
+end
+
+-- room.info, from OnPluginBroadcast.
+function MM_BF_Room (ri)
+  if not BF.on or type (ri) ~= "table" then return end
+  if ri.zone and ri.zone ~= "" and ri.zone ~= "deadlights" then
+    MM_BF_Stop ("You left Deadlights - battlefield walk stopped.")
+    return
+  end
+  local num = tonumber (ri.num)
+  if num == BF_REIGN or bf_has (ri.name, "reign of anarchy") then
+    bf_done ()
+    return
+  end
+  -- The same room again is a GMCP repeat, not a move landing.
+  if num and num == BF.room then return end
+  bf_ask ()
+end
+
+function MM_BF_Head (name, line, wc)
+  if not BF.on then return end
+  if bf_has (wc[1], "reign of anarchy") then bf_done () return end
+  if BF.phase == "ask" then BF.list, BF.tok = {}, 0 end
+end
+
+function MM_BF_ExitLine (name, line, wc)
+  if not BF.on or BF.phase ~= "ask" then return end
+  local d = ({ North = "n", East = "e", South = "s",
+               West = "w", Up = "u", Down = "d" })[wc[1]]
+  if not d then return end
+  -- "The Final Conflict [**> PK <**]" - drop the trailing tags.
+  local nm = (wc[2] or "")
+  local prev
+  repeat
+    prev = nm
+    nm = nm:gsub ("%s*%b[]%s*$", "")
+  until nm == prev
+  BF.list[#BF.list + 1] = { dir = d, name = nm }
+  -- Reign of Anarchy beats anything else the listing could still say.
+  if bf_has (nm, "reign of anarchy") then
+    bf_go (d, "Reign of Anarchy")
+    return
+  end
+  -- Otherwise decide a moment after the LAST line, so the whole listing
+  -- is in before choosing (same settle mm_exits_line uses).
+  BF.tok = BF.tok + 1
+  DoAfterSpecial (0.3, "MM_BF_Settle (" .. BF.gen .. "," .. BF.tok .. ")", 12)
+end
+
+function MM_BF_Settle (g, tok)
+  if not BF.on or g ~= BF.gen or BF.phase ~= "ask" or tok ~= BF.tok then
+    return
+  end
+  bf_decide ()
+end
+
+-- The retreat (or walk) did not happen: send the very same thing again.
+function MM_BF_Again ()
+  if not BF.on or BF.phase ~= "move" then return end
+  bf_send ()
+end
+
+-- Retreating with nothing on us: the fight is over, so just walk it.
+function MM_BF_NotFighting ()
+  if not BF.on or BF.phase ~= "move" or BF.method ~= "retreat" then return end
+  BF.method = "walk"
+  bf_send ()
+end
+
+-- Walking was refused because something is on us: retreat instead.
+function MM_BF_Fighting ()
+  if not BF.on or BF.phase ~= "move" or BF.method ~= "walk" then return end
+  BF.method = "retreat"
+  bf_send ()
+end
+
+-- That exit is not there after all: read the room again.
+function MM_BF_NoWay ()
+  if not BF.on or BF.phase ~= "move" then return end
+  bf_ask ()
+end
+
+function MM_BF_Web ()
+  if not BF.on then return end
+  MM_BF_Stop ("Webbed - battlefield walk stopped. @x048mmo@w once you are free.")
+end
+
 -- Head for whichever of this area's ways out is nearest.  Some of them
 -- need a command once you get there (the Gardens' south door, Rose
 -- Ether's "inhale ether"); the rest you just walk up from.
 function mm_out (name, line, wildcards)
+  -- 7.9: on the Deadlights battlefield a bare mmo heads for Reign of
+  -- Anarchy instead (MM_BF_Start).  Globals only: no new upvalues here.
+  if (wildcards[2] or "") == "" and MM_BF_Start () then return end
   local word = (wildcards[1] or ""):lower ()
   -- "mmout <area>" names the area (6.6); bare mmout/mmo means here.
   local named = (wildcards[2] or ""):lower ()
@@ -6918,6 +7223,7 @@ local function show_help ()
     "mm resume        pick a run back up after a fight stopped it",
     "mmr              the same thing, shorter",
     "mmout @wor @x048mmo@w     walk back out of here (@x048mmout <area>@w names one)",
+    "mmo (battlefield) on the Deadlights battlefield, walks or retreats to Reign of Anarchy",
     "mm list          stop this area putting its list up on arrival",
     "mm areas         every area, click one to switch it off or on",
     "mm off / mm on   switch this area off or back on (mm off gaunt too)",
@@ -6954,6 +7260,8 @@ function mm_command (name, line, wildcards)
   menu_on_arrival = false
   local word = (wildcards[1] or ""):lower ()
   local arg  = (wildcards[2] or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
+  -- 7.9: mm stop also ends a battlefield walk (MM_BF_Start).
+  if arg:lower () == "stop" and MM_BF_Stop ("Stopped.") then return end
 
   -- "mm <area> [args]": the area word is the first token after mm (6.6).
   -- No area word collides with a sub command (on, off, areas, win ...).
