@@ -10,7 +10,7 @@
    purpose="Reports your room to a channel, plus the mob and its HP percent when fighting"
    date_written="2026-11-04"
    requires="4.59"
-   version="1.2"
+   version="1.3"
    save_state="n"
    >
 </plugin>
@@ -54,8 +54,11 @@ DATA AND STATE
   None. save_state is off; there are no settings.
 
 WHEN EDITING
-  * esc() doubles any @ in mob or room names so the MUD cannot read it as
-    a colour code. Keep it on every GMCP string put in the message.
+  * esc() doubles any @ in area and room names so the MUD cannot read it
+    as a colour code. The ENEMY name is deliberately NOT escaped (v1.3):
+    GMCP sends mob names with their own colour codes already in them
+    (e.g. "the @x165Frac@x171tal Ano@x176maly@w"), and escaping made those
+    print as literal text in the channel. Plain names still show in x048.
   * Add a channel by adding its word to CHANNELS and to the alias regex.
 -->
 
@@ -67,7 +70,7 @@ WHEN EDITING
 <script>
 <![CDATA[
 
-local VERSION  = "1.2"
+local VERSION  = "1.3"
 local TAG      = "Target"
 
 local CLR_TAG  = "#875FFF"   -- x099
@@ -128,7 +131,7 @@ local function buildMessage ()
   if fighting then
     local pct = tonumber (status.enemypct)
     local hp  = pct and (pct .. "%") or "?"
-    msg = msg .. "@WEnemy: @x099[@x048" .. esc (enemy) .. "@x099] "
+    msg = msg .. "@WEnemy: @x099[@x048" .. enemy .. "@x099] "
               .. "@W| HP: @x099[@x048" .. hp .. "@x099] @W| "
   end
   return msg .. "@WArea: @x048" .. esc (zone) .. " "
