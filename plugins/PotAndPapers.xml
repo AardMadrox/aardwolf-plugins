@@ -10,7 +10,7 @@
    date_written="2026-11-13"
    save_state="y"
    requires="4.00"
-   version="1.7"
+   version="1.8"
    >
 <description trim="y">
 <![CDATA[
@@ -85,6 +85,11 @@ HOW IT WORKS
   state 3 after that sends the same spell again 0.5s later (the blank is
   still held, as long as the sleep command leaves the hold slot alone). pnp resume does it by hand. The
   brew wording of that line is a GUESS.
+
+  ADDLIFE (1.8): pnp addlife <cmd> <made>/<tried> adds to a profile's
+  lifetime made/tried (negatives take off; refuses made > tried or < 0).
+  For counts made with another plugin or lost with an old save. Only the
+  lifetime moves, never the session.
 
   LIFETIME BLOCK (1.7): below the session in the window, lifetime made /
   tried per type (Scribe, Brew), then per short label within it, summed
@@ -253,7 +258,7 @@ require "aardwolf_colors"
 require "serialize"
 pcall (require, "themed_miniwindows")
 
-local VERSION = "1.7"
+local VERSION = "1.8"
 local PNAME   = "PotAndPapers"
 local GMCP_ID = "3e7dedbe37e44942dd46d264"
 local ALCH_ID = "f7d314c12df89a4093baedfa"   -- Nok3_Alchemist
@@ -1268,6 +1273,7 @@ end
 local HELP = {
   { "pnp config",                  "the profile window - click any value to change it" },
   { "pnp add <cmd> <scribe|brew> <per> <make> <spell>", "new profile, e.g. pnp add sinc scribe 3 8 incomplete healing" },
+  { "pnp addlife <cmd> <made>/<tried>", "add counts made elsewhere to a profile's lifetime" },
   { "pnp after <command|none>",    "the after command new profiles start with (default sleep)" },
   { "pnp bag <id>",                "bag the blanks come from and the finished ones go to" },
   { "pnp del <cmd>",               "delete a profile (and its lifetime totals)" },
@@ -1491,6 +1497,30 @@ function PnP_Command (name, line, w)
     save ()
     note ("Out of mana mid-batch now runs " .. (mc ~= "" and hi (mc) or "nothing") .. ".")
     win_refresh ()
+    return
+  end
+
+  -- pnp addlife <cmd> <made>/<tried>: add counts made elsewhere (another
+  -- plugin, a lost save) to a profile's lifetime; negatives take them off
+  local lc, lm, lt = arg:match ("^[Aa][Dd][Dd][Ll][Ii][Ff][Ee]%s+(%S+)%s+(%-?%d+)%s*/%s*(%-?%d+)%s*$")
+  if lc then
+    local p = by_cmd (lc)
+    if not p then warn ("No profile " .. hi (lc) .. "@x203.") return end
+    local nm_, nt = p.made + tonumber (lm), p.tried + tonumber (lt)
+    if nm_ < 0 or nt < 0 or nm_ > nt then
+      warn ("That would make " .. nm_ .. " made of " .. nt .. " tried - not possible.")
+      return
+    end
+    p.made, p.tried = nm_, nt
+    save ()
+    note (nm (label (p)) .. " lifetime is now " .. hi (p.made .. "/" .. p.tried) .. " " ..
+          hi (pct (p.made, p.tried)) .. ".")
+    win_refresh ()
+    return
+  end
+  if low:match ("^addlife") then
+    warn ("Use " .. hi ("pnp addlife <cmd> <made>/<tried>") .. "@x203, e.g. " ..
+          hi ("pnp addlife sinc 20/40") .. "@x203.")
     return
   end
 
