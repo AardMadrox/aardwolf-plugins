@@ -10,7 +10,7 @@
    date_written="2026-11-13"
    save_state="y"
    requires="4.00"
-   version="1.4"
+   version="1.5"
    >
 <description trim="y">
 <![CDATA[
@@ -75,6 +75,17 @@ HOW IT WORKS
   counted. The trigger also takes "...trying to brew..." - that wording
   is a GUESS, to be corrected if the real brew line differs.
   MAX_RETRY losses in a row end the batch as stalled.
+
+  OUT OF MANA (1.5): "You don't have enough mana to scribe <spell>."
+  (seen live) pauses the batch - run stays set, run.paused, the watchdog
+  is voided - and runs data.mana_cmd (sleepx if the default after command is sleepx, else sleep;
+  pnp mana <cmd|none>). GMCP char.status state 9 sets run.slept; the next
+  state 3 after that sends the same spell again 0.5s later (the blank is
+  still held, as long as the sleep command leaves the hold slot alone). pnp resume does it by hand. The
+  brew wording of that line is a GUESS.
+
+  COUNTDOWN (1.5): start_item echoes "Making N of M" (N = made + 1, so a
+  failed item repeats the same N) above each item's report line.
 
   A spell with no result for WATCH_SECS seconds (out of mana, out of
   blanks, asleep...) ends the batch as "stalled" and still runs the after
@@ -183,6 +194,19 @@ WHEN EDITING
   >
   </trigger>
 
+  <!-- out of mana: pause, sleep, carry on when you wake (scribe wording
+       seen live 2026-11-14; brew wording is a guess) -->
+  <trigger
+   enabled="n"
+   group="pnp_retry"
+   keep_evaluating="y"
+   match="^You don't have enough mana to (scribe|brew) .+\.$"
+   regexp="y"
+   script="PnP_NoMana"
+   sequence="100"
+  >
+  </trigger>
+
   <!-- brewing -->
   <trigger
    enabled="n"
@@ -223,7 +247,7 @@ require "aardwolf_colors"
 require "serialize"
 pcall (require, "themed_miniwindows")
 
-local VERSION = "1.4"
+local VERSION = "1.5"
 local PNAME   = "PotAndPapers"
 local GMCP_ID = "3e7dedbe37e44942dd46d264"
 local ALCH_ID = "f7d314c12df89a4093baedfa"   -- Nok3_Alchemist
@@ -384,6 +408,10 @@ local function load_data ()
     for _, p in ipairs (d.profiles) do
       if p.after == "sleepx" then d.default_after = "sleepx" end
     end
+  end
+  -- what to run when the mana runs out mid-batch (1.5)
+  if type (d.mana_cmd) ~= "string" then
+    d.mana_cmd = (d.default_after == "sleepx") and "sleepx" or "sleep"
   end
   return d
 end
@@ -564,6 +592,9 @@ end
 
 local function start_item ()
   run.spells = 0
+  -- the countdown: which finished item this blank is going to be
+  note (string.format ("%s  Making %s of %s", nm (label (run.p)),
+        hi (run.made + 1), hi (run.target)))
   SendNoEcho ("get '" .. run.k.blank .. "' " .. data.bag)
   SendNoEcho ("hold '" .. run.k.blank .. "'")
   add_spell ()
@@ -703,8 +734,46 @@ function PnP_Fail ()
   if win_refresh then win_refresh () end
 end
 
+-- "You don't have enough mana to scribe incomplete healing."
+-- Nothing was added and nothing was lost: hold the batch, sleep, and
+-- send the same spell again once GMCP says you are awake (state 3).
+function PnP_NoMana (name, line, w)
+  if not run or run.paused then return end
+  if w and w[1] and w[1] ~= run.k.verb then return end
+  run.step = run.step + 1           -- the watchdog for that spell is answered
+  run.paused = true
+  run.slept  = (gstate == 9)
+  note (string.format ("%s  Out of mana at %s of %s - paused.", nm (label (run.p)),
+        hi (run.made + 1), hi (run.target)))
+  if data.mana_cmd ~= "" then
+    note ("Running " .. hi (data.mana_cmd) .. "; the batch carries on when you wake (or " ..
+          hi ("pnp resume") .. ").")
+    Execute (data.mana_cmd)
+  else
+    note ("Sleep, then wake, and the batch carries on (or " .. hi ("pnp resume") .. ").")
+  end
+  if win_refresh then win_refresh () end
+end
+
+local function resume_batch (manual)
+  if not run then if manual then note ("No batch is running.") end return end
+  if not run.paused then if manual then note ("The batch is not paused.") end return end
+  run.paused, run.slept = false, false
+  note (string.format ("%s  Awake - carrying on with %s of %s.", nm (label (run.p)),
+        hi (run.made + 1), hi (run.target)))
+  add_spell ()
+  if win_refresh then win_refresh () end
+end
+
+function PnP_Resume (g)
+  if not run or run.gen ~= g or not run.paused then return end
+  if gstate ~= 3 then return end    -- went back to sleep (or into a fight) in the meantime
+  resume_batch (false)
+end
+
 function PnP_Watch (g, step)
   if not run or run.gen ~= g or run.step ~= step then return end
+  if run.paused then return end
   warn ("No result from " .. run.k.verb .. " in " .. WATCH_SECS .. "s - out of mana or " ..
         (run.p.kind == "brew" and "empty vials" or "blank scrolls") .. "?")
   finish_batch ("stalled")
@@ -939,7 +1008,10 @@ local function win_lines ()
           code = 'PnP_Click("bag",0)', tip = "Bag the blanks come from and the finished ones go to" },
         { text = "     After, for new profiles  ", colour = CLR_TAG },
         { text = data.default_after ~= "" and data.default_after or "(nothing)", colour = CLR_NAME,
-          code = 'PnP_Click("defafter",0)', tip = "The after command a new profile starts with" } }
+          code = 'PnP_Click("defafter",0)', tip = "The after command a new profile starts with" },
+        { text = "     Out of mana  ", colour = CLR_TAG },
+        { text = data.mana_cmd ~= "" and data.mana_cmd or "(nothing)", colour = CLR_NAME,
+          code = 'PnP_Click("mana",0)', tip = "Run when the mana runs out; the batch carries on when you wake" } }
   add { { text = " " } }
 
   local wc, wn, ws, wa = #"Command", #"Name", #"Spell", #"After"
@@ -1005,7 +1077,9 @@ local function win_lines ()
           { text = label (run.p) .. "  " .. run.made .. "/" .. run.target .. "  " .. pct (run.made, run.tried),
             colour = CLR_HI },
           { text = string.format ("   %d tried, this %s %d/%d spells",
-                                  run.tried, run.k.item, run.spells, run.p.per), colour = CLR_MSG } }
+                                  run.tried, run.k.item, run.spells, run.p.per), colour = CLR_MSG },
+          { text = run.paused and "   paused - out of mana, carries on when you wake" or "",
+            colour = CLR_BAD } }
   else
     local ex = data.profiles[1] and (data.profiles[1].cmd .. " 8") or "sinc 8"
     add { { text = "  Batch    ", colour = CLR_TAG },
@@ -1161,7 +1235,9 @@ local HELP = {
   { "pnp help",                    "this list" },
   { "pnp history",                 "the last 10 closed sessions" },
   { "pnp list",                    "profiles and the session, in chat" },
+  { "pnp mana <command|none>",     "run when the mana runs out mid-batch (default sleepx/sleep)" },
   { "pnp reload",                  "load this plugin again after an update" },
+  { "pnp resume",                  "carry on a batch paused for mana without waiting for a wake" },
   { "pnp session",                 "the session so far" },
   { "pnp set <cmd> <what> <value>", "what: cmd, nick, type, spell, per, make or after (after none = nothing)" },
   { "pnp spell add <name>",        "add a spell to the pick list" },
@@ -1202,6 +1278,14 @@ function PnP_Do (action, id)
       data.default_after = v
       save ()
       note ("New profiles will run " .. (v ~= "" and hi (v) or "nothing") .. " after a batch.")
+    end
+  elseif action == "mana" then
+    local v = utils.inputbox ("Command to run when the mana runs out mid-batch (blank for nothing).\n" ..
+                              "The batch carries on by itself when you wake up.", PNAME, data.mana_cmd)
+    if v then
+      data.mana_cmd = trim (v)
+      save ()
+      note ("Out of mana mid-batch now runs " .. (data.mana_cmd ~= "" and hi (data.mana_cmd) or "nothing") .. ".")
     end
   elseif action == "new" then
     new_profile ()
@@ -1315,6 +1399,7 @@ function PnP_Command (name, line, w)
   if low == "" or low == "help" then show_help () return end
   if low == "list" then list_chat () return end
   if low == "stop" then stop_batch () return end
+  if low == "resume" then resume_batch (true) return end
   if low == "end" then end_session () return end
   if low == "history" then history_chat () return end
   if low == "spells" then spells_chat () return end
@@ -1346,6 +1431,23 @@ function PnP_Command (name, line, w)
     save ()
     note ("New profiles will run " .. (da ~= "" and hi (da) or "nothing") ..
           " after a batch. Existing profiles keep their own (" .. hi ("pnp set <cmd> after ...") .. ").")
+    win_refresh ()
+    return
+  end
+
+  local mc = arg:match ("^[Mm][Aa][Nn][Aa]%s*(.*)$")
+  if mc then
+    mc = trim (mc)
+    if mc == "" then
+      note ("Out of mana mid-batch runs " .. (data.mana_cmd ~= "" and hi (data.mana_cmd) or "nothing") ..
+            ", then the batch carries on when you wake. Change it with " .. hi ("pnp mana <command>") ..
+            " (or " .. hi ("pnp mana none") .. ").")
+      return
+    end
+    if mc:lower () == "none" then mc = "" end
+    data.mana_cmd = mc
+    save ()
+    note ("Out of mana mid-batch now runs " .. (mc ~= "" and hi (mc) or "nothing") .. ".")
     win_refresh ()
     return
   end
@@ -1491,7 +1593,18 @@ function OnPluginTelnetSubnegotiation (t, d)
   local pkg, body = d:match ("^([%w%._]+)%s+(.*)$")
   if pkg == "char.status" then
     local s = tonumber (body:match ('"state"%s*:%s*(%d+)'))
-    if s then gstate = s end
+    if s then
+      gstate = s
+      -- a batch paused for mana: note the sleep, carry on at the wake
+      if run and run.paused then
+        if s == 9 then
+          run.slept = true
+        elseif s == 3 and run.slept then
+          run.slept = false
+          PnP_After (0.5, "PnP_Resume (" .. run.gen .. ")")
+        end
+      end
+    end
     PnP_WinRaise ()
   elseif pkg == "room.info" then
     PnP_WinRaise ()
