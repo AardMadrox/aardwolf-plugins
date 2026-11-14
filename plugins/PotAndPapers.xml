@@ -10,7 +10,7 @@
    date_written="2026-11-13"
    save_state="y"
    requires="4.00"
-   version="1.6"
+   version="1.7"
    >
 <description trim="y">
 <![CDATA[
@@ -85,6 +85,10 @@ HOW IT WORKS
   state 3 after that sends the same spell again 0.5s later (the blank is
   still held, as long as the sleep command leaves the hold slot alone). pnp resume does it by hand. The
   brew wording of that line is a GUESS.
+
+  LIFETIME BLOCK (1.7): below the session in the window, lifetime made /
+  tried per type (Scribe, Brew), then per short label within it, summed
+  from the profiles' own counts (a deleted profile's counts go with it).
 
   COUNTDOWN (1.5): start_item echoes "Making N of M" (N = tried + 1 since
   1.6, one per blank) above each item's report line.
@@ -249,7 +253,7 @@ require "aardwolf_colors"
 require "serialize"
 pcall (require, "themed_miniwindows")
 
-local VERSION = "1.6"
+local VERSION = "1.7"
 local PNAME   = "PotAndPapers"
 local GMCP_ID = "3e7dedbe37e44942dd46d264"
 local ALCH_ID = "f7d314c12df89a4093baedfa"   -- Nok3_Alchemist
@@ -1116,6 +1120,38 @@ local function win_lines ()
               colour = CLR_MSG } }
     else
       add { { text = "  Session  ", colour = CLR_TAG }, { text = "none yet", colour = CLR_MSG } }
+    end
+  end
+
+  -- lifetime, per type (Scribe / Brew), then per label within it (1.7).
+  -- Summed from the profiles, so a deleted profile's counts are gone.
+  local first = true
+  for _, kd in ipairs { "scribe", "brew" } do
+    local tot = { made = 0, tried = 0 }
+    local by, order = {}, {}
+    for _, p in ipairs (data.profiles) do
+      if p.kind == kd and p.tried > 0 then
+        local l = short_label (p)
+        if not by[l] then by[l] = { made = 0, tried = 0 }; order[#order + 1] = l end
+        by[l].made, by[l].tried = by[l].made + p.made, by[l].tried + p.tried
+        tot.made, tot.tried = tot.made + p.made, tot.tried + p.tried
+      end
+    end
+    if tot.tried > 0 then
+      if first then add { { text = " " } } end
+      table.sort (order)
+      local kl = KIND[kd].label
+      add { { text = first and "  Lifetime " or "           ", colour = CLR_TAG },
+            { text = kl .. sp (8 - #kl), colour = CLR_NAME },
+            { text = string.format ("%d made / %d tried  %s", tot.made, tot.tried, pct (tot.made, tot.tried)),
+              colour = CLR_HI } }
+      for _, l in ipairs (order) do
+        local e = by[l]
+        add { { text = "             " .. l .. sp (math.max (2, wn - #l)) ..
+                       string.format ("%d/%d  %s", e.made, e.tried, pct (e.made, e.tried)),
+                colour = CLR_MSG } }
+      end
+      first = false
     end
   end
   return L
