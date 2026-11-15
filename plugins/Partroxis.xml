@@ -1,0 +1,1468 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="Partroxis"
+   author="Eric"
+   id="7b2e9d41c8a3f05e6d19b4a2"
+   language="Lua"
+   purpose="Click a room in the Partroxis maze list and it walks you there, one exit at a time"
+   date_written="2026-11-14"
+   save_state="y"
+   requires="4.00"
+   version="1.0"
+   >
+<description trim="y">
+<![CDATA[
+Partroxis - a Partroxis maze walker.
+
+  psx              pop up the list of rooms with the mob in each
+  psx stop         stop walking
+  psxgo            carry on after a stop or a fight
+  psx help         everything else
+
+Click a room and it walks the maze to it, one step at a time, with a
+0.3 second pause in every room so it can never run past the one you picked.
+A wrong exit is learned and doubled back from. An attack stops the walk;
+once the fight is over type psxgo and it goes invis / hidden / sneak again
+and carries on.
+
+Based on Galaban's Partroxis plugin (room and mob data, exit matching).
+]]>
+</description>
+</plugin>
+
+<!--
+  MAINTAINER NOTES
+  - Before each walk / after a fight it reads a gagged saff and casts the
+    invis / sneak / hide that are missing ONCE, then walks. No recheck, no
+    recast: wraith form gives these intermittently without saff listing
+    them, so the game's "You are already ..." reply is the answer.
+  - The walk waits only on hide: "You hide in the shadows." + invisdelay, or
+    "You are already hiding." (go at once), or HIDE_FALLBACK with no reply.
+  - Nothing is remembered between walks; every walk reads saff fresh.
+  - saff/affects go out with no echo; the header, every "Word : ... (...)"
+    line (incl. "Other : No race change (2 days and 10:30:42)"), blank lines
+    and the "You are affected by N skills and M spells." footer are gagged.
+    The footer ends the read at once; psx debug shows them all.
+  - A fight STOPS the walk (walking = false, everything in flight
+    cancelled). Nothing restarts it by itself: the player types psxgo once
+    the fight is over, and that walk reads saff and casts first. A room
+    clicked mid fight is remembered and refused until psxgo. fight_stop is
+    the flag that makes the psxgo walk cast even with precast off.
+  - Keep local VERSION in step with version=. The load banner prints it.
+-->
+
+<aliases>
+  <alias
+   match="^psx(?:\s+(.*?))?\s*$"
+   enabled="y"
+   regexp="y"
+   script="psx_command"
+   sequence="100"
+   ignore_case="y"
+  >
+  </alias>
+  <alias
+   match="^psxgo\s*$"
+   enabled="y"
+   regexp="y"
+   script="psx_go_command"
+   sequence="100"
+   ignore_case="y"
+  >
+  </alias>
+  <alias
+   script="OnHelp"
+   match="Partroxis:help"
+   enabled="y"
+  >
+  </alias>
+</aliases>
+
+<triggers>
+  <trigger
+   enabled="y"
+   match="^The Partroxis has opened yet again\.$"
+   regexp="y"
+   script="psx_area_reset"
+   sequence="100"
+  >
+  </trigger>
+
+  <trigger
+   enabled="n"
+   group="psx_exit"
+   name="PSXExitHeader"
+   match="^Obvious exits from \[.*$"
+   regexp="y"
+   omit_from_output="y"
+   script="psx_exit_header"
+   sequence="100"
+  >
+  </trigger>
+
+  <trigger
+   enabled="n"
+   group="psx_exit"
+   name="PSXExitLine"
+   match="^\s*(North|East|South|West|Up|Down)\s*\:\s*(.*?)\s*$"
+   regexp="y"
+   omit_from_output="y"
+   script="psx_exit_line"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="n"
+   group="psx_aff"
+   name="PSXAffHeader"
+   match="^You are affected by the following:\s*$"
+   regexp="y"
+   omit_from_output="y"
+   script="psx_aff_header"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="n"
+   group="psx_aff_lines"
+   name="PSXAffLine"
+   match="^\s*(\w+)\s*:\s*(.+?)\s*\(([^)]*)\).*$"
+   regexp="y"
+   omit_from_output="y"
+   script="psx_aff_line"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="n"
+   group="psx_aff_lines"
+   name="PSXAffFooter"
+   match="^You are affected by \d+ .*\.\s*$"
+   regexp="y"
+   omit_from_output="y"
+   script="psx_aff_footer"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="n"
+   group="psx_aff"
+   name="PSXAffBlank"
+   match="^\s*$"
+   regexp="y"
+   omit_from_output="y"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="y"
+   match="^You hide in the shadows\.$"
+   regexp="y"
+   name="PSXHideDone"
+   script="psx_hide_done"
+   sequence="100"
+  >
+  </trigger>
+  <trigger
+   enabled="y"
+   match="^You are already (invisible|moving silently|hiding)\.$"
+   regexp="y"
+   name="PSXAlready"
+   script="psx_already"
+   sequence="100"
+  >
+  </trigger>
+</triggers>
+
+<script>
+<![CDATA[
+
+require "aardwolf_colors"
+pcall (require, "themed_miniwindows")
+
+local GMCP_ID = "3e7dedbe37e44942dd46d264"
+local VERSION = "1.0"
+
+-- Colour scheme (same as MazeMobber)
+local CLR_TAG  = "#875FFF"   -- brackets / dim accents
+local CLR_NAME = "#00D7FF"   -- names
+local CLR_MSG  = "#FFFFFF"   -- message text
+local CLR_HI   = "#00FF87"   -- commands, values, clickables
+
+-- Timing
+local PAUSE         = 0.3    -- pause in every room before the next move
+local FIGHT_RESUME  = 0.3    -- after a fight ends, before carrying on
+local INVIS_DELAY   = 1.5    -- after hide (it lags a second); the other casts go out back to back
+local MOVE_TIMEOUT  = 2.5    -- a move that has produced no new room by now is retried
+local EXITS_SETTLE  = 0.15   -- after the exits header, before reading the lines
+local HIDE_FALLBACK = 4.0    -- hide sent but no hide / already-hiding message: carry on anyway
+local AFF_SETTLE    = 0.3    -- no new line this long after the affects list: it is complete
+local AFF_TIMEOUT   = 4.0    -- the first affects check: no list by now, so cast everything
+local MIN_LEFT      = 120    -- seconds left on an effect for it to count as up
+local EXITS_TIMEOUT = 6.0    -- no exits list at all
+
+-- ===========================================================
+--  Notes: everything is held back 0.2s so a line printed on arrival
+--  does not land above the room description.
+-- ===========================================================
+-- MUSHclient's DoAfterSpecial refuses any delay under 0.1s (eTimeInvalid) and
+-- says nothing - the timer is simply never made, so a 0.05s "step" never
+-- fires and the walk stalls without a word.  Every timer goes through here:
+-- the delay is floored at 0.1 and a refusal is announced, never silent.
+function PSX_After (delay, code)
+  if not delay or delay < 0.1 then delay = 0.1 end
+  local rc = DoAfterSpecial (delay, code, 12)
+  if rc ~= 0 then
+    ColourNote ("#FF5F87", "", "[Partroxis] A timer was refused (code " .. tostring (rc) ..
+                               ", " .. tostring (delay) .. "s): " .. tostring (code))
+  end
+end
+
+local msg_q, msg_armed = {}, false
+
+local function flush_notes_now ()
+  if #msg_q == 0 then return end
+  local q = msg_q
+  msg_q = {}
+  for _, s in ipairs (q) do
+    AnsiNote (stylesToANSI (ColoursToStyles (s)))
+  end
+end
+
+function PSX_Flush ()
+  msg_armed = false
+  flush_notes_now ()
+end
+
+local function cnote (s)
+  msg_q[#msg_q + 1] = s
+  if not msg_armed then
+    msg_armed = true
+    PSX_After (0.2, "PSX_Flush ()")
+  end
+end
+
+local function note (msg)
+  cnote ("@x099[@x045Partroxis@x099]@w " .. msg)
+end
+
+local function note_now (msg)
+  cnote ("@x099[@x045Partroxis@x099]@w " .. msg)
+  flush_notes_now ()
+end
+
+local function warn (msg)
+  cnote ("@x099[@x045Partroxis@x099]@w @x203" .. msg .. "@w")
+end
+
+local debug_on = false
+local function dnote (msg)
+  if debug_on then cnote ("@x099[@x045psx debug@x099]@w " .. msg) end
+end
+
+-- ===========================================================
+--  Maze data (from Galaban's plugin)
+--  5763 is the entrance, 5764-5803 the maze, 5812 the Opus past the last gate.
+--  Every room's right exit leads to the next id; wrong exits are one-way
+--  trips back somewhere earlier.
+-- ===========================================================
+local ROWS = {
+  {5764, "In the Mountains",             "A Mountain of Rock"},
+  {5765, "Through the Woods",            "The Rabid Tiger-man"},
+  {5766, "The Forest",                   "The man-eating wolfen"},
+  {5767, "Swampy Path",                  "The Buck-Toothed Lizard-Man"},
+  {5768, "The Forest",                   "The Living Tree"},
+  {5769, "Along the River",              "The Furious Flying Fish Man"},
+  {5770, "The Desert",                   "The Quicksand"},
+  {5771, "The Desert",                   "The Flesh Eating Ants"},
+  {5772, "The Wheat Fields",             "The Living Vines"},
+  {5773, "In the Mountains",             "The Gigantic Bulette"},
+  {5774, "In the Mountains",             "A Bird of Prey"},
+  {5775, "A Cave",                       "The Otherworld Assassin"},
+  {5776, "The Wheat Fields",             "Vision of a False Portal"},
+  {5777, "The Wheat Fields",             "The Hungry Dragon"},
+  {5778, "The Forest",                   "A Bloodthirsty Tiger-Man"},
+  {5779, "The Swamp",                    "The Cold Hearted Lizard-Man"},
+  {5780, "The Swamp",                    "The Insane Cheryb"},
+  {5781, "River of Blood",               "Flowing Blood"},
+  {5782, "A small Cave",                 "A collapsing cave"},
+  {5783, "A small Cave",                 "The Dream Eater"},
+  {5784, "Through the Passage of Time",  "Reality Check"},
+  {5785, "The Swamp",                    "Blood Sucking Vines"},
+  {5786, "The Forest",                   "The Golden Haired Assassin"},
+  {5787, "The Wheat Fields",             "Mass of Flying Dismembered Body Parts"},
+  {5788, "The Wheat Fields",             "Bloodthirsty Killer Gerbils"},
+  {5789, "In the Mountains",             "A Monster Bulette"},
+  {5790, "The Wheat Fields",             "the Thing"},
+  {5791, "Along the River",              "The Big and Deadly Dragon"},
+  {5792, "The Wheat Field",              "Soul of the Damned"},
+  {5793, "In the Mountains",             "Lesser Chitryn"},
+  {5794, "In the Mountains",             "Delusions of Hope"},
+  {5795, "The Desert",                   "Swarm of Blood Sucking Bio-chemical Gnats"},
+  {5796, "The Swamp",                    "It"},
+  {5797, "The Desert",                   "Your Worst Nightmare"},
+  {5798, "The Wheat Field",              "Walking Suit of Armor"},
+  {5799, "A Cave",                       "Lesser Otherworld Dragon"},
+  {5800, "A Cave",                       "Insane Cheryb"},
+  {5801, "In the Mountains",             "Otherworld Dragon"},
+  {5802, "In the Mountains",             "Hell Hound Behemoths"},
+  {5803, "A vast Expanse of Plains",     "Chitryn"},
+  {5812, "The Opus",                     "Grax, Lord of the Opus"},
+}
+
+local ROOMS, POS = {}, {}
+for i, r in ipairs (ROWS) do
+  ROOMS[r[1]] = { name = r[2], mob = r[3], n = i }
+  POS[r[1]] = i
+end
+-- The way in: each of these is one command (or a short stack) that moves
+-- you one stage nearer the maze.  Arrival is checked by "the room changed",
+-- not by an id, so a wrong guess about the middle rooms cannot wedge it.
+local APPROACH = {
+  [5862] = "enter partroxis",
+  [5814] = "enter partroxis",
+  [5813] = "enter other",
+  [5763] = "open n;n",
+}
+POS[5862], POS[5814], POS[5813], POS[5763] = -3, -2, -1, 0
+
+local GATE = { [5777] = true, [5792] = true, [5803] = true }   -- "enter gate", not a direction
+local DIRS = { "n", "e", "s", "w", "u", "d" }
+local DIRKEY = { north = "n", east = "e", south = "s", west = "w", up = "u", down = "d" }
+
+local function next_id (r)
+  if r == 5803 then return 5812 end
+  return r + 1
+end
+
+local function roomlabel (id)
+  local r = ROOMS[id]
+  if r then return r.name end
+  return "room " .. tostring (id)
+end
+
+-- ===========================================================
+--  State
+-- ===========================================================
+local cur            = nil     -- room we are in
+local state          = 3       -- char.status state: 3 active, 8 fighting, 12 running
+local walking        = false
+local target         = nil     -- room id clicked
+local pending        = nil     -- { from, dir, approach, retries } a move sent, no new room yet
+local rooms          = {}      -- learned: rooms[id] = { dir, next, wrong = { [dir]=true } }
+local need_invis     = false
+local fight_stop     = false   -- a fight stopped the walk: psxgo carries on, and casts first
+local step_gen       = 0
+local wd_gen         = 0
+local ex_gen         = 0
+local exits_buf      = {}
+local exits_for      = nil
+local exits_ready    = false
+local exits_dark     = false
+local exits_wait     = false   -- a capture is in flight
+local invis_cmds     = GetVariable ("invis") or "c invis;sneak;hide"
+if invis_cmds == "c invis;hide;sneak" then invis_cmds = "c invis;sneak;hide" end   -- the old default: hide goes last now
+local auto_list      = (GetVariable ("auto") ~= "n")
+local fast_known     = (GetVariable ("fast") ~= "n")   -- walk a known stretch as one run, no pauses
+local invis_delay    = tonumber (GetVariable ("invisdelay") or "") or INVIS_DELAY
+if invis_delay == 1.2 then invis_delay = INVIS_DELAY end   -- the old default; it is 1.5 now
+local invis_why      = ""      -- what the cast note says
+local check_buffs    = (GetVariable ("check") ~= "n")     -- read the affects first, cast only what is missing
+local aff_cmd        = GetVariable ("affcmd") or "saff"
+local buff           = nil     -- the cast routine in flight
+local buff_gen       = 0
+local aff_gen, aff_set = 0, 0  -- the affects read in flight
+local aff_wait       = false
+local aff_buf        = nil
+local aff_cb         = nil
+local buff_cancel              -- defined with the cast routine, used by cancel_all
+local precast        = (GetVariable ("precast") ~= "n")   -- cast them before every new walk
+local win_font       = GetVariable ("winfont") or "Consolas"
+local win_font_size  = tonumber (GetVariable ("winfontsize") or "") or 12
+
+local function in_area (id) return id ~= nil and POS[id] ~= nil end
+
+-- ===========================================================
+--  The walk
+-- ===========================================================
+local function schedule (delay)
+  step_gen = step_gen + 1
+  PSX_After (delay or PAUSE, "PSX_Step (" .. step_gen .. ")")
+end
+
+local function cancel_all ()
+  step_gen = step_gen + 1
+  wd_gen   = wd_gen + 1
+  ex_gen   = ex_gen + 1
+  exits_wait = false
+  pending  = nil
+  buff_cancel ()
+  EnableTriggerGroup ("psx_exit", false)
+end
+
+local function abort (msg)
+  walking = false
+  cancel_all ()
+  warn (msg .. " Type @x048psxgo@w to carry on.")
+end
+
+local function stop_walk ()
+  walking = false
+  cancel_all ()
+end
+
+local function arrive ()
+  walking = false
+  cancel_all ()
+  local r = ROOMS[target]
+  note ("Arrived: @x048" .. (r and r.name or tostring (target)) .. "@w - @x045" ..
+        (r and r.mob or "?") .. "@w is here.")
+end
+
+local function arm_watch ()
+  wd_gen = wd_gen + 1
+  PSX_After (MOVE_TIMEOUT, "PSX_Watch (" .. wd_gen .. ")")
+end
+
+local function send_move (dir, approach)
+  pending = { from = cur, dir = dir, approach = approach, retries = 0 }
+  exits_ready = false
+  dnote ("move " .. dir .. " from " .. tostring (cur))
+  Execute (dir)
+  arm_watch ()
+end
+
+-- A move that has not produced a new room.
+function PSX_Watch (g)
+  if g ~= wd_gen or not walking or not pending then return end
+  if cur ~= pending.from then return end
+  if state == 8 then return end                       -- the fight handler owns this
+  if state ~= 3 and state ~= 12 then arm_watch () return end   -- not able to move yet: wait, do not count
+  if pending.run then
+    -- stopped part-way (a lag, an interruption): work out what is left from here
+    pending = nil
+    warn ("The run stopped short - carrying on from here.")
+    schedule (PAUSE)
+    return
+  end
+  pending.retries = pending.retries + 1
+  if pending.retries > 2 then
+    abort ("The move @x048" .. pending.dir .. "@w did not take you anywhere.")
+    return
+  end
+  warn ("No new room after @x048" .. pending.dir .. "@w - sending it again.")
+  Execute (pending.dir)
+  arm_watch ()
+end
+
+-- ---- reading the exits ------------------------------------
+local function capture_exits ()
+  exits_buf, exits_for, exits_ready, exits_dark = {}, cur, false, false
+  exits_wait = true
+  ex_gen = ex_gen + 1
+  local om = debug_on and "n" or "y"
+  SetTriggerOption ("PSXExitHeader", "omit_from_output", om)
+  SetTriggerOption ("PSXExitLine",   "omit_from_output", om)
+  EnableTriggerGroup ("psx_exit", true)
+  PSX_After (EXITS_TIMEOUT, "PSX_ExitsTimeout (" .. ex_gen .. ")")
+  if debug_on then Send ("exits") else SendNoEcho ("exits") end
+end
+
+function psx_exit_header (name, line, w)
+  exits_buf = {}
+  PSX_After (EXITS_SETTLE, "PSX_ExitsDone (" .. ex_gen .. ")")
+end
+
+function psx_exit_line (name, line, w)
+  local d = DIRKEY[(w[1] or ""):lower ()]
+  if not d then return end
+  local nm = (w[2] or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
+  if nm == "Too dark to see." then exits_dark = true end
+  exits_buf[d] = nm
+end
+
+local function pick_exit ()
+  local nxt = ROOMS[next_id (cur)]
+  if not nxt then abort ("I have no data for the room after " .. tostring (cur) .. ".") return end
+  local r = rooms[cur]
+  if not r then r = { wrong = {} } rooms[cur] = r end
+  local function candidates ()
+    local c = {}
+    for _, d in ipairs (DIRS) do
+      if exits_buf[d] == nxt.name and not r.wrong[d] then c[#c + 1] = d end
+    end
+    return c
+  end
+  local c = candidates ()
+  if #c == 0 and next (r.wrong) then
+    -- everything that matched has been marked wrong: the maze must have
+    -- changed under us.  Forget the marks and look again.
+    r.wrong = {}
+    warn ("Every exit toward @x048" .. nxt.name .. "@w had been marked wrong - forgetting that.")
+    c = candidates ()
+  end
+  if #c == 0 then
+    abort ("No exit here leads to @x048" .. nxt.name .. "@w.")
+    return
+  end
+  if #c > 1 then dnote ("two exits match, trying " .. c[1] .. " first") end
+  send_move (c[1])
+end
+
+function PSX_ExitsDone (g)
+  if g ~= ex_gen then return end
+  exits_wait = false
+  EnableTriggerGroup ("psx_exit", false)
+  if not walking then return end
+  if exits_dark then
+    abort ("You need @x048night vision@w to read the exits in this maze.")
+    return
+  end
+  exits_ready = true
+  if pending or exits_for ~= cur or state == 8 then return end
+  pick_exit ()
+end
+
+function PSX_ExitsTimeout (g)
+  if g ~= ex_gen or not exits_wait then return end
+  exits_wait = false
+  EnableTriggerGroup ("psx_exit", false)
+  if walking then abort ("The exits list never came back.") end
+end
+
+-- ---- deciding the next move -------------------------------
+-- The known way from here: every room on from cur whose exit has been
+-- learned, up to the first room that has not (where the wrong exit was
+-- taken) or the target, whichever comes first.  Never past the target.
+local function known_path ()
+  local dirs, ids, r = {}, {}, cur
+  while r ~= target and #dirs < 60 do
+    local rr = rooms[r]
+    if APPROACH[r] or not (rr and rr.dir and rr.next) then break end
+    dirs[#dirs + 1] = rr.dir
+    ids[#ids + 1] = rr.next
+    r = rr.next
+  end
+  return dirs, ids
+end
+
+-- 2n e s w d  ->  "run 2nesw d"; "enter gate" cannot go in a run, so it
+-- is sent between runs, in order.
+local function run_command (dirs)
+  local parts, i = {}, 1
+  while i <= #dirs do
+    if #dirs[i] ~= 1 then
+      parts[#parts + 1] = dirs[i]
+      i = i + 1
+    else
+      local seg = ""
+      while i <= #dirs and #dirs[i] == 1 do
+        local j = i
+        while j < #dirs and dirs[j + 1] == dirs[i] do j = j + 1 end
+        local n = j - i + 1
+        seg = seg .. (n > 1 and tostring (n) or "") .. dirs[i]
+        i = j + 1
+      end
+      parts[#parts + 1] = "run " .. seg
+    end
+  end
+  return table.concat (parts, ";")
+end
+
+local function send_run (dirs, ids)
+  local cmd = run_command (dirs)
+  pending = { from = cur, dir = cmd, run = true, ids = ids, idx = 1 }
+  exits_ready = false
+  dnote ("run from " .. tostring (cur) .. ": " .. cmd)
+  Execute (cmd)
+  arm_watch ()
+end
+
+local function decide_move ()
+  local ap = APPROACH[cur]
+  if ap then send_move (ap, true) return end
+  local r = rooms[cur]
+  if r and r.dir then
+    local dirs, ids = known_path ()
+    if fast_known and #dirs > 1 then
+      send_run (dirs, ids)
+    else
+      send_move (r.dir)
+    end
+    return
+  end
+  if GATE[cur] then send_move ("enter gate") return end
+  if exits_ready and exits_for == cur then pick_exit () else capture_exits () end
+end
+
+-- ===========================================================
+--  Invis / sneak / hide: look first, cast only what is missing
+--
+--  A gagged affects list says which of the three are up and for how long;
+--  anything with MIN_LEFT seconds or more on it is left alone.  The rest is
+--  cast ONCE and never checked again - wraith form gives these without saff
+--  listing them, and the game's "You are already ..." is answer enough.
+--  Hide lags a second, so after it the walk waits invis_delay from the hide
+--  message ("You are already hiding." goes at once).  If the list cannot be
+--  read at all, everything is cast, as before.
+-- ===========================================================
+local KEYOF = { invis = "invis", sneak = "sneak", hide = "hide" }
+
+-- "You are already ..." replies (wraith form etc. can give these without saff
+-- listing them).  Only used so an already-hiding reply ends the hide wait.
+local ALREADY = { ["invisible"] = "invis", ["moving silently"] = "sneak", ["hiding"] = "hide" }
+
+local function to_secs (t)
+  local a, b, c = t:match ("^(%d+):(%d+):(%d+)$")
+  if a then return tonumber (a) * 3600 + tonumber (b) * 60 + tonumber (c) end
+  a, b = t:match ("^(%d+):(%d+)$")
+  if a then return tonumber (a) * 60 + tonumber (b) end
+  return nil
+end
+
+-- invis_cmds, each tied to the effect it makes (or to nothing); hide last.
+local function parse_cmds ()
+  local plan, hide = {}, nil
+  for piece in invis_cmds:gmatch ("[^;]+") do
+    local c = piece:gsub ("^%s+", ""):gsub ("%s+$", "")
+    if c ~= "" then
+      local low, key = c:lower (), nil
+      if low:find ("invis", 1, true) then key = "invis"
+      elseif low:match ("^sneak") then key = "sneak"
+      elseif low:match ("^hide") then key = "hide" end
+      local p = { cmd = c, key = key }
+      if key == "hide" then hide = p else plan[#plan + 1] = p end
+    end
+  end
+  if hide then plan[#plan + 1] = hide end
+  return plan
+end
+
+-- absent_only: the check after casting.  A skill that is up cannot be cast
+-- again ("You are already moving silently."), so one with a little time left
+-- is not chased - only one that is not there at all is.
+local function missing (plan, list, known_only, absent_only)
+  local miss = {}
+  for _, p in ipairs (plan) do
+    if p.key then
+      local left = list[p.key]
+      if absent_only then
+        if not left then miss[#miss + 1] = p end
+      elseif not (left and left >= MIN_LEFT) then miss[#miss + 1] = p end
+    elseif not known_only then
+      miss[#miss + 1] = p
+    end
+  end
+  return miss
+end
+
+local function names_of (list)
+  local t = {}
+  for _, p in ipairs (list) do t[#t + 1] = p.key or p.cmd end
+  return table.concat (t, ", ")
+end
+
+-- ---- the gagged affects list ------------------------------
+local function aff_done (list)
+  local cb = aff_cb
+  aff_cb, aff_wait, aff_buf = nil, false, nil
+  EnableTriggerGroup ("psx_aff", false)
+  EnableTriggerGroup ("psx_aff_lines", false)
+  if cb then cb (list) end
+end
+
+local function aff_arm_settle ()
+  aff_set = aff_set + 1
+  PSX_After (AFF_SETTLE, "PSX_AffSettle (" .. aff_gen .. "," .. aff_set .. ")")
+end
+
+local function query_affects (cb, timeout)
+  aff_gen = aff_gen + 1
+  aff_set = 0
+  aff_cb, aff_wait, aff_buf = cb, true, nil
+  local om = debug_on and "n" or "y"
+  SetTriggerOption ("PSXAffHeader", "omit_from_output", om)
+  SetTriggerOption ("PSXAffLine",   "omit_from_output", om)
+  SetTriggerOption ("PSXAffFooter", "omit_from_output", om)
+  SetTriggerOption ("PSXAffBlank",  "omit_from_output", om)
+  EnableTriggerGroup ("psx_aff_lines", false)
+  EnableTriggerGroup ("psx_aff", true)
+  PSX_After (timeout, "PSX_AffTimeout (" .. aff_gen .. ")")
+  if aff_cmd == "affects" or aff_cmd == "saff" then SendNoEcho (aff_cmd) else Execute (aff_cmd) end
+end
+
+function psx_aff_header (name, line, w)
+  if not aff_wait then return end
+  aff_buf = {}
+  EnableTriggerGroup ("psx_aff_lines", true)
+  aff_arm_settle ()
+end
+
+function psx_aff_line (name, line, w)
+  if not aff_wait or not aff_buf then return end
+  local key = KEYOF[(w[2] or ""):lower ()]
+  if key then
+    local left = to_secs ((w[3] or ""):match ("([%d:]+)%s*$") or "") or 1e9
+    if not aff_buf[key] or left > aff_buf[key] then aff_buf[key] = left end
+  end
+  aff_arm_settle ()
+end
+
+-- "You are affected by 3 skills and 58 spells." closes the list.
+function psx_aff_footer (name, line, w)
+  if not aff_wait then return end
+  aff_done (aff_buf or {})
+end
+
+function PSX_AffSettle (g, n)
+  if g ~= aff_gen or n ~= aff_set or not aff_wait then return end
+  aff_done (aff_buf or {})
+end
+
+function PSX_AffTimeout (g)
+  if g ~= aff_gen or not aff_wait then return end
+  aff_done (nil)
+end
+
+-- ---- the cast routine -------------------------------------
+buff_cancel = function ()
+  buff = nil
+  buff_gen = buff_gen + 1
+  aff_gen = aff_gen + 1
+  aff_cb, aff_wait, aff_buf = nil, false, nil
+  EnableTriggerGroup ("psx_aff", false)
+  EnableTriggerGroup ("psx_aff_lines", false)
+end
+
+local function buff_finish_check ()
+  if not buff or not buff.verified or not buff.settled then return end
+  buff = nil
+  schedule (0.1)
+end
+
+local function buff_start_hide_timer ()
+  if not buff or not buff.hide_cast or buff.timer then return end
+  buff.timer = true
+  PSX_After (invis_delay, "PSX_HideSettled (" .. buff.gen .. "," .. buff.tn .. ")")
+end
+
+-- Send these; hide always last, and then it is the walk that has to wait.
+local function buff_cast (list)
+  local hide = nil
+  for _, p in ipairs (list) do
+    if p.key == "hide" then hide = p else Execute (p.cmd) end
+  end
+  if hide then
+    buff.hide_cast, buff.settled, buff.timer = true, false, false
+    buff.tn = buff.tn + 1
+    Execute (hide.cmd)
+    PSX_After (HIDE_FALLBACK, "PSX_HideFallback (" .. buff.gen .. "," .. buff.tn .. ")")
+  end
+end
+
+function psx_hide_done (name, line, w)
+  buff_start_hide_timer ()
+end
+
+-- "You are already invisible / moving silently / hiding." - it is up, so
+-- nothing to wait for.  An already-hiding reply has no lag: go at once.
+function psx_already (name, line, w)
+  local key = ALREADY[w[1] or ""]
+  if not key then return end
+  dnote ("game says " .. key .. " is already up")
+  if key == "hide" and buff and buff.hide_cast and not buff.timer then
+    buff.timer, buff.settled = true, true
+    buff_finish_check ()
+  end
+end
+
+function PSX_HideSettled (g, n)
+  if not buff or buff.gen ~= g or buff.tn ~= n then return end
+  buff.settled = true
+  buff_finish_check ()
+end
+
+-- The game never said it hid, and nothing has been able to tell us either.
+function PSX_HideFallback (g, n)
+  if not buff or buff.gen ~= g or buff.tn ~= n or buff.settled or buff.timer then return end
+  if buff.verified then
+    warn ("No hide message after " .. HIDE_FALLBACK .. "s - carrying on anyway.")
+    buff.settled = true
+    buff_finish_check ()
+  end
+end
+
+local function buff_start (why)
+  buff_gen = buff_gen + 1
+  buff = { gen = buff_gen, tries = 0, tn = 0, plan = parse_cmds (), settled = true,
+           verified = false, timer = false, hide_cast = false }
+  local g, plan = buff.gen, buff.plan
+  if not check_buffs then
+    note (why .. ": @x048" .. invis_cmds .. "@w")
+    buff_cast (plan)
+    buff.verified = true
+    buff_finish_check ()
+    return
+  end
+  query_affects (function (list)
+    if not buff or buff.gen ~= g or not walking then return end
+    if not list then
+      warn ("No affects list came back from @x048" .. aff_cmd .. "@w - casting everything. " ..
+            "(@x048psx affcmd <command>@w changes it)")
+      buff_cast (plan)
+      buff.verified = true
+      buff_finish_check ()
+      return
+    end
+    local miss = missing (plan, list)
+    if #miss == 0 then
+      local up = {}
+      for _, p in ipairs (plan) do if p.key then up[#up + 1] = p.key end end
+      note (why .. ": @x048" .. table.concat (up, ", ") .. "@w already up - going.")
+      buff.verified = true
+      buff_finish_check ()
+      return
+    end
+    note (why .. ": casting @x048" .. names_of (miss) .. "@w.")
+    buff_cast (miss)             -- once: no recheck, no recast
+    buff.verified = true
+    buff_finish_check ()         -- goes now, or once hide has settled
+  end, AFF_TIMEOUT)
+end
+
+function PSX_Step (g)
+  if g ~= step_gen or not walking then return end
+  if state == 8 then return end                         -- fight end restarts this
+  if buff then return end                               -- the cast routine restarts this when it is done
+  if not in_area (cur) then abort ("You are not in the Partroxis any more.") return end
+  if cur == target then arrive () return end
+  if POS[cur] > POS[target] then
+    abort ("@x048" .. roomlabel (target) .. "@w is behind you now, and the exits are one way.")
+    return
+  end
+  if pending then schedule (0.5) return end             -- the watchdog deals with a stuck move
+  if need_invis then
+    need_invis = false
+    buff_start (invis_why)
+    return
+  end
+  decide_move ()
+end
+
+-- ---- learning from where a move landed us -----------------
+local function learn (p, num)
+  local exp = next_id (p.from)
+  local r = rooms[p.from]
+  if not r then r = { wrong = {} } rooms[p.from] = r end
+  if num == exp then
+    r.dir, r.next = p.dir, num
+    dnote ("room " .. p.from .. ": " .. p.dir .. " is right")
+    return
+  end
+  if r.dir == p.dir then
+    -- a way that worked before has failed: the maze was reshuffled
+    rooms = {}
+    warn ("The map I had no longer matches - forgetting it.")
+  else
+    r.wrong[p.dir] = true
+  end
+  note ("Wrong way (@x048" .. p.dir .. "@w) out of @x048" .. roomlabel (p.from) ..
+        "@w - doubling back.")
+end
+
+-- ===========================================================
+--  GMCP (direct, option 201)
+-- ===========================================================
+local gWin = nil    -- forward: the list window (defined below)
+function PSX_WinAreaCheck () end
+
+local function on_room (num)
+  local prev = cur
+  cur = num
+  if num == 5862 and prev ~= 5862 then rooms = {} end   -- a fresh trip in
+  PSX_WinAreaCheck (num)
+  if num == 5763 and prev ~= 5763 and auto_list and not walking then
+    PSX_After (0.5, "PSX_Menu ()")
+  end
+  if not walking then return end
+  if not in_area (num) then abort ("You have left the Partroxis.") return end
+  if pending then
+    local p = pending
+    if num == p.from then return end                    -- no move yet (a look, say)
+    if p.run then
+      if num == p.ids[p.idx] then
+        p.idx = p.idx + 1
+        if p.idx <= #p.ids then
+          p.from = num                                  -- still on the way
+          arm_watch ()
+          return
+        end
+        pending = nil                                   -- the run is finished
+      else
+        pending, rooms = nil, {}
+        warn ("The run did not land where the map said - forgetting the map.")
+      end
+    else
+      pending = nil
+      if not p.approach then learn (p, num) end
+    end
+  end
+  -- A room whose way on is already known (doubling back to where a wrong
+  -- exit was taken) needs no pause: the next move is certain and one step
+  -- is still sent per arrival, with the target checked first, so it still
+  -- cannot run past the room you picked.  Rooms it has to work out keep
+  -- the full pause.
+  local r = rooms[num]
+  if fast_known and r and r.dir and num ~= target and state ~= 8 and not APPROACH[num] then
+    step_gen = step_gen + 1
+    PSX_Step (step_gen)
+    return
+  end
+  schedule (PAUSE)
+end
+
+-- A fight stops the walk outright.  Nothing carries on by itself: once
+-- the fight is over the player types psxgo, and that walk casts first.
+local function on_status (s)
+  local prev = state
+  state = s
+  if s == 8 and prev ~= 8 and walking then
+    stop_walk ()                                         -- drops the queued step, the move, any cast in flight
+    fight_stop = true
+    note ("Under attack - walk stopped. Type @x048psxgo@w once the fight is over.")
+  elseif prev == 8 and s ~= 8 and fight_stop then
+    note ("Fight over - type @x048psxgo@w to carry on to @x048" .. roomlabel (target) .. "@w.")
+  end
+end
+
+function OnPluginTelnetSubnegotiation (t, data)
+  if t ~= 201 or type (data) ~= "string" then return end
+  local pkg, body = data:match ("^([%w%._]+)%s+(.*)$")
+  if pkg == "room.info" then
+    local num = tonumber (body:match ('"num"%s*:%s*(-?%d+)'))
+    if num then on_room (num) end
+  elseif pkg == "char.status" then
+    local s = tonumber (body:match ('"state"%s*:%s*(%d+)'))
+    if s then on_status (s) end
+  end
+end
+
+-- ===========================================================
+--  Starting a walk
+-- ===========================================================
+function PSX_Go (id, nocast)
+  id = tonumber (id)
+  local r = id and ROOMS[id]
+  if not r then warn ("That is not a room in the list.") return end
+  if not cur then
+    warn ("I do not know where you are yet - type @x048look@w and try again.")
+    return
+  end
+  if not in_area (cur) then
+    warn ("You are not at the Partroxis. Get to the Otherworld door first.")
+    return
+  end
+  if cur == id then
+    note ("You are already in @x048" .. r.name .. "@w with @x045" .. r.mob .. "@w.")
+    return
+  end
+  if POS[cur] > POS[id] then
+    warn ("@x048" .. r.name .. "@w (" .. r.mob .. ") is behind you - the exits are one way.")
+    return
+  end
+  if state == 8 then
+    stop_walk ()
+    target, fight_stop = id, true
+    warn ("You are in a fight - type @x048psxgo@w once it is over and I will walk you to @x048" ..
+          r.name .. "@w.")
+    return
+  end
+  stop_walk ()
+  target, walking = id, true
+  need_invis, invis_why = false, ""
+  if fight_stop then
+    need_invis, invis_why = true, "Fight over"
+  elseif precast and not nocast then
+    need_invis, invis_why = true, "Before the walk"
+  end
+  fight_stop = false
+  note ("Walking to @x048" .. r.name .. "@w - @x045" .. r.mob .. "@w.")
+  schedule (need_invis and 0.1 or PAUSE)   -- the first step is just the affects check: no pause needed
+end
+
+-- psxgo (and psx resume): carry on to the room picked last.
+function psx_go_command ()
+  if not target then warn ("There is nothing to carry on with - type @x048psx@w and pick a room.") return end
+  if walking then note ("Already walking to @x048" .. roomlabel (target) .. "@w.") return end
+  if state == 8 then warn ("Still fighting - type @x048psxgo@w once the fight is over.") return end
+  PSX_Go (target, true)
+end
+
+function psx_area_reset ()
+  rooms = {}
+  exits_ready = false
+  if walking then
+    -- Drop whatever was in flight (it was aimed at the old maze) and carry
+    -- on toward the same room from wherever we are now.  A room.info that
+    -- arrives after this restarts the step from the new room.  If the
+    -- reset left the target behind us, or put us outside the Partroxis,
+    -- the next step says so and stops.
+    wd_gen = wd_gen + 1
+    ex_gen = ex_gen + 1
+    exits_wait = false
+    pending = nil
+    EnableTriggerGroup ("psx_exit", false)
+    note ("The Partroxis reset - map forgotten, carrying on from here.")
+    schedule (1.0)
+  else
+    note ("The Partroxis reset - map forgotten.")
+  end
+end
+
+-- ===========================================================
+--  The list window (psx)
+--  Built the way MazeMobber builds its pop-up: a TextRect link whose text is
+--  not a URL runs as Lua; a click hides the window at once and destroys it
+--  on a timer, after the callback; a window the library no longer knows
+--  about is a zombie and never reused; Repaint after showing.
+-- ===========================================================
+local WIN_ID    = "Partroxis_list"
+local win_max_h  = tonumber (GetVariable ("winheight") or "") or 560   -- pixels; a longer list scrolls
+local win_gen   = 0
+local win_closing = false   -- hidden by a click, not destroyed yet: a room change must not put it back
+
+local function win_line (segs)
+  local styles, links, pos = {}, {}, 1
+  for _, sg in ipairs (segs) do
+    if sg.text ~= "" then
+      styles[#styles + 1] = { text = sg.text, textcolour = ColourNameToRGB (sg.colour or CLR_MSG) }
+      if sg.code then
+        links[#links + 1] = { start = pos, stop = pos + #sg.text - 1,
+                              text = sg.code, label = sg.tip }
+      end
+      pos = pos + #sg.text
+    end
+  end
+  return styles, links
+end
+
+function PSX_WinDestroy (tok)
+  if tok and tok ~= win_gen then return end
+  win_closing = false
+  local w = gWin
+  gWin = nil
+  if w then pcall (function () w:delete (true) end) end
+  pcall (WindowDelete, WIN_ID)
+  pcall (Repaint)
+end
+
+local function win_close ()
+  win_closing = true
+  win_gen = win_gen + 1
+  pcall (WindowShow, WIN_ID, false)
+  pcall (Repaint)
+  PSX_After (0.2, "PSX_WinDestroy (" .. win_gen .. ")")
+end
+
+function PSX_WinPick (id)
+  if debug_on then dnote ("window click -> " .. tostring (id)) end
+  win_close ()
+  PSX_Go (id)
+end
+
+-- The rows, once, for both the window and the chat list.
+local function list_rows ()
+  local rows = {}
+  for i, r in ipairs (ROWS) do
+    local id = r[1]
+    rows[#rows + 1] = {
+      n = i, id = id, label = r[2], mob = r[3],
+      here   = (cur == id),
+      behind = (cur ~= nil and POS[cur] ~= nil and POS[cur] > POS[id]),
+    }
+  end
+  return rows
+end
+
+-- Line (1 is the heading) of the first room that is not behind you.  The
+-- window follows its newest line like a console, so left alone it opens
+-- scrolled to the BOTTOM and the rooms you are about to click - the first
+-- ones - sit above the visible area, with the cut-off landing wherever the
+-- window height and your font happen to put it.
+local function first_ahead_line ()
+  local p = cur and POS[cur]
+  if not p or p <= 1 then return 1 end
+  return p + 1
+end
+
+-- keep_scroll: a redraw of a list that is already up (you moved) must not
+-- throw away where you had scrolled it to.
+local function win_open (keep_scroll)
+  if type (ThemedTextWindow) ~= "function" then return false end
+  win_closing = false
+  win_gen = win_gen + 1
+  if gWin and not (ThemedWindowClass and ThemedWindowClass.window_map
+                   and ThemedWindowClass.window_map[WIN_ID]) then
+    gWin = nil
+    pcall (WindowDelete, WIN_ID)
+  end
+  if not gWin then
+    local ok, w = pcall (ThemedTextWindow,
+      WIN_ID,
+      386, 0,            -- default left, top
+      560, 300,          -- default width, height (fit_contents resizes it)
+      "Partroxis",     -- title
+      "center",
+      true,              -- title-bar close button
+      false,             -- resizeable
+      true,              -- text scrolls (mouse wheel and a scrollbar)
+      false, false, false,
+      true,              -- autowrap
+      win_font, win_font_size,
+      win_font, win_font_size,
+      300,               -- max lines
+      nil,
+      true,              -- defer showing until drawn
+      false, nil,
+      "Close")
+    if not ok or not w then return false end
+    gWin = w
+    if gWin.textrect and gWin.textrect.font_bold then
+      gWin.textrect.font = gWin.textrect.font_bold
+    end
+    local prior = gWin.do_on_delete
+    gWin.do_on_delete = function (self)
+      if prior then prior (self) end
+      gWin = nil
+    end
+    -- right-click "Bring To Front" would only reach the top z-order slot,
+    -- still under the layout's drag bar (1.5, see the end of win_open)
+    gWin.bring_to_front = function (self) pcall (WindowSetZOrder, WIN_ID, 99999) end
+  end
+
+  local keep = nil
+  if keep_scroll and gWin.textrect then keep = tonumber (gWin.textrect.display_start_line) end
+  gWin:clear (false)
+  local st, lk = win_line { { text = "Partroxis - click a room to walk there:", colour = CLR_NAME } }
+  gWin:add_text (st, false, lk)
+  for _, r in ipairs (list_rows ()) do
+    local code = string.format ("PSX_WinPick(%d)", r.id)
+    local tip  = r.behind and "Behind you - the exits are one way" or ("Walk to " .. r.label)
+    local namec = r.behind and CLR_TAG or CLR_MSG
+    local mobc  = r.behind and CLR_TAG or CLR_NAME
+    local segs = {
+      { text = "   " },
+      { text = string.format ("%2d", r.n), colour = CLR_HI, code = code, tip = tip },
+      { text = "  " },
+      { text = r.label, colour = namec, code = code, tip = tip },
+      { text = string.rep (" ", math.max (1, 30 - #r.label)) },
+      { text = r.mob, colour = mobc, code = code, tip = tip },
+    }
+    if r.here then segs[#segs + 1] = { text = "   <- you are here", colour = CLR_HI } end
+    st, lk = win_line (segs)
+    gWin:add_text (st, false, lk)
+  end
+  pcall (function () gWin:fit_contents (1000, win_max_h) end)
+  pcall (function () gWin:set_scroll (keep or first_ahead_line ()) end)
+  gWin:draw ()
+  gWin:show ()
+  -- ABOVE EVERY OTHER MINIWINDOW (1.5).  The package layout plugin
+  -- (aard_layout.xml, add_title_dragger) lays an INVISIBLE 15px drag bar
+  -- along the top edge of the main text area - transparent, so nothing
+  -- shows, but it takes the mouse - at z-order 154 on a typical screen.  This
+  -- window got slot 19 from the z-order monitor, so whichever row lay
+  -- across that bar could not be clicked.  Found in MazeMobber (7.8) with
+  -- its mm wincheck; raising the window fixed the row there.  99999 is what
+  -- the package mapper uses for its config window.  win_open runs on every
+  -- room move while the list is up, which re-applies this after the z-order
+  -- monitor re-stacks everything (it does whenever ANY window is boosted).
+  pcall (WindowSetZOrder, WIN_ID, 99999)
+  pcall (Repaint)
+  return true
+end
+
+-- Walked out of the area: put the list away.  Redraw it as you move.
+function PSX_WinAreaCheck (num)
+  if not gWin or win_closing then return end
+  if not in_area (num) then win_close () return end
+  win_open (true)
+end
+
+local function menu_chat ()
+  note_now ("Partroxis - click a room to walk there:")
+  for _, r in ipairs (list_rows ()) do
+    local cmd = "psx " .. r.n
+    ColourTell (CLR_TAG, "", "   ")
+    Hyperlink (cmd, string.format ("%2d", r.n), "Walk to " .. r.label, CLR_HI, "black", 0, 1)
+    ColourTell (CLR_TAG, "", "  ")
+    Hyperlink (cmd, r.label, "Walk to " .. r.label,
+               r.behind and CLR_TAG or CLR_MSG, "black", 0, 1)
+    ColourTell (CLR_TAG, "", string.rep (" ", math.max (1, 30 - #r.label)))
+    ColourNote (r.behind and CLR_TAG or CLR_NAME, "", r.mob ..
+                (r.here and "   <- you are here" or ""))
+  end
+end
+
+function PSX_Menu ()
+  if not win_open () then menu_chat () end
+end
+
+local function win_refont ()
+  if not gWin then return end
+  win_gen = win_gen + 1
+  PSX_WinDestroy ()
+  win_open ()
+end
+
+-- ===========================================================
+--  Commands
+-- ===========================================================
+local function show_help ()
+  local lines = {
+    "@x048psx@w              the room list - click a room and it walks you there",
+    "@x048psx <n>@w          walk to row n of the list",
+    "@x048psx stop@w         stop walking",
+    "@x048psxgo@w            carry on after a stop, or after a fight (it never carries on by itself)",
+    "",
+    "It walks one exit at a time and pauses @x0480.3s@w in every room it has to work out,",
+    "so it stops in the room you picked - the exits are one way, no second chance.",
+    "Doubling back to a wrong exit goes as one @x048run@w command - no pauses.",
+    "Before it starts it reads your affects and casts only the invis / sneak / hide that are missing.",
+    "A wrong exit is remembered and doubled back from. If you are attacked the walk stops;",
+    "once the fight is over type @x048psxgo@w and it checks the three again and carries on.",
+    "",
+    "@x048psx auto@w         the list pops up when you reach the maze door (toggle)",
+    "@x048psx fast@w         walk a known stretch (doubling back) as one run, no pauses (toggle)",
+    "@x048psx precast@w      cast the invis commands before every new walk (toggle; now " .. (precast and "on" or "off") .. ")",
+    "@x048psx check@w        read your affects first and cast only what is missing (toggle; now " .. (check_buffs and "on" or "off") .. ")",
+    "@x048psx affcmd <cmd>@w  the command that lists your affects (now: @x048" .. aff_cmd .. "@w)",
+    "@x048psx invisdelay <s>@w  wait after the hide message, before moving (now: @x048" .. invis_delay .. "s@w)",
+    "@x048psx invis <cmds>@w  what to send after a fight (now: @x048" .. invis_cmds .. "@w)",
+    "@x048psx reset@w        forget the learned directions",
+    "@x048psx font@w         pick the list window's font (or @x048psx font <name>@w)",
+    "@x048psx fontsize <n>@w  the list window's font size",
+    "@x048psx winheight <px>@w  how tall the list window may get (now @x048" .. win_max_h .. "@w) - taller shows more rooms without scrolling",
+    "@x048psx debug@w        show what it is doing",
+    "@x048psx reload@w       load this plugin again after an update",
+    "",
+    "The right exit is found by matching the exit names to the next room's name.",
+    "When two exits match, it tries one and learns from where it lands.",
+  }
+  note_now ("Partroxis @x048v" .. VERSION .. "@w")
+  for _, l in ipairs (lines) do cnote ("   @w" .. l) end
+end
+
+function psx_command (name, line, w)
+  local arg = (w[1] or ""):gsub ("^%s+", ""):gsub ("%s+$", "")
+  local low = arg:lower ()
+
+  if low == "" or low == "list" or low == "win" or low == "window" then
+    PSX_Menu ()
+    return
+  end
+
+  if low == "help" then show_help () return end
+
+  if low == "version" then note ("Partroxis @x048v" .. VERSION .. "@w.") return end
+
+  if low == "stop" then
+    if walking then stop_walk () note ("Stopped.") else note ("Not walking.") end
+    return
+  end
+
+  if low == "resume" or low == "r" or low == "go" then
+    psx_go_command ()
+    return
+  end
+
+  if low == "reset" then
+    rooms = {}
+    note ("Learned directions forgotten.")
+    return
+  end
+
+  if low == "auto" then
+    auto_list = not auto_list
+    SetVariable ("auto", auto_list and "y" or "n")
+    note ("List on arrival: @x048" .. (auto_list and "on" or "off") .. "@w.")
+    return
+  end
+
+  if low == "check" then
+    check_buffs = not check_buffs
+    SetVariable ("check", check_buffs and "y" or "n")
+    note ("Read your affects first and cast only what is missing: @x048" .. (check_buffs and "on" or "off") .. "@w.")
+    return
+  end
+
+  local ac = arg:match ("^[Aa][Ff][Ff][Cc][Mm][Dd]%s*(.*)$")
+  if ac then
+    if ac == "" then
+      note ("The command that lists your affects is @x048" .. aff_cmd .. "@w  (change it: @x048psx affcmd <command>@w).")
+    else
+      aff_cmd = ac
+      SetVariable ("affcmd", aff_cmd)
+      note ("Affects are read with @x048" .. aff_cmd .. "@w.")
+    end
+    return
+  end
+
+  if low == "precast" then
+    precast = not precast
+    SetVariable ("precast", precast and "y" or "n")
+    note ("Cast invis / hide / sneak before every walk: @x048" .. (precast and "on" or "off") .. "@w.")
+    return
+  end
+
+  if low == "fast" then
+    fast_known = not fast_known
+    SetVariable ("fast", fast_known and "y" or "n")
+    note ("Known stretches go as one run: @x048" .. (fast_known and "on" or "off") .. "@w.")
+    return
+  end
+
+  if low == "debug" then
+    debug_on = not debug_on
+    note ("Debug @x048" .. (debug_on and "on" or "off") .. "@w.")
+    return
+  end
+
+  if low == "reload" then
+    stop_walk ()
+    note ("Reloading Partroxis from disk (this was @x048v" .. VERSION .. "@w)...")
+    Execute (GetAlphaOption ("script_prefix") ..
+             'DoAfterSpecial(1, "ReloadPlugin(\'' .. GetPluginID () .. '\')", sendto.script)')
+    return
+  end
+
+  local idl = arg:match ("^[Ii][Nn][Vv][Ii][Ss][Dd][Ee][Ll][Aa][Yy]%s*(.*)$")
+  if idl then
+    local n = tonumber (idl)
+    if not n or n < 0.3 or n > 6 then
+      warn ("Give seconds from 0.3 to 6 - @x048psx invisdelay 1.5@w (the wait after hide). It is " .. invis_delay .. " now.")
+      return
+    end
+    invis_delay = n
+    SetVariable ("invisdelay", tostring (n))
+    note ("Wait after hide: @x048" .. n .. "s@w.")
+    return
+  end
+
+  local ic = arg:match ("^[Ii][Nn][Vv][Ii][Ss]%s+(.+)$")
+  if ic then
+    invis_cmds = ic
+    SetVariable ("invis", invis_cmds)
+    note ("After a fight I will send: @x048" .. invis_cmds .. "@w")
+    return
+  end
+  if low == "invis" then
+    note ("After a fight I send: @x048" .. invis_cmds .. "@w   (change it: @x048psx invis <cmds>@w)")
+    return
+  end
+
+  local wh = arg:match ("^[Ww][Ii][Nn][Hh][Ee][Ii][Gg][Hh][Tt]%s*(.*)$")
+  if wh then
+    local n = tonumber (wh)
+    if not n or n < 200 or n > 1600 then
+      warn ("Give a height in pixels from 200 to 1600 - @x048psx winheight 800@w. It is " .. win_max_h ..
+            " now. The whole list needs about @x048" .. (#ROWS + 1) * 20 .. "@w at the default font.")
+      return
+    end
+    win_max_h = math.floor (n)
+    SetVariable ("winheight", tostring (win_max_h))
+    note ("List window height: @x048" .. win_max_h .. "@w pixels.")
+    win_refont ()
+    return
+  end
+
+  local fs = arg:match ("^[Ff][Oo][Nn][Tt][Ss][Ii][Zz][Ee]%s*(.*)$")
+  if fs then
+    local n = tonumber (fs)
+    if not n or n < 6 or n > 40 then
+      warn ("Give a size from 6 to 40 - @x048psx fontsize 12@w. It is " .. win_font_size .. " now.")
+      return
+    end
+    win_font_size = math.floor (n)
+    SetVariable ("winfontsize", tostring (win_font_size))
+    note ("List window font: @x048" .. win_font .. " " .. win_font_size .. "@w.")
+    win_refont ()
+    return
+  end
+
+  local fn = arg:match ("^[Ff][Oo][Nn][Tt]%s*(.*)$")
+  if fn then
+    if fn == "" then
+      local ok, f = pcall (utils.fontpicker, win_font, win_font_size, 0)
+      if not ok or not f then return end
+      win_font = f.name or win_font
+      win_font_size = tonumber (f.size) or win_font_size
+      SetVariable ("winfontsize", tostring (win_font_size))
+    else
+      win_font = fn
+    end
+    SetVariable ("winfont", win_font)
+    note ("List window font: @x048" .. win_font .. " " .. win_font_size .. "@w.")
+    win_refont ()
+    return
+  end
+
+  local n = tonumber (arg:match ("^go%s+(%d+)$") or arg)
+  if n and ROWS[n] then PSX_Go (ROWS[n][1]) return end
+
+  warn ("I do not know @x048" .. arg .. "@w. Type @x048psx help@w.")
+end
+
+-- ===========================================================
+--  Install / teardown
+-- ===========================================================
+function OnPluginInstall ()
+  pcall (WindowDelete, WIN_ID)   -- one left over from last session
+  -- where we are, if the GMCP handler already has data (asking it before any
+  -- GMCP has arrived makes it print "No gmcpdata variable set")
+  local gd = GetPluginVariable (GMCP_ID, "gmcpdata")
+  if gd and gd ~= "" then
+    local ok, _, val = pcall (CallPlugin, GMCP_ID, "gmcpval", "room.info")
+    if ok and type (val) == "string" then
+      local n = tonumber (val:match ("num%W+(-?%d+)"))
+      if n then cur = n end
+    end
+    ok, _, val = pcall (CallPlugin, GMCP_ID, "gmcpval", "char.status")
+    if ok and type (val) == "string" then
+      local s = tonumber (val:match ("state%W+(%d+)"))
+      if s then state = s end
+    end
+  end
+  note ("@x048v" .. VERSION .. "@w loaded - Type @x048psx@w in the Partroxis. See @x048psx help@w.")
+end
+
+function OnPluginClose ()
+  pcall (WindowDelete, WIN_ID)
+end
+
+function OnPluginDisable ()
+  stop_walk ()
+end
+
+function OnPluginSaveState ()
+  SetVariable ("invis", invis_cmds)
+  SetVariable ("auto", auto_list and "y" or "n")
+  SetVariable ("fast", fast_known and "y" or "n")
+  SetVariable ("invisdelay", tostring (invis_delay))
+  SetVariable ("precast", precast and "y" or "n")
+  SetVariable ("check", check_buffs and "y" or "n")
+  SetVariable ("affcmd", aff_cmd)
+  SetVariable ("winfont", win_font)
+  SetVariable ("winfontsize", tostring (win_font_size))
+  SetVariable ("winheight", tostring (win_max_h))
+end
+
+function OnHelp ()
+  world.Note (world.GetPluginInfo (world.GetPluginID (), 3))
+end
+
+]]>
+</script>
+
+</muclient>
