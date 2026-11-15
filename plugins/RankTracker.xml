@@ -75,7 +75,7 @@
    save_state="y"
    date_written="2026-10-17"
    requires="4.00"
-   version="2.0"
+   version="2.2"
    >
 </plugin>
 
@@ -165,7 +165,12 @@
     RankTracker_Meta("<chan>|<name>") (v2.0) is the CallPlugin entry MadBot
     uses for "madbot meta"; <chan> can be "tell Bob". It returns "busy" when
     a scan is running. A channel metarank is now sent even when every stat
-    is N/A, so the person who asked always gets an answer.
+    is N/A, so the person who asked always gets an answer. v2.1 puts each
+    stat's place on the top 500 list before its value, as an ordinal (3rd,
+    44th; ordinal()), @x099 like every rank. v2.2: "meta" works anywhere
+    "metarank" does ("ultimate meta gt"); the name-first lookahead list also
+    skips common commands (help, look, where, whois...) so "help meta" is
+    not read as a player called Help.
 -->
 
 <!--  Aliases  -->
@@ -222,7 +227,7 @@
 
   <!-- best all-time daily result per stat; numeric forms ("metarank 2") fall through to the game -->
   <alias
-   match="^metarank(?:\s+([A-Za-z]\w*|-)(?:\s+(\S+))?)?\s*$"
+   match="^meta(?:rank)?(?:\s+([A-Za-z]\w*|-)(?:\s+(\S+))?)?\s*$"
    enabled="y"
    regexp="y"
    script="alias_meta"
@@ -233,7 +238,7 @@
   <!-- name-first form: "ultimate metarank" / "ultimate metarank gt". The lookahead
        keeps channel lines like "gt metarank" or "say metarank" going to the game. -->
   <alias
-   match="^(?!(?:say|tell|reply|gt|gtell|ft|spo|clan|cl|ct|gclan|gossip|ooc|yell|shout|emote|pose|whisper|sayto|osay|newbie|question|answer|auction|market|music|quote|barter|tech|page|chat|ask|grats|gratz)\s)([A-Za-z]\w*)\s+metarank(?:\s+([A-Za-z]\w*))?\s*$"
+   match="^(?!(?:say|tell|reply|gt|gtell|ft|spo|clan|cl|ct|gclan|gossip|ooc|yell|shout|emote|pose|whisper|sayto|osay|newbie|question|answer|auction|market|music|quote|barter|tech|page|chat|ask|grats|gratz|help|look|l|where|whois|finger|note|read|examine|exa|lore|id|identify|hunt|scan|c|cast|get|give|put|bid|buy|sell|list|search|history|alias)\s)([A-Za-z]\w*)\s+meta(?:rank)?(?:\s+([A-Za-z]\w*))?\s*$"
    enabled="y"
    regexp="y"
    script="alias_meta_name"
@@ -425,7 +430,7 @@ local PORDER = {
   { key = "yearly",  cmd = "yrank", label = "Yearly"  },
 }
 
-local VERSION  = "2.0"   -- keep in step with version= in the plugin tag above
+local VERSION  = "2.2"   -- keep in step with version= in the plugin tag above
 local TOP_N = 100
 local CATS  = { 1, 2, 3, 4, 5, 6, 16, 18 }   -- categories to scan
 local QUIET = 1.0                            -- seconds of silence = scan finished
@@ -679,6 +684,16 @@ function on_meta_row(name, line, w)
   touch()
 end
 
+-- 1 -> "1st", 3 -> "3rd", 12 -> "12th", 22 -> "22nd"
+local function ordinal(n)
+  local suf = "th"
+  local t = n % 100
+  if t < 11 or t > 13 then
+    suf = ({ [1] = "st", [2] = "nd", [3] = "rd" })[n % 10] or "th"
+  end
+  return n .. suf
+end
+
 local function report_meta(s)
   if #s.done == 0 then
     cnote("@x045[@x099RankTracker@x045]@W No metarank lists came back.")
@@ -695,7 +710,8 @@ local function report_meta(s)
     for _, k in ipairs(META_ORDER) do
       local c, st = byk[k], STATS[k]
       if c and c.best then
-        parts[#parts + 1] = string.format("@x045%s @x048%s @w%s", st.short, c.best.value, c.best.date)
+        parts[#parts + 1] = string.format("@x045%s @x099%s @x048%s @w%s",
+                                          st.short, ordinal(c.best.place), c.best.value, c.best.date)
       else
         parts[#parts + 1] = "@x045" .. st.short .. " @wN/A"
       end
@@ -708,8 +724,8 @@ local function report_meta(s)
   for _, k in ipairs(META_ORDER) do
     local c, st = byk[k], STATS[k]
     if c and c.best then
-      cnote(string.format("  @x045%-13s @x048%9s  @W%s  @D(#%d all time)",
-                          st.label, c.best.value, c.best.date, c.best.place))
+      cnote(string.format("  @x045%-13s @x048%9s  @W%s  @x099%s @Dall time",
+                          st.label, c.best.value, c.best.date, ordinal(c.best.place)))
     elseif c then
       cnote(string.format("  @x045%-13s @w%9s  @D(not in the top %d)", st.label, "N/A", c.limit or 500))
     else
@@ -1126,7 +1142,7 @@ function alias_help(name, line, w)
   cnote("  @x048metarank - Ultimate@w             someone else, echoed only to you")
   cnote("  @x048Ultimate metarank@w               same, name first")
   cnote("  @x048Ultimate metarank gt@w            Ultimate's best days, one line to gt")
-  cnote("  @D(metarank 2 etc. still goes to the game's own list)@w")
+  cnote("  @D(meta works the same: @x048Ultimate meta gt@D. metarank 2 etc. still goes to the game)@w")
   cnote("")
   cnote("@x048Full scan@w, every category you place in:")
   cnote("  @x048yrank@x099 / @x048mrank@x099 / @x048wrank@x099 / @x048drank@w   yearly, monthly, weekly, daily")
