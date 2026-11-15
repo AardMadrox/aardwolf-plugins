@@ -52,6 +52,8 @@
            "metarank 2" (a number) still goes straight to the game.
   <name> metarank [channel]
         -> another player's best days, name first: "Ultimate metarank gt".
+  metayear / metaweek   (same forms: "metayear spo", "Ultimate metaweek gt")
+        -> best single YEAR / WEEK per stat, from "metarank <n> -y" / "-w".
 
   Other aliases:
     rankname <name>   - override the default name; "rankname" alone goes back
@@ -75,7 +77,7 @@
    save_state="y"
    date_written="2026-10-17"
    requires="4.00"
-   version="2.2"
+   version="2.3"
    >
 </plugin>
 
@@ -99,6 +101,7 @@
                                      death level); no period = all four
     metarank [chan [name]]         best day per stat from metarank
     <name> metarank [chan]         same, name first (v1.8)
+    metayear / metaweek ...        best year / week, same forms (v2.3)
     rankname [name]                default name override, blank resets
     rankdebug                        which column was read as each total
     rankhelp / ranktrackerhelp       the help screen
@@ -171,6 +174,13 @@
     "metarank" does ("ultimate meta gt"); the name-first lookahead list also
     skips common commands (help, look, where, whois...) so "help meta" is
     not read as a player called Help.
+    v2.3: metayear / metaweek (and "<name> metayear [chan]") send
+    "metarank <n> -y" / "-w" instead (META_KINDS); the report says daily /
+    yearly / weekly. RankTracker_Meta takes an optional third field,
+    "<chan>|<name>|year" or "|week" (MadBot "madbot metayear"). Seen live:
+    weekly rows end in a date like daily ("Dec 07 2025"), but YEARLY rows
+    end in just the year ("2024"), so the row trigger's last column
+    (Period End) accepts any text, not only "Mon dd yyyy".
 -->
 
 <!--  Aliases  -->
@@ -225,9 +235,10 @@
    ignore_case="y"
   ></alias>
 
-  <!-- best all-time daily result per stat; numeric forms ("metarank 2") fall through to the game -->
+  <!-- best all-time daily (meta / metarank), yearly (metayear) or weekly (metaweek) result
+       per stat; numeric forms ("metarank 2") fall through to the game -->
   <alias
-   match="^meta(?:rank)?(?:\s+([A-Za-z]\w*|-)(?:\s+(\S+))?)?\s*$"
+   match="^meta(rank|year|week)?(?:\s+([A-Za-z]\w*|-)(?:\s+(\S+))?)?\s*$"
    enabled="y"
    regexp="y"
    script="alias_meta"
@@ -238,7 +249,7 @@
   <!-- name-first form: "ultimate metarank" / "ultimate metarank gt". The lookahead
        keeps channel lines like "gt metarank" or "say metarank" going to the game. -->
   <alias
-   match="^(?!(?:say|tell|reply|gt|gtell|ft|spo|clan|cl|ct|gclan|gossip|ooc|yell|shout|emote|pose|whisper|sayto|osay|newbie|question|answer|auction|market|music|quote|barter|tech|page|chat|ask|grats|gratz|help|look|l|where|whois|finger|note|read|examine|exa|lore|id|identify|hunt|scan|c|cast|get|give|put|bid|buy|sell|list|search|history|alias)\s)([A-Za-z]\w*)\s+meta(?:rank)?(?:\s+([A-Za-z]\w*))?\s*$"
+   match="^(?!(?:say|tell|reply|gt|gtell|ft|spo|clan|cl|ct|gclan|gossip|ooc|yell|shout|emote|pose|whisper|sayto|osay|newbie|question|answer|auction|market|music|quote|barter|tech|page|chat|ask|grats|gratz|help|look|l|where|whois|finger|note|read|examine|exa|lore|id|identify|hunt|scan|c|cast|get|give|put|bid|buy|sell|list|search|history|alias)\s)([A-Za-z]\w*)\s+meta(rank|year|week)?(?:\s+([A-Za-z]\w*))?\s*$"
    enabled="y"
    regexp="y"
    script="alias_meta_name"
@@ -358,7 +369,7 @@
   <trigger
    enabled="n"
    group="meta"
-   match="^\s*(\d+)\s+(.+?)\s+(\d+)\s+([\d,]+)\s+([A-Za-z]{3}\s+\d{1,2}\s+\d{4})\s*$"
+   match="^\s*(\d+)\s+(.+?)\s+(\d+)\s+([\d,]+)\s+(\S.*?)\s*$"
    regexp="y"
    omit_from_output="y"
    script="on_meta_row"
@@ -413,6 +424,19 @@ local META_ORDER = { "level", "qp", "cp", "gq", "quest", "kill", "death", "pup" 
 -- first, because "Quest Points Earned" and "Gquests" both contain "quest"
 local META_MATCH = { "pup", "cp", "gq", "qp", "kill", "death", "level", "quest" }
 local META_QUIET = 2.0   -- metarank replies are 500 lines each; allow a longer gap
+-- meta / metarank = best day, metayear = best year (-y), metaweek = best week (-w)
+local META_KINDS = {
+  day  = { flag = "",    word = "daily"  },
+  year = { flag = " -y", word = "yearly" },
+  week = { flag = " -w", word = "weekly" },
+}
+-- "" / "rank" / "day" -> day, "year" / "y" -> year, "week" / "w" -> week
+local function meta_kind(word)
+  local w = (word or ""):lower()
+  if w == "year" or w == "y" or w == "yearly" then return "year" end
+  if w == "week" or w == "w" or w == "weekly" then return "week" end
+  return "day"
+end
 
 -- period words accepted by the stat commands -> the rt key
 local PERIOD_WORDS = {
@@ -430,7 +454,7 @@ local PORDER = {
   { key = "yearly",  cmd = "yrank", label = "Yearly"  },
 }
 
-local VERSION  = "2.2"   -- keep in step with version= in the plugin tag above
+local VERSION  = "2.3"   -- keep in step with version= in the plugin tag above
 local TOP_N = 100
 local CATS  = { 1, 2, 3, 4, 5, 6, 16, 18 }   -- categories to scan
 local QUIET = 1.0                            -- seconds of silence = scan finished
@@ -696,7 +720,7 @@ end
 
 local function report_meta(s)
   if #s.done == 0 then
-    cnote("@x045[@x099RankTracker@x045]@W No metarank lists came back.")
+    cnote("@x045[@x099RankTracker@x045]@W No " .. s.kind.word .. " metarank lists came back.")
     return
   end
   local byk, who, found = {}, s.target, 0
@@ -716,11 +740,11 @@ local function report_meta(s)
         parts[#parts + 1] = "@x045" .. st.short .. " @wN/A"
       end
     end
-    Execute(s.chan .. " @x045" .. who .. "@W best days: " .. table.concat(parts, " @x099|@W ") .. "@w")
+    Execute(s.chan .. " @x045" .. who .. "@W " .. s.kind.word .. " bests: " .. table.concat(parts, " @x099|@W ") .. "@w")
     return
   end
 
-  cnote("@x045[@x099RankTracker@x045] @x099" .. who .. "@W - best single day, from metarank:")
+  cnote("@x045[@x099RankTracker@x045] @x099" .. who .. "@W - " .. s.kind.word .. " bests, from metarank:")
   for _, k in ipairs(META_ORDER) do
     local c, st = byk[k], STATS[k]
     if c and c.best then
@@ -980,20 +1004,22 @@ local function start_top(key, catnum, chan, stat)
   DoAfterSpecial(6, "OnRankStart(" .. scan.gen .. ")", 12)
 end
 
--- metarank for every stat at once; replies are told apart by their "ranking type" title
-local function start_meta(chan, target)
+-- metarank for every stat at once; replies are told apart by their "ranking type" title.
+-- kind = "day" / "year" / "week" (meta_kind)
+local function start_meta(chan, target, kind)
   if scan then
     cnote("@x045[@x099RankTracker@x045]@W A scan is already running, hang on.")
     return
   end
-  scan = { p = { label = "Metarank" }, meta = true, quiet = META_QUIET,
+  local k = META_KINDS[meta_kind(kind)]
+  scan = { p = { label = "Metarank" }, meta = true, kind = k, quiet = META_QUIET,
            chan = norm_chan(chan), target = norm_target(target),
            gen = 0, done = {}, hits = {} }
   EnableTriggerGroup("meta", true)
-  cnote("@x045[@x099RankTracker@x045]@W Reading metarank for @x099" .. scan.target ..
+  cnote("@x045[@x099RankTracker@x045]@W Reading " .. k.word .. " metarank for @x099" .. scan.target ..
         "@W (lists gagged)...")
-  for _, k in ipairs(META_ORDER) do
-    Send("metarank " .. STATS[k].num)
+  for _, st in ipairs(META_ORDER) do
+    Send("metarank " .. STATS[st].num .. k.flag)
   end
   scan.gen = scan.gen + 1
   DoAfterSpecial(8, "OnRankStart(" .. scan.gen .. ")", 12)
@@ -1036,26 +1062,29 @@ function alias_top(name, line, w)
   start_top(w[1], tonumber(w[2]), w[3])
 end
 
--- metarank [channel [name]]
+-- metarank / metayear / metaweek [channel [name]]
 function alias_meta(name, line, w)
-  start_meta(w[1], w[2])
+  start_meta(w[2], w[3], w[1])
 end
 
--- For MadBot ("madbot meta"): CallPlugin(id, "RankTracker_Meta", "<chan>|<name>").
+-- For MadBot ("madbot meta"): CallPlugin(id, "RankTracker_Meta", "<chan>|<name>[|year|week]").
 -- One string argument on purpose; <chan> may be two words ("tell Bob"), which the
 -- metarank alias cannot take. Returns "ok", or "busy" when a scan is already running.
 function RankTracker_Meta(arg)
-  local chan, who = tostring(arg or ""):match("^([^|]*)|(.*)$")
-  if not chan or chan == "" or not who or who == "" then return "bad" end
+  local chan, rest = tostring(arg or ""):match("^([^|]*)|(.*)$")
+  if not chan or chan == "" or not rest or rest == "" then return "bad" end
+  local who, kind = rest:match("^([^|]*)|(.*)$")
+  if not who then who = rest end
+  if who == "" then return "bad" end
   if scan then return "busy" end
-  start_meta(chan, who)
+  start_meta(chan, who, kind)
   return "ok"
 end
 
--- <name> metarank [channel]
+-- <name> metarank / metayear / metaweek [channel]
 function alias_meta_name(name, line, w)
   local who = w[1]:sub(1, 1):upper() .. w[1]:sub(2):lower()
-  start_meta(w[2], who)
+  start_meta(w[3], who, w[2])
 end
 
 -- pupreport [top] [d|w|m|y] [channel [name]]
@@ -1143,6 +1172,8 @@ function alias_help(name, line, w)
   cnote("  @x048Ultimate metarank@w               same, name first")
   cnote("  @x048Ultimate metarank gt@w            Ultimate's best days, one line to gt")
   cnote("  @D(meta works the same: @x048Ultimate meta gt@D. metarank 2 etc. still goes to the game)@w")
+  cnote("  @x048metayear@x099 / @x048metaweek@w            best single year / week instead, same forms:")
+  cnote("  @x048metayear spo@w  @x048Ultimate metaweek gt@w  @D(metarank <n> -y / -w)@w")
   cnote("")
   cnote("@x048Full scan@w, every category you place in:")
   cnote("  @x048yrank@x099 / @x048mrank@x099 / @x048wrank@x099 / @x048drank@w   yearly, monthly, weekly, daily")
