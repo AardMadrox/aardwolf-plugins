@@ -38,6 +38,13 @@
 
   Numeric forms of the game commands ("yrank 18") pass straight through.
 
+  pupreport / qpreport / cpreport / gqreport / questreport / killreport /
+  deathreport / levelreport   [top] [d|w|m|y] [channel [name]]
+        -> the same lookups by stat name instead of category number.
+             pupreport              your powerups: daily, weekly, monthly, yearly
+             pupreport spo          all four periods in one line to spo
+             pupreport d            = drt 16      pupreport top m  = tmrt 16
+
   Other aliases:
     rankname <name>   - override the default name; "rankname" alone goes back
                         to the logged-in character
@@ -60,7 +67,7 @@
    save_state="y"
    date_written="2026-10-17"
    requires="4.00"
-   version="1.5"
+   version="1.6"
    >
 </plugin>
 
@@ -79,7 +86,10 @@
     <period>rank <chan> [name]       full scan, one line to a channel
     yrt mrt drt wrt <n> [chan [nm]]  one category, 2 above / player / 2 below
     tyrt tmrt tdrt twrt <n> [chan]   top 10 of one category
-    rankname [name]                  default name override, blank resets
+    <stat>report [top] [d|w|m|y] [chan [name]]
+                                     by stat name (pup qp cp gq quest kill
+                                     death level); no period = all four
+    rankname [name]                default name override, blank resets
     rankdebug                        which column was read as each total
     rankhelp / ranktrackerhelp       the help screen
 
@@ -117,6 +127,17 @@
     prints the VERSION constant at the top of the script, not GetPluginInfo:
     the package documents the version field as both 18 (ppi.lua) and 19
     (show_loaded.lua), so bump VERSION and version= together instead.
+
+  STAT COMMANDS (added v1.6, 2026-11-14)
+    STATS maps each <stat>report word to a category number. Only 16 =
+    powerups and 2 = quest points came from the user; the rest are inferred
+    from the column order, so finish() warns when the game's category title
+    does not contain one of the stat's keys. A wrong number shows up as that
+    warning on first use: fix the num in STATS. Adding a stat means adding it
+    to STATS AND to the alias regex. With no period word, start_multi sends
+    drank/wrank/mrank/yrank for the one category at once and on_header tags
+    each reply with its period. On a channel it only sends when the player
+    ranks somewhere, otherwise it echoes locally.
 -->
 
 <!--  Aliases  -->
@@ -157,6 +178,16 @@
    enabled="y"
    regexp="y"
    script="alias_top"
+   sequence="100"
+   ignore_case="y"
+  ></alias>
+
+  <!-- friendly per-stat commands: pupreport, qpreport, cpreport ... (table STATS in the script) -->
+  <alias
+   match="^(pup|qp|cp|gq|quest|kill|death|level)report(?:\s+(.+?))?\s*$"
+   enabled="y"
+   regexp="y"
+   script="alias_stat"
    sequence="100"
    ignore_case="y"
   ></alias>
@@ -254,7 +285,41 @@ local PERIODS = {
 -- short "rt" aliases -> the matching rank command
 local RT = { yrt = "yrank", mrt = "mrank", drt = "drank", wrt = "wrank" }
 
-local VERSION  = "1.5"   -- keep in step with version= in the plugin tag above
+-- friendly per-stat commands ("pupreport" etc.)
+--   num  = the game's ranking category number
+--   keys = words expected in the game's category title; if none match, the
+--          report warns that the number is probably wrong
+-- 16 (powerups) and 2 (quest points) are confirmed by the user. The others
+-- follow the table's column order (Level, Total Qp, Mob Kills, Deaths, Gquests,
+-- Quests) plus 18 = Campaigns; GQChecker's "myrank 5" agrees with 5 = gquests.
+local STATS = {
+  pup   = { num = 16, label = "Powerups",     keys = { "powerup" } },
+  qp    = { num = 2,  label = "Quest Points", keys = { "qp", "point" } },
+  cp    = { num = 18, label = "Campaigns",    keys = { "campaign" } },
+  gq    = { num = 5,  label = "Gquests",      keys = { "gquest", "global" } },
+  quest = { num = 6,  label = "Quests",       keys = { "quest" } },
+  kill  = { num = 3,  label = "Mob Kills",    keys = { "kill" } },
+  death = { num = 4,  label = "Deaths",       keys = { "death" } },
+  level = { num = 1,  label = "Levels",       keys = { "level" } },
+}
+
+-- period words accepted by the stat commands -> the rt key
+local PERIOD_WORDS = {
+  d = "drt", day = "drt", daily = "drt",
+  w = "wrt", week = "wrt", weekly = "wrt",
+  m = "mrt", month = "mrt", monthly = "mrt",
+  y = "yrt", year = "yrt", yearly = "yrt",
+}
+
+-- order the all-periods report is shown in
+local PORDER = {
+  { key = "daily",   cmd = "drank", label = "Daily"   },
+  { key = "weekly",  cmd = "wrank", label = "Weekly"  },
+  { key = "monthly", cmd = "mrank", label = "Monthly" },
+  { key = "yearly",  cmd = "yrank", label = "Yearly"  },
+}
+
+local VERSION  = "1.6"   -- keep in step with version= in the plugin tag above
 local TOP_N = 100
 local CATS  = { 1, 2, 3, 4, 5, 6, 16, 18 }   -- categories to scan
 local QUIET = 1.0                            -- seconds of silence = scan finished
@@ -404,7 +469,7 @@ end
 function on_header(name, line, w)
   if not scan then return end
   close_cur()
-  scan.cur = { cat = w[2], cols = {}, rows = {}, rank = nil, nums = nil }
+  scan.cur = { period = (w[1] or ""):lower(), cat = w[2], cols = {}, rows = {}, rank = nil, nums = nil }
   touch()
 end
 
@@ -573,6 +638,62 @@ local function report_top(s)
   end
 end
 
+-- does the game's category title look like the stat we asked for?
+local function stat_ok(st, cat)
+  local c = (cat or ""):lower()
+  for _, k in ipairs(st.keys) do
+    if c:find(k, 1, true) then return true end
+  end
+  return false
+end
+
+-- one stat, all four periods ("pupreport")
+local function report_multi(s)
+  local st = s.stat
+  if #s.done == 0 then
+    cnote("@x045[@x099RankTracker@x045]@W No " .. st.label:lower() ..
+          " rankings came back (category @x048" .. st.num .. "@W).")
+    return
+  end
+  local byp = {}
+  for _, c in ipairs(s.done) do byp[c.period] = c end
+  local title = shorten(s.done[1].cat)
+  local who = s.target
+  for _, c in ipairs(s.done) do
+    if c.who then who = c.who; break end
+  end
+
+  if s.chan and #s.hits > 0 then
+    local parts = {}
+    for _, p in ipairs(PORDER) do
+      local c = byp[p.key]
+      if c and c.rank then
+        parts[#parts + 1] = string.format("@W%s @x099#%d @x048%s", p.label, c.rank, c.total or "?")
+      else
+        parts[#parts + 1] = "@W" .. p.label .. " @w-"
+      end
+    end
+    Execute(s.chan .. " @x045" .. title .. "@W for @x045" .. who .. "@W - " ..
+            table.concat(parts, "@W, ") .. "@w")
+    return
+  end
+
+  cnote("@x045[@x099RankTracker@x045] @x045" .. title .. "@W for @x099" .. who)
+  for _, p in ipairs(PORDER) do
+    local c = byp[p.key]
+    if c and c.rank then
+      cnote(string.format("  @W%-8s @x099#%-4d @x048%s", p.label, c.rank, c.total or "?"))
+    elseif c then
+      cnote(string.format("  @W%-8s @wnot in the top %d", p.label, TOP_N))
+    else
+      cnote(string.format("  @W%-8s @Dno reply", p.label))
+    end
+  end
+  if s.chan then
+    cnote("  @D(not in the top " .. TOP_N .. " anywhere, so nothing was sent to " .. s.chan .. ")")
+  end
+end
+
 finish = function()
   EnableTriggerGroup("scan", false)
   local s = scan
@@ -582,9 +703,16 @@ finish = function()
     if c.rank then s.hits[#s.hits + 1] = c end
   end
   scan, lastscan = nil, s
-  if s.rt then report_rt(s)
+  if s.multi then report_multi(s)
+  elseif s.rt then report_rt(s)
   elseif s.top then report_top(s)
   else report(s) end
+  -- friendly stat commands: flag a category number that is not the stat it claims to be
+  if s.stat and s.done[1] and not stat_ok(s.stat, s.done[1].cat) then
+    cnote("@x045[@x099RankTracker@x045]@W Heads up: category @x048" .. s.stat.num ..
+          "@W came back as @x045" .. s.done[1].cat .. "@W, not " .. s.stat.label ..
+          ". The number in the STATS table needs fixing.")
+  end
 end
 
 -- "" or "-" means no channel (echo locally)
@@ -616,12 +744,12 @@ local function start_scan(key, chan, target)
   DoAfterSpecial(6, "OnRankStart(" .. scan.gen .. ")", 12)
 end
 
-local function start_rt(key, catnum, chan, target)
+local function start_rt(key, catnum, chan, target, stat)
   if scan then
     cnote("@x045[@x099RankTracker@x045]@W A scan is already running, hang on.")
     return
   end
-  scan = { p = PERIODS[RT[key:lower()]], rt = true, catnum = catnum,
+  scan = { p = PERIODS[RT[key:lower()]], rt = true, catnum = catnum, stat = stat,
            chan = norm_chan(chan), target = norm_target(target),
            gen = 0, done = {}, hits = {} }
   EnableTriggerGroup("scan", true)
@@ -630,17 +758,34 @@ local function start_rt(key, catnum, chan, target)
   DoAfterSpecial(6, "OnRankStart(" .. scan.gen .. ")", 12)
 end
 
-local function start_top(key, catnum, chan)
+local function start_top(key, catnum, chan, stat)
   if scan then
     cnote("@x045[@x099RankTracker@x045]@W A scan is already running, hang on.")
     return
   end
   -- key is tyrt/tmrt/tdrt/twrt -> drop the leading "t" to get yrt/mrt/drt/wrt
-  scan = { p = PERIODS[RT[key:lower():sub(2)]], top = true, catnum = catnum,
+  scan = { p = PERIODS[RT[key:lower():sub(2)]], top = true, catnum = catnum, stat = stat,
            chan = norm_chan(chan), target = "",
            gen = 0, done = {}, hits = {} }
   EnableTriggerGroup("scan", true)
   Send(scan.p.cmd .. " " .. catnum)
+  scan.gen = scan.gen + 1
+  DoAfterSpecial(6, "OnRankStart(" .. scan.gen .. ")", 12)
+end
+
+-- one stat in all four periods; replies are told apart by the period in their header
+local function start_multi(stat, chan, target)
+  if scan then
+    cnote("@x045[@x099RankTracker@x045]@W A scan is already running, hang on.")
+    return
+  end
+  scan = { p = { label = stat.label }, multi = true, stat = stat, catnum = stat.num,
+           chan = norm_chan(chan), target = norm_target(target),
+           gen = 0, done = {}, hits = {} }
+  EnableTriggerGroup("scan", true)
+  for _, p in ipairs(PORDER) do
+    Send(p.cmd .. " " .. stat.num)
+  end
   scan.gen = scan.gen + 1
   DoAfterSpecial(6, "OnRankStart(" .. scan.gen .. ")", 12)
 end
@@ -663,6 +808,39 @@ end
 
 function alias_top(name, line, w)
   start_top(w[1], tonumber(w[2]), w[3])
+end
+
+-- pupreport [top] [d|w|m|y] [channel [name]]
+function alias_stat(name, line, w)
+  local key = w[1]:lower()
+  local st = STATS[key]
+  local cmd = key .. "report"
+  local t = {}
+  for tok in (w[2] or ""):gmatch("%S+") do t[#t + 1] = tok end
+
+  local i, top, rtkey = 1, false, nil
+  if t[i] and t[i]:lower() == "top" then top = true; i = i + 1 end
+  if t[i] and PERIOD_WORDS[t[i]:lower()] then rtkey = PERIOD_WORDS[t[i]:lower()]; i = i + 1 end
+
+  local chan, target = t[i], t[i + 1]
+  local extra = t[i + 2]
+  if top then
+    -- top 10 takes a two-word channel ("tell Bob") and no name
+    if target then chan = chan .. " " .. target; target = nil end
+  end
+  if extra or (chan and not (chan == "-" or chan:match("^[A-Za-z]"))) then
+    cnote("@x045[@x099RankTracker@x045]@W Usage: @x048" .. cmd ..
+          " @W[@x048top@W] [@x048d@W|@x048w@W|@x048m@W|@x048y@W] [channel [name]]  @D(rankhelp for examples)")
+    return
+  end
+
+  if top then
+    start_top("t" .. (rtkey or "drt"), st.num, chan, st)
+  elseif rtkey then
+    start_rt(rtkey, st.num, chan, target, st)
+  else
+    start_multi(st, chan, target)
+  end
 end
 
 function alias_name(name, line, w)
@@ -695,6 +873,20 @@ function alias_help(name, line, w)
   cnote("  @wFinds you, or anyone, in Aardwolf's yearly, monthly, weekly and")
   cnote("  @wdaily top " .. TOP_N .. " rankings. Looking up: @x048" .. who ..
         "@w  @D(rankname to change)@w")
+  cnote("")
+  cnote("@x048By stat@w, your daily, weekly, monthly and yearly in one go:")
+  local names = {}
+  for k in pairs(STATS) do names[#names + 1] = k end
+  table.sort(names)
+  for _, k in ipairs(names) do
+    cnote(string.format("  @x048%-16s@w %s @D(category %d)@w", k .. "report", STATS[k].label, STATS[k].num))
+  end
+  cnote("  @x048pupreport spo@w                   all four periods, one line to spo")
+  cnote("  @x048pupreport - Ultimate@w            someone else, echoed only to you")
+  cnote("  @x048pupreport d@w                     daily only, 2 above and 2 below you")
+  cnote("  @x048pupreport w spo@w                 weekly only, to spo  @D(d / w / m / y)@w")
+  cnote("  @x048pupreport top@w                   daily top 10  @D(pupreport top m = monthly)@w")
+  cnote("  @x048pupreport top y spo@w             yearly top 10, to spo")
   cnote("")
   cnote("@x048Full scan@w, every category you place in:")
   cnote("  @x048yrank@x099 / @x048mrank@x099 / @x048wrank@x099 / @x048drank@w   yearly, monthly, weekly, daily")
