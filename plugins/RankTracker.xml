@@ -45,6 +45,12 @@
              pupreport spo          all four periods in one line to spo
              pupreport d            = drt 16      pupreport top m  = tmrt 16
 
+  metarank [channel [name]]
+        -> the best single day for each of those stats, from the game's
+           all-time top 500 daily list (metarank <n>): value and date, one
+           line each, or all on one line split by | when sent to a channel.
+           "metarank 2" (a number) still goes straight to the game.
+
   Other aliases:
     rankname <name>   - override the default name; "rankname" alone goes back
                         to the logged-in character
@@ -67,7 +73,7 @@
    save_state="y"
    date_written="2026-10-17"
    requires="4.00"
-   version="1.6"
+   version="1.7"
    >
 </plugin>
 
@@ -89,6 +95,7 @@
     <stat>report [top] [d|w|m|y] [chan [name]]
                                      by stat name (pup qp cp gq quest kill
                                      death level); no period = all four
+    metarank [chan [name]]         best day per stat from metarank
     rankname [name]                default name override, blank resets
     rankdebug                        which column was read as each total
     rankhelp / ranktrackerhelp       the help screen
@@ -138,6 +145,17 @@
     drank/wrank/mrank/yrank for the one category at once and on_header tags
     each reply with its period. On a channel it only sends when the player
     ranks somewhere, otherwise it echoes locally.
+
+  METARANK (added v1.7, 2026-11-14)
+    The game's "metarank <n>" prints "Highest 500 daily results for ranking
+    type X:" then Num / Name / Pos / value / Period End rows, best first, so
+    the player's FIRST row is their best day. Names can contain spaces
+    ("MEGAN 2.01"), hence the lazy name capture in the row trigger. Replies
+    are matched to a stat by title (META_MATCH, specific words first since
+    "Quest Points Earned" contains "quest"), falling back to send order. The
+    lookup has its own trigger group "meta" and a 2 second quiet gap because
+    each reply is 500 lines. Only metarank 2 (Quest Points Earned) has been
+    seen live; the other numbers are the same guesses as STATS.
 -->
 
 <!--  Aliases  -->
@@ -188,6 +206,16 @@
    enabled="y"
    regexp="y"
    script="alias_stat"
+   sequence="100"
+   ignore_case="y"
+  ></alias>
+
+  <!-- best all-time daily result per stat; numeric forms ("metarank 2") fall through to the game -->
+  <alias
+   match="^metarank(?:\s+([A-Za-z]\w*|-)(?:\s+(\S+))?)?\s*$"
+   enabled="y"
+   regexp="y"
+   script="alias_meta"
    sequence="100"
    ignore_case="y"
   ></alias>
@@ -270,6 +298,56 @@
    sequence="100"
   ></trigger>
 
+  <!-- metarank replies: only enabled while a metarank lookup is running -->
+  <trigger
+   enabled="n"
+   group="meta"
+   match="^\s*Highest (\d+) (\w+) results for ranking type (.+?):?\s*$"
+   regexp="y"
+   omit_from_output="y"
+   script="on_meta_header"
+   sequence="90"
+  ></trigger>
+
+  <trigger
+   enabled="n"
+   group="meta"
+   match="^\s*Num\s+Name\s+Pos\b.*$"
+   regexp="y"
+   omit_from_output="y"
+   script="on_meta_touch"
+   sequence="95"
+  ></trigger>
+
+  <trigger
+   enabled="n"
+   group="meta"
+   match="^\s*-+(\s+-+)+\s*$"
+   regexp="y"
+   omit_from_output="y"
+   script="on_meta_touch"
+   sequence="100"
+  ></trigger>
+
+  <trigger
+   enabled="n"
+   group="meta"
+   match="^\s*(\d+)\s+(.+?)\s+(\d+)\s+([\d,]+)\s+([A-Za-z]{3}\s+\d{1,2}\s+\d{4})\s*$"
+   regexp="y"
+   omit_from_output="y"
+   script="on_meta_row"
+   sequence="100"
+  ></trigger>
+
+  <trigger
+   enabled="n"
+   group="meta"
+   match="^\s*$"
+   regexp="y"
+   omit_from_output="y"
+   sequence="100"
+  ></trigger>
+
 </triggers>
 
 <script>
@@ -293,15 +371,22 @@ local RT = { yrt = "yrank", mrt = "mrank", drt = "drank", wrt = "wrank" }
 -- follow the table's column order (Level, Total Qp, Mob Kills, Deaths, Gquests,
 -- Quests) plus 18 = Campaigns; GQChecker's "myrank 5" agrees with 5 = gquests.
 local STATS = {
-  pup   = { num = 16, label = "Powerups",     keys = { "powerup" } },
-  qp    = { num = 2,  label = "Quest Points", keys = { "qp", "point" } },
-  cp    = { num = 18, label = "Campaigns",    keys = { "campaign" } },
-  gq    = { num = 5,  label = "Gquests",      keys = { "gquest", "global" } },
-  quest = { num = 6,  label = "Quests",       keys = { "quest" } },
-  kill  = { num = 3,  label = "Mob Kills",    keys = { "kill" } },
-  death = { num = 4,  label = "Deaths",       keys = { "death" } },
-  level = { num = 1,  label = "Levels",       keys = { "level" } },
+  pup   = { num = 16, label = "Powerups",     short = "Pups",   keys = { "powerup" } },
+  qp    = { num = 2,  label = "Quest Points", short = "QP",     keys = { "qp", "point" } },
+  cp    = { num = 18, label = "Campaigns",    short = "CPs",    keys = { "campaign" } },
+  gq    = { num = 5,  label = "Gquests",      short = "GQs",    keys = { "gquest", "global" } },
+  quest = { num = 6,  label = "Quests",       short = "Quests", keys = { "quest" } },
+  kill  = { num = 3,  label = "Mob Kills",    short = "Kills",  keys = { "kill" } },
+  death = { num = 4,  label = "Deaths",       short = "Deaths", keys = { "death" } },
+  level = { num = 1,  label = "Levels",       short = "Levels", keys = { "level" } },
 }
+
+-- metarank: the order the stats are asked for and shown in
+local META_ORDER = { "level", "qp", "cp", "gq", "quest", "kill", "death", "pup" }
+-- order to match a metarank title against the stats: the specific words
+-- first, because "Quest Points Earned" and "Gquests" both contain "quest"
+local META_MATCH = { "pup", "cp", "gq", "qp", "kill", "death", "level", "quest" }
+local META_QUIET = 2.0   -- metarank replies are 500 lines each; allow a longer gap
 
 -- period words accepted by the stat commands -> the rt key
 local PERIOD_WORDS = {
@@ -319,7 +404,7 @@ local PORDER = {
   { key = "yearly",  cmd = "yrank", label = "Yearly"  },
 }
 
-local VERSION  = "1.6"   -- keep in step with version= in the plugin tag above
+local VERSION  = "1.7"   -- keep in step with version= in the plugin tag above
 local TOP_N = 100
 local CATS  = { 1, 2, 3, 4, 5, 6, 16, 18 }   -- categories to scan
 local QUIET = 1.0                            -- seconds of silence = scan finished
@@ -447,7 +532,7 @@ end
 
 local function touch()
   scan.gen = scan.gen + 1
-  arm(QUIET, "OnRankQuiet")
+  arm(scan.quiet or QUIET, "OnRankQuiet")
 end
 
 local function close_cur()
@@ -525,6 +610,101 @@ function on_row(name, line, w)
     end
   end
   touch()
+end
+
+---------------------------------------------------------------------
+-- metarank: the game's all-time top 500 daily results per category
+---------------------------------------------------------------------
+
+-- does the game's category title look like the stat we asked for?
+local function stat_ok(st, cat)
+  local c = (cat or ""):lower()
+  for _, k in ipairs(st.keys) do
+    if c:find(k, 1, true) then return true end
+  end
+  return false
+end
+
+-- which stat a metarank title belongs to; falls back to the send order
+local function meta_stat(title, idx)
+  local t = (title or ""):lower()
+  for _, k in ipairs(META_MATCH) do
+    for _, word in ipairs(STATS[k].keys) do
+      if t:find(word, 1, true) then return k end
+    end
+  end
+  return META_ORDER[idx]
+end
+
+function on_meta_header(name, line, w)
+  if not (scan and scan.meta) then return end
+  close_cur()
+  scan.cur = { cat = w[3], limit = tonumber(w[1]), key = meta_stat(w[3], #scan.done + 1) }
+  touch()
+end
+
+function on_meta_touch(name, line, w)
+  if scan and scan.meta then touch() end
+end
+
+function on_meta_row(name, line, w)
+  if not (scan and scan.meta) then return end
+  local cur = scan.cur
+  -- the list is sorted best first, so the player's first row is their best day
+  if cur and not cur.best and w[2]:lower() == scan.target:lower() then
+    cur.best = { place = tonumber(w[1]), who = w[2], value = w[4],
+                 date = (w[5]:gsub("%s+", " ")) }
+  end
+  touch()
+end
+
+local function report_meta(s)
+  if #s.done == 0 then
+    cnote("@x045[@x099RankTracker@x045]@W No metarank lists came back.")
+    return
+  end
+  local byk, who, found = {}, s.target, 0
+  for _, c in ipairs(s.done) do
+    if c.key and not byk[c.key] then byk[c.key] = c end
+    if c.best then who = c.best.who; found = found + 1 end
+  end
+
+  if s.chan and found > 0 then
+    local parts = {}
+    for _, k in ipairs(META_ORDER) do
+      local c, st = byk[k], STATS[k]
+      if c and c.best then
+        parts[#parts + 1] = string.format("@x045%s @x048%s @w%s", st.short, c.best.value, c.best.date)
+      else
+        parts[#parts + 1] = "@x045" .. st.short .. " @w-"
+      end
+    end
+    Execute(s.chan .. " @x045" .. who .. "@W best days: " .. table.concat(parts, " @x099|@W ") .. "@w")
+    return
+  end
+
+  cnote("@x045[@x099RankTracker@x045] @x099" .. who .. "@W - best single day, from metarank:")
+  for _, k in ipairs(META_ORDER) do
+    local c, st = byk[k], STATS[k]
+    if c and c.best then
+      cnote(string.format("  @x045%-13s @x048%9s  @W%s  @D(#%d all time)",
+                          st.label, c.best.value, c.best.date, c.best.place))
+    elseif c then
+      cnote(string.format("  @x045%-13s @wnot in the top %d", st.label, c.limit or 500))
+    else
+      cnote(string.format("  @x045%-13s @Dno reply", st.label))
+    end
+  end
+  if s.chan then
+    cnote("  @D(not on any list, so nothing was sent to " .. s.chan .. ")")
+  end
+  -- a title nothing matched means the category numbers need a look
+  for _, c in ipairs(s.done) do
+    if c.key and not stat_ok(STATS[c.key], c.cat) then
+      cnote("@x045[@x099RankTracker@x045]@W Heads up: metarank @x048" .. STATS[c.key].num ..
+            "@W came back as @x045" .. c.cat .. "@W, not " .. STATS[c.key].label .. ".")
+    end
+  end
 end
 
 -- ranked value of a stored row
@@ -638,15 +818,6 @@ local function report_top(s)
   end
 end
 
--- does the game's category title look like the stat we asked for?
-local function stat_ok(st, cat)
-  local c = (cat or ""):lower()
-  for _, k in ipairs(st.keys) do
-    if c:find(k, 1, true) then return true end
-  end
-  return false
-end
-
 -- one stat, all four periods ("pupreport")
 local function report_multi(s)
   local st = s.stat
@@ -696,6 +867,7 @@ end
 
 finish = function()
   EnableTriggerGroup("scan", false)
+  EnableTriggerGroup("meta", false)
   local s = scan
   if s.cur then table.insert(s.done, s.cur); s.cur = nil end
   s.hits = {}
@@ -703,7 +875,8 @@ finish = function()
     if c.rank then s.hits[#s.hits + 1] = c end
   end
   scan, lastscan = nil, s
-  if s.multi then report_multi(s)
+  if s.meta then report_meta(s)
+  elseif s.multi then report_multi(s)
   elseif s.rt then report_rt(s)
   elseif s.top then report_top(s)
   else report(s) end
@@ -773,6 +946,25 @@ local function start_top(key, catnum, chan, stat)
   DoAfterSpecial(6, "OnRankStart(" .. scan.gen .. ")", 12)
 end
 
+-- metarank for every stat at once; replies are told apart by their "ranking type" title
+local function start_meta(chan, target)
+  if scan then
+    cnote("@x045[@x099RankTracker@x045]@W A scan is already running, hang on.")
+    return
+  end
+  scan = { p = { label = "Metarank" }, meta = true, quiet = META_QUIET,
+           chan = norm_chan(chan), target = norm_target(target),
+           gen = 0, done = {}, hits = {} }
+  EnableTriggerGroup("meta", true)
+  cnote("@x045[@x099RankTracker@x045]@W Reading metarank for @x099" .. scan.target ..
+        "@W (lists gagged)...")
+  for _, k in ipairs(META_ORDER) do
+    Send("metarank " .. STATS[k].num)
+  end
+  scan.gen = scan.gen + 1
+  DoAfterSpecial(8, "OnRankStart(" .. scan.gen .. ")", 12)
+end
+
 -- one stat in all four periods; replies are told apart by the period in their header
 local function start_multi(stat, chan, target)
   if scan then
@@ -808,6 +1000,11 @@ end
 
 function alias_top(name, line, w)
   start_top(w[1], tonumber(w[2]), w[3])
+end
+
+-- metarank [channel [name]]
+function alias_meta(name, line, w)
+  start_meta(w[1], w[2])
 end
 
 -- pupreport [top] [d|w|m|y] [channel [name]]
@@ -888,6 +1085,12 @@ function alias_help(name, line, w)
   cnote("  @x048pupreport top@w                   daily top 10  @D(pupreport top m = monthly)@w")
   cnote("  @x048pupreport top y spo@w             yearly top 10, to spo")
   cnote("")
+  cnote("@x048Best ever day@w, from the game's all-time top 500 (metarank):")
+  cnote("  @x048metarank@w                        one line per stat, value and date")
+  cnote("  @x048metarank spo@w                    all of them on one line to spo")
+  cnote("  @x048metarank - Ultimate@w             someone else, echoed only to you")
+  cnote("  @D(metarank 2 etc. still goes to the game's own list)@w")
+  cnote("")
   cnote("@x048Full scan@w, every category you place in:")
   cnote("  @x048yrank@x099 / @x048mrank@x099 / @x048wrank@x099 / @x048drank@w   yearly, monthly, weekly, daily")
   cnote("  @x048drank <channel>@w                 one coloured line to that channel")
@@ -927,6 +1130,7 @@ end
 
 function OnPluginInstall()
   EnableTriggerGroup("scan", false)
+  EnableTriggerGroup("meta", false)
   cnote("@x045[@x099RankTracker@x045]@W v" .. VERSION ..
         " loaded. @x048rankhelp@W for the command list.")
   -- installed mid-session: ask the game for char.base so we learn the character name
@@ -937,6 +1141,7 @@ end
 
 function OnPluginClose()
   EnableTriggerGroup("scan", false)
+  EnableTriggerGroup("meta", false)
 end
 
 ]]>
