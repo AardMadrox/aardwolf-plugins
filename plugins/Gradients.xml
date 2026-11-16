@@ -14,7 +14,7 @@
    purpose="Create, manage, and use colorful text gradients."
    date_written="2023-05-29 13:36:58"
    requires="5.07"
-   version="1.5"
+   version="1.6"
    >
 <description trim="y">
 <![CDATA[
@@ -52,6 +52,8 @@ DATA AND STATE
 Saved gradients live in Gradients.db next to the plugin, not in SetVariable, so
 a reinstall does not lose them. A brand new database gets four starter gradients
 so the help examples work; an existing database is never touched.
+getGradients returns them sorted by name, ignoring case, so grad list and
+export all come out alphabetical whatever order they were saved in.
 
 WHEN EDITING
 SetClipboard can stop the client with a modal box and gives no return code, so
@@ -3593,6 +3595,13 @@ local function getGradients()
   end
 
   closeDatabase(db)
+
+  -- alphabetical, ignoring case, so grad list and export all read in order
+  table.sort(gradients, function(a, b)
+    local la, lb = a.name:lower(), b.name:lower()
+    if la ~= lb then return la < lb end
+    return a.name < b.name
+  end)
 
   return gradients
 end
