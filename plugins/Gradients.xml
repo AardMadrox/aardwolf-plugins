@@ -14,7 +14,7 @@
    purpose="Create, manage, and use colorful text gradients."
    date_written="2023-05-29 13:36:58"
    requires="5.07"
-   version="1.6"
+   version="1.7"
    >
 <description trim="y">
 <![CDATA[
@@ -38,6 +38,9 @@ COMMANDS
 Everything is under grad. grad help lists them all, grad list is the way in.
 grad100 send freshness say Hello keeps the colored text to 100 characters.
 string @x99Hi@w doubles every @ and copies it to the clipboard. grad string too.
+grad reload reloads the plugin (bounced through the world's script space, since
+ReloadPlugin can't run from inside the plugin it is reloading). Keep the local
+VERSION in the script matching version= so the load line shows the real build.
 
 HOW IT WORKS
 Everything is in this one file so the plugin manager can install it: the first
@@ -54,6 +57,8 @@ a reinstall does not lose them. A brand new database gets four starter gradients
 so the help examples work; an existing database is never touched.
 getGradients returns them sorted by name, ignoring case, so grad list and
 export all come out alphabetical whatever order they were saved in.
+grad list draws each name in its own gradient (ColoursToStyles, then one
+ColourTell per style) so the Actions links can follow on the same line.
 
 WHEN EDITING
 SetClipboard can stop the client with a modal box and gives no return code, so
@@ -2384,7 +2389,7 @@ dofile(GetInfo(60) .. "aardwolf_colors.lua")
 local utils = require("utils")
 local sqlite3 = require("sqlite3")
 
-local VERSION = "1.5"
+local VERSION = "1.7"
 
 ----------------------------------------------------------
 
@@ -2445,6 +2450,13 @@ local helpFiles = {
 
 Passing in a topic will pull up the help file for that specific command for
 more detailed help.]],
+    },
+    Reload = {
+      command = "grad reload",
+      summary = "Reloads the Gradients plugin.",
+      body = [[Reloads the plugin from its file, so a new version takes effect without
+restarting the client. Your saved gradients are kept, they live in Gradients.db.
+The load line shows the version that is now running.]],
     }
   },
   Use = {
@@ -4038,9 +4050,30 @@ local function gradients_list()
       reversed = "Yes"
     end
 
-    local row = rightpad(" " ..
-          gradient["name"], 24) ..
-        center(gradient["cycles"] .. "", 16) ..
+    -- the name is drawn in its own gradient, as a little sample of it
+    local name = gradient["name"]:sub(1, 23)
+    local colrs = {}
+    for _, c in ipairs(gradient["colors"]) do
+      table.insert(colrs, c:toHexString())
+    end
+    local okGen, coloredName = pcall(function()
+      return Gradient:new():generate(name, colrs, {
+        cycles = gradient["cycles"],
+        reversed = gradient["reversed"]
+      })
+    end)
+
+    Tell(" ")
+    if okGen and coloredName then
+      for _, style in ipairs(ColoursToStyles(coloredName)) do
+        ColourTell(RGBColourToName(style.textcolour), "", style.text)
+      end
+    else
+      ColourTell(CLR_MSG, "", name)
+    end
+    Tell(string.rep(" ", math.max(0, 23 - #name)))
+
+    local row = center(gradient["cycles"] .. "", 16) ..
         center(reversed, 16)
 
     ColourTell(CLR_MSG, "", row .. "      ")
@@ -4887,6 +4920,14 @@ local function gradients_about()
   footer()
 end
 
+---Reloads this plugin. ReloadPlugin can't run from the plugin's own script
+---space (it tears that down), so bounce it through the world's.
+local function gradients_reload()
+  echo("Reloading...")
+  Execute(GetAlphaOption("script_prefix") ..
+    'DoAfterSpecial(1, "ReloadPlugin(\'' .. GetPluginID() .. '\')", sendto.script)')
+end
+
 ----------------------------------------------------------
 
 --  Mushclient Hooks
@@ -4921,6 +4962,7 @@ function gradients_dispatch(_, _, raw)
     mprint = gradients_mprint,
     msend = gradients_msend,
     print = gradients_print,
+    reload = gradients_reload,
     report = gradients_report,
     sampler = gradients_sampler,
     send = gradients_send,
