@@ -54,6 +54,12 @@
         -> another player's best days, name first: "Ultimate metarank gt".
   metayear / metaweek   (same forms: "metayear spo", "Ultimate metaweek gt")
         -> best single YEAR / WEEK per stat, from "metarank <n> -y" / "-w".
+  The metarank lists are read ONCE and kept (RankTracker_meta.txt next to this
+  plugin), so meta / metayear / metaweek answer at once with no game output:
+  daily lists every day at 12:01am, weekly on Sunday 12:01am, yearly on Jan 1
+  12:01am (your computer's clock). Missed while offline = read at next login.
+  metastatus            -> when each set of lists was last read
+  metarefresh [day|week|year]  -> read them again now
 
   Other aliases:
     rankname <name>   - override the default name; "rankname" alone goes back
@@ -77,7 +83,7 @@
    save_state="y"
    date_written="2026-10-17"
    requires="4.00"
-   version="2.3"
+   version="2.4"
    >
 </plugin>
 
@@ -102,6 +108,7 @@
     metarank [chan [name]]         best day per stat from metarank
     <name> metarank [chan]         same, name first (v1.8)
     metayear / metaweek ...        best year / week, same forms (v2.3)
+    metastatus / metarefresh [k]   saved metarank lists: age / read again (v2.4)
     rankname [name]                default name override, blank resets
     rankdebug                        which column was read as each total
     rankhelp / ranktrackerhelp       the help screen
@@ -117,8 +124,9 @@
     than guess a wrong number when a known stat's column is absent.
 
   DATA AND STATE
-    Variables only: charname (rankname override) and selfname (learned from
-    GMCP char.base). No data file. lastscan is kept in memory for rankdebug
+    Variables: charname (rankname override) and selfname (learned from
+    GMCP char.base). Data file RankTracker_meta.txt (v2.4, the saved metarank
+    lists, see META CACHE). lastscan is kept in memory for rankdebug
     and does not survive a reload.
 
   WHEN EDITING
@@ -181,6 +189,27 @@
     weekly rows end in a date like daily ("Dec 07 2025"), but YEARLY rows
     end in just the year ("2024"), so the row trigger's last column
     (Period End) accepts any text, not only "Mon dd yyyy".
+
+  META CACHE (v2.4, 2026-11-15)
+    Reading 8 lists of 500 lines lagged the user, so every list is read on a
+    schedule and kept: mcache[day|week|year] = { stamp, at, lists[statkey] =
+    { cat, limit, rows = { {place, who, value, date}, ... } } }, saved to
+    RankTracker_meta.txt (tab separated K / L / R lines, written to .tmp then
+    renamed; delete it to start over). meta_due(kind, now) is the stamp of the
+    latest 12:01am slot (day: the date; week: that Sunday's date; year: the
+    year); OnMetaTick (60s timer) reads one kind whose saved stamp differs,
+    then chains the next 5s later. A refresh is ONE attempt per slot: a
+    category that never answers stays N/A until the next slot instead of
+    re-sending every minute. Only a refresh that got nothing at all is retried,
+    REFRESH_RETRY (10 min) later. It waits while GMCP state is not 3 / 4 / 9 /
+    11 (login, note, editor, pager, combat, running) and while in a PK room
+    (room.info details "pk..."); both are read in OnPluginTelnetSubnegotiation.
+    If you were AFK (state 4) and are not afterwards, it sends "afk" once.
+    Lookups (meta_lookup) only read mcache; with no saved lists for that kind
+    yet they fall back to the old live scan, which also fills the cache.
+    RankTracker_Meta returns "cached" for an instant answer, "ok" for a live
+    scan; RankTracker_MetaCached(kind) = "yes"/"no" lets MadBot skip its lag
+    guards (PK block, long AFK hop) when nothing will be sent to the game.
 -->
 
 <!--  Aliases  -->
@@ -253,6 +282,25 @@
    enabled="y"
    regexp="y"
    script="alias_meta_name"
+   sequence="100"
+   ignore_case="y"
+  ></alias>
+
+  <!-- saved metarank lists (v2.4) -->
+  <alias
+   match="^metastatus\s*$"
+   enabled="y"
+   regexp="y"
+   script="alias_metastatus"
+   sequence="100"
+   ignore_case="y"
+  ></alias>
+
+  <alias
+   match="^metarefresh(?:\s+(day|daily|d|week|weekly|w|year|yearly|y|all))?\s*$"
+   enabled="y"
+   regexp="y"
+   script="alias_metarefresh"
    sequence="100"
    ignore_case="y"
   ></alias>
@@ -387,6 +435,12 @@
 
 </triggers>
 
+<!--  once a minute: are any saved metarank lists due to be read again? (v2.4)  -->
+<timers>
+  <timer name="meta_tick" enabled="y" minute="1" second="0.00" script="OnMetaTick"
+         active_closed="n" one_shot="n" at_time="n"/>
+</timers>
+
 <script>
 <![CDATA[
 
@@ -426,9 +480,9 @@ local META_MATCH = { "pup", "cp", "gq", "qp", "kill", "death", "level", "quest" 
 local META_QUIET = 2.0   -- metarank replies are 500 lines each; allow a longer gap
 -- meta / metarank = best day, metayear = best year (-y), metaweek = best week (-w)
 local META_KINDS = {
-  day  = { flag = "",    word = "daily"  },
-  year = { flag = " -y", word = "yearly" },
-  week = { flag = " -w", word = "weekly" },
+  day  = { key = "day",  flag = "",    word = "daily",  label = "Daily"  },
+  year = { key = "year", flag = " -y", word = "yearly", label = "Yearly" },
+  week = { key = "week", flag = " -w", word = "weekly", label = "Weekly" },
 }
 -- "" / "rank" / "day" -> day, "year" / "y" -> year, "week" / "w" -> week
 local function meta_kind(word)
@@ -454,7 +508,7 @@ local PORDER = {
   { key = "yearly",  cmd = "yrank", label = "Yearly"  },
 }
 
-local VERSION  = "2.3"   -- keep in step with version= in the plugin tag above
+local VERSION  = "2.4"   -- keep in step with version= in the plugin tag above
 local TOP_N = 100
 local CATS  = { 1, 2, 3, 4, 5, 6, 16, 18 }   -- categories to scan
 local QUIET = 1.0                            -- seconds of silence = scan finished
@@ -463,6 +517,8 @@ local QUIET = 1.0                            -- seconds of silence = scan finish
 local COLNAMES = { "Level", "Total Qp", "Mob Kills", "Deaths", "Gquests", "Quests", "Campaigns" }
 
 local scan     = nil   -- active scan state, nil when idle
+local gState   = nil   -- GMCP char.status state (3 active, 4 AFK, 8 combat ...), nil until seen
+local gPK      = false -- GMCP room.info details has a "pk" flag
 local lastscan = nil   -- finished scan, for rankdebug
 
 -- colours: @x099 yellow, @x045 cyan, @W white, @x048 green
@@ -567,6 +623,15 @@ function OnPluginTelnetSubnegotiation(msg_type, data)
   if data:sub(1, 9) == "char.base" then
     local n = data:match('"name"%s*:%s*"([^"]+)"')
     if n and n ~= "" then SetVariable("selfname", n) end
+  elseif data:sub(1, 11) == "char.status" then
+    local st = data:match('"state"%s*:%s*"?(%d+)')
+    if st then gState = tonumber(st) end
+  elseif data:sub(1, 9) == "room.info" then
+    local d = data:match('"details"%s*:%s*"([^"]*)"') or ""
+    gPK = false
+    for flag in d:gmatch("[^,]+") do
+      if flag:gsub("%s", ""):lower():sub(1, 2) == "pk" then gPK = true end
+    end
   end
 end
 
@@ -700,10 +765,13 @@ end
 function on_meta_row(name, line, w)
   if not (scan and scan.meta) then return end
   local cur = scan.cur
-  -- the list is sorted best first, so the player's first row is their best day
-  if cur and not cur.best and w[2]:lower() == scan.target:lower() then
-    cur.best = { place = tonumber(w[1]), who = w[2], value = w[4],
-                 date = (w[5]:gsub("%s+", " ")) }
+  if cur then
+    -- every row is kept for the saved lists (v2.4); the list is sorted best first,
+    -- so the player's first row is their best day
+    local row = { place = tonumber(w[1]), who = w[2], value = w[4], date = (w[5]:gsub("%s+", " ")) }
+    cur.rows = cur.rows or {}
+    cur.rows[#cur.rows + 1] = row
+    if not cur.best and scan.target and w[2]:lower() == scan.target:lower() then cur.best = row end
   end
   touch()
 end
@@ -716,6 +784,119 @@ local function ordinal(n)
     suf = ({ [1] = "st", [2] = "nd", [3] = "rd" })[n % 10] or "th"
   end
   return n .. suf
+end
+
+---------------------------------------------------------------------
+-- saved metarank lists (v2.4): read on a schedule, looked up instantly
+---------------------------------------------------------------------
+
+local mcache = {}            -- day / week / year -> { stamp, at, lists = { [statkey] = {cat, limit, rows} } }
+local KIND_ORDER = { "day", "week", "year" }
+local REFRESH_RETRY = 600    -- a refresh that got nothing at all is tried again 10 minutes later
+local gRefreshTry = {}       -- kind -> os.time() of the last refresh attempt
+
+-- the latest 12:01am slot for a kind, as a stamp: day = its date, week = that
+-- Sunday's date, year = the year. A saved set with a different stamp is due.
+local function meta_due(kind, t)
+  local b = (t or os.time()) - 60   -- the switch is at 12:01am: step back a minute, then read the date
+  if kind == "year" then return os.date("%Y", b) end
+  if kind == "week" then
+    local d = os.date("*t", b)       -- wday 1 = Sunday
+    return os.date("%Y-%m-%d", os.time({ year = d.year, month = d.month,
+                                         day = d.day - (d.wday - 1), hour = 12 }))
+  end
+  return os.date("%Y-%m-%d", b)
+end
+
+local function meta_file()
+  -- GetPluginInfo 6 is the plugin's .xml FILE; keep the folder only
+  local f = GetPluginInfo(GetPluginID(), 6) or ""
+  return (f:match("^(.*[\\/])") or "") .. "RankTracker_meta.txt"
+end
+
+local function tabfree(x)
+  return (tostring(x or ""):gsub("[\t\r\n]", " "))
+end
+
+local function meta_save()
+  local out = { "# RankTracker saved metarank lists - rebuilt by the plugin, safe to delete" }
+  for _, kind in ipairs(KIND_ORDER) do
+    local e = mcache[kind]
+    if e then
+      out[#out + 1] = table.concat({ "K", kind, e.stamp or "", tostring(e.at or 0) }, "\t")
+      for _, key in ipairs(META_ORDER) do
+        local l = e.lists[key]
+        if l then
+          out[#out + 1] = table.concat({ "L", kind, key, tostring(l.limit or 500), tabfree(l.cat) }, "\t")
+          for _, r in ipairs(l.rows) do
+            out[#out + 1] = table.concat({ "R", kind, key, tostring(r.place or 0), tabfree(r.who),
+                                           tabfree(r.value), tabfree(r.date) }, "\t")
+          end
+        end
+      end
+    end
+  end
+  local path = meta_file()
+  local f = io.open(path .. ".tmp", "wb")
+  if not f then
+    cnote("@x045[@x099RankTracker@x045]@W Could not write @x048" .. path .. ".tmp")
+    return
+  end
+  f:write(table.concat(out, "\n"), "\n")
+  f:close()
+  os.remove(path)                    -- Windows rename will not replace an existing file
+  os.rename(path .. ".tmp", path)
+end
+
+local function meta_load()
+  local f = io.open(meta_file(), "rb")
+  if not f then return end
+  for line in f:lines() do
+    line = line:gsub("\r$", "")
+    local t = {}
+    for field in (line .. "\t"):gmatch("([^\t]*)\t") do t[#t + 1] = field end
+    local kind, key = t[2], t[3]
+    if t[1] == "K" and META_KINDS[kind] then
+      mcache[kind] = { stamp = (t[3] ~= "" and t[3] or nil), at = tonumber(t[4]) or 0, lists = {} }
+    elseif t[1] == "L" and mcache[kind] and STATS[key] then
+      mcache[kind].lists[key] = { limit = tonumber(t[4]) or 500, cat = t[5] or "", rows = {} }
+    elseif t[1] == "R" and mcache[kind] and mcache[kind].lists[key] then
+      local rows = mcache[kind].lists[key].rows
+      rows[#rows + 1] = { place = tonumber(t[4]), who = t[5] or "", value = t[6] or "", date = t[7] or "" }
+    end
+  end
+  f:close()
+end
+
+-- a finished metarank scan -> mcache. Returns how many lists came back.
+local function meta_store(s)
+  local kind = s.kindkey or "day"
+  local e = mcache[kind] or { lists = {} }
+  local got = 0
+  for _, c in ipairs(s.done) do
+    if c.key and c.cat then
+      e.lists[c.key] = { cat = c.cat, limit = c.limit, rows = c.rows or {} }
+      got = got + 1
+    end
+  end
+  if got == 0 then return 0 end
+  -- a scheduled read counts as done for this slot even if a category never answered;
+  -- a partial LIVE lookup does not, so the next tick still reads the full set
+  if s.refresh or got >= #META_ORDER then e.stamp = meta_due(kind) end
+  e.at = os.time()
+  mcache[kind] = e
+  meta_save()
+  return got
+end
+
+local function meta_has(kind)
+  local e = mcache[kind]
+  return e and next(e.lists) ~= nil
+end
+
+local function when(t)
+  if not t or t == 0 then return "never" end
+  return (os.date("%b %d %I:%M%p", t):gsub(" 0", " "))
 end
 
 local function report_meta(s)
@@ -744,7 +925,8 @@ local function report_meta(s)
     return
   end
 
-  cnote("@x045[@x099RankTracker@x045] @x099" .. who .. "@W - " .. s.kind.word .. " bests, from metarank:")
+  cnote("@x045[@x099RankTracker@x045] @x099" .. who .. "@W - " .. s.kind.word .. " bests, from metarank" ..
+        (s.from and (" @D(lists read " .. when(s.from) .. ")") or "") .. "@W:")
   for _, k in ipairs(META_ORDER) do
     local c, st = byk[k], STATS[k]
     if c and c.best then
@@ -933,7 +1115,22 @@ finish = function()
     if c.rank then s.hits[#s.hits + 1] = c end
   end
   scan, lastscan = nil, s
-  if s.meta then report_meta(s)
+  if s.meta then
+    local got = meta_store(s)
+    if s.refresh then
+      if got == 0 then
+        cnote("@x045[@x099RankTracker@x045]@W No " .. s.kind.word .. " metarank lists came back; trying again in " ..
+              (REFRESH_RETRY / 60) .. " minutes.")
+      else
+        cnote("@x045[@x099RankTracker@x045]@W Saved the " .. s.kind.word .. " metarank lists (@x048" ..
+              got .. "@W of " .. #META_ORDER .. ").")
+      end
+      -- you were AFK and the commands took you out of it: put it back once
+      if s.was_afk then DoAfterSpecial(3, "OnMetaAfkCheck()", 12) end
+      DoAfterSpecial(5, "OnMetaTick()", 12)   -- the next kind that is due, if any
+    else
+      report_meta(s)
+    end
   elseif s.multi then report_multi(s)
   elseif s.rt then report_rt(s)
   elseif s.top then report_top(s)
@@ -1006,13 +1203,82 @@ end
 
 -- metarank for every stat at once; replies are told apart by their "ranking type" title.
 -- kind = "day" / "year" / "week" (meta_kind)
+-- answer from the saved lists: no game commands at all
+local function meta_lookup(kindkey, chan, target)
+  local e = mcache[kindkey]
+  local s = { meta = true, kind = META_KINDS[kindkey], kindkey = kindkey, from = e.at,
+              chan = norm_chan(chan), target = norm_target(target), done = {} }
+  local tl = s.target:lower()
+  for _, key in ipairs(META_ORDER) do
+    local l = e.lists[key]
+    if l then
+      local c = { key = key, cat = l.cat, limit = l.limit }
+      for _, r in ipairs(l.rows) do
+        if r.who:lower() == tl then c.best = r; break end
+      end
+      s.done[#s.done + 1] = c
+    end
+  end
+  report_meta(s)
+end
+
+-- scheduled read of one kind's eight lists into the cache (no report)
+local function start_refresh(kindkey)
+  local k = META_KINDS[kindkey]
+  scan = { p = { label = "Metarank" }, meta = true, refresh = true, kind = k, kindkey = kindkey,
+           quiet = META_QUIET, target = "", was_afk = (gState == 4),
+           gen = 0, done = {}, hits = {} }
+  EnableTriggerGroup("meta", true)
+  for _, st in ipairs(META_ORDER) do
+    SendNoEcho("metarank " .. STATS[st].num .. k.flag)
+  end
+  scan.gen = scan.gen + 1
+  DoAfterSpecial(8, "OnRankStart(" .. scan.gen .. ")", 12)
+end
+
+-- GMCP states it is safe to send commands in: active, AFK, sleeping, resting
+local SAFE_STATE = { [3] = true, [4] = true, [9] = true, [11] = true }
+
+-- why a refresh would wait right now, or nil
+local function refresh_blocked()
+  if not IsConnected() then return "not connected" end
+  if scan then return "another lookup is running" end
+  if not gState then return "waiting for GMCP" end
+  if not SAFE_STATE[gState] then return "busy (fighting, in a note, the pager or running)" end
+  if gPK then return "in a PK room" end
+  return nil
+end
+
+-- 60s timer (and chained after each refresh): read the next kind that is due
+function OnMetaTick()
+  if refresh_blocked() then return end
+  local now = os.time()
+  for _, kind in ipairs(KIND_ORDER) do
+    local e = mcache[kind]
+    if not (e and e.stamp == meta_due(kind, now)) and now - (gRefreshTry[kind] or 0) >= REFRESH_RETRY then
+      gRefreshTry[kind] = now
+      start_refresh(kind)
+      return
+    end
+  end
+end
+
+function OnMetaAfkCheck()
+  if gState == 3 and IsConnected() then SendNoEcho("afk") end
+end
+
 local function start_meta(chan, target, kind)
+  local kk = meta_kind(kind)
+  if meta_has(kk) then
+    meta_lookup(kk, chan, target)
+    return "cached"
+  end
   if scan then
     cnote("@x045[@x099RankTracker@x045]@W A scan is already running, hang on.")
     return
   end
-  local k = META_KINDS[meta_kind(kind)]
-  scan = { p = { label = "Metarank" }, meta = true, kind = k, quiet = META_QUIET,
+  local k = META_KINDS[kk]
+  scan = { p = { label = "Metarank" }, meta = true, kind = k, kindkey = kk, quiet = META_QUIET,
            chan = norm_chan(chan), target = norm_target(target),
            gen = 0, done = {}, hits = {} }
   EnableTriggerGroup("meta", true)
@@ -1023,6 +1289,7 @@ local function start_meta(chan, target, kind)
   end
   scan.gen = scan.gen + 1
   DoAfterSpecial(8, "OnRankStart(" .. scan.gen .. ")", 12)
+  return "ok"
 end
 
 -- one stat in all four periods; replies are told apart by the period in their header
@@ -1076,9 +1343,48 @@ function RankTracker_Meta(arg)
   local who, kind = rest:match("^([^|]*)|(.*)$")
   if not who then who = rest end
   if who == "" then return "bad" end
-  if scan then return "busy" end
-  start_meta(chan, who, kind)
-  return "ok"
+  if not meta_has(meta_kind(kind)) and scan then return "busy" end
+  return start_meta(chan, who, kind)   -- "cached" (answered at once) or "ok" (live scan started)
+end
+
+-- For MadBot: "yes" when meta / metayear / metaweek would answer from the saved lists
+-- (nothing sent to the game, so no lag guards needed). kind = "" / "year" / "week".
+function RankTracker_MetaCached(kind)
+  return meta_has(meta_kind(kind)) and "yes" or "no"
+end
+
+-- metastatus
+function alias_metastatus(name, line, w)
+  cnote("@x045[@x099RankTracker@x045]@W Saved metarank lists @D(" .. meta_file() .. ")@W:")
+  local now = os.time()
+  for _, kind in ipairs(KIND_ORDER) do
+    local e, k = mcache[kind], META_KINDS[kind]
+    local n = 0
+    if e then for _ in pairs(e.lists) do n = n + 1 end end
+    local state = (e and e.stamp == meta_due(kind, now)) and "@x048up to date" or "@x099due, read at the next chance"
+    cnote(string.format("  @x045%-7s @Wread @x048%s@W, @x048%d@W of %d lists, %s", k.label, when(e and e.at), n,
+                        #META_ORDER, state))
+  end
+  cnote("  @DDaily at 12:01am, weekly Sunday 12:01am, yearly Jan 1 12:01am.")
+  local why = refresh_blocked()
+  if why and why ~= "another lookup is running" then cnote("  @DRight now a read would wait: " .. why .. ".") end
+end
+
+-- metarefresh [day|week|year]   (none = all three)
+function alias_metarefresh(name, line, w)
+  local a = (w[1] or ""):lower()
+  local kinds = (a == "" or a == "all") and KIND_ORDER or { meta_kind(a) }
+  for _, kind in ipairs(kinds) do
+    if mcache[kind] then mcache[kind].stamp = nil end
+    gRefreshTry[kind] = nil
+  end
+  local why = refresh_blocked()
+  if why then
+    cnote("@x045[@x099RankTracker@x045]@W Will read the lists as soon as possible (" .. why .. ").")
+  else
+    cnote("@x045[@x099RankTracker@x045]@W Reading the metarank lists again (gagged)...")
+  end
+  OnMetaTick()
 end
 
 -- <name> metarank / metayear / metaweek [channel]
@@ -1137,8 +1443,9 @@ function alias_debug(name, line, w)
     return
   end
   for _, c in ipairs(lastscan.done) do
-    local colname = c.cols[c.colidx or 0] or "?"
-    cnote("  @x045" .. c.cat .. "@W  columns: @x099" .. table.concat(c.cols, ", ") ..
+    local cols = c.cols or {}   -- metarank lists have no column table
+    local colname = cols[c.colidx or 0] or "?"
+    cnote("  @x045" .. (c.cat or "?") .. "@W  columns: @x099" .. table.concat(cols, ", ") ..
           "@W  total from: @x048" .. colname ..
           "@W  rank: @x099" .. (c.rank and ("#" .. c.rank) or "-"))
   end
@@ -1174,6 +1481,10 @@ function alias_help(name, line, w)
   cnote("  @D(meta works the same: @x048Ultimate meta gt@D. metarank 2 etc. still goes to the game)@w")
   cnote("  @x048metayear@x099 / @x048metaweek@w            best single year / week instead, same forms:")
   cnote("  @x048metayear spo@w  @x048Ultimate metaweek gt@w  @D(metarank <n> -y / -w)@w")
+  cnote("  @wThe lists are read once and kept, so these answer at once with no lag:")
+  cnote("  @wdaily at 12:01am, weekly Sunday 12:01am, yearly Jan 1 12:01am.")
+  cnote("  @x048metastatus@w                      when each set was last read")
+  cnote("  @x048metarefresh@w @D[day|week|year]@w     read them again now")
   cnote("")
   cnote("@x048Full scan@w, every category you place in:")
   cnote("  @x048yrank@x099 / @x048mrank@x099 / @x048wrank@x099 / @x048drank@w   yearly, monthly, weekly, daily")
@@ -1217,8 +1528,10 @@ function OnPluginInstall()
   EnableTriggerGroup("meta", false)
   cnote("@x045[@x099RankTracker@x045]@W v" .. VERSION ..
         " loaded. @x048rankhelp@W for the command list.")
-  -- installed mid-session: ask the game for char.base so we learn the character name
-  if (GetVariable("selfname") or "") == "" and IsConnected() then
+  meta_load()
+  -- installed mid-session: ask the game for char.* so we learn the name and the state
+  -- (the state gates the scheduled metarank reads)
+  if IsConnected() then
     SendPkt(string.char(255, 250, 201) .. "request char" .. string.char(255, 240))
   end
 end
