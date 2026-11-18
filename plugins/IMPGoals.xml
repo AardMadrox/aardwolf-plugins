@@ -1,0 +1,1132 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="IMPGoals"
+   author="Eric"
+   id="cbf0fe6b07deb1c303f28326"
+   language="Lua"
+   purpose="Set Instinct / Mastery / Potential goals and see what it costs to reach them"
+   date_written="2026-11-18"
+   requires="4.73"
+   version="1.3"
+   save_state="y"
+>
+</plugin>
+
+<!--
+IMPGoals - author Eric
+====================================================================
+WHAT IT DOES
+  imp config        silently runs instinct, mastery and potential (none of
+                    their output shows), then opens a scrolling window with
+                    every current level and a [goal] box next to each one.
+                    Click a box to type a goal; leave it blank to clear it.
+  impgoals          re-reads your levels silently and echoes what it costs
+                    to reach every goal you set.
+  impgoals <chan>   the same, as ONE line to say / reply / spo / gt / ft / clan.
+
+HOW THE COST IS WORKED OUT
+  From your CURRENT level up to the goal, at full table price. The QP, gold
+  and trains you already have banked are NOT taken off (Eric's rule): a goal
+  that costs 20,000 QP is reported as 20,000 even with 5,000 QP in hand.
+  Totals are one lump sum per currency across every goal:
+    QP     = potential + mastery      Trains = instinct
+    Gold   = instinct + mastery
+
+MAINTAINER NOTES
+  - v1.3: the cost tables are EMBEDDED at the end of this script, a verbatim
+    copy of IMPCostsCore.lua (Eric's private IMPCosts / MadBot share that
+    file), so this plugin stands alone for the public repo - mpm only
+    downloads the .xml. If a table ever changes, change it in BOTH places.
+    IMPGoals uses IMPCosts.cost(), .max(), .commas() and .plain().
+    Tables checked against live game output 2026-11-18: instinct 139->140 =
+    3,675 trains / 15.9M gold, potential 275->276 = 10,100 QP, mastery 3->4 =
+    160 QP / 2.75M gold.
+  - Silent reads use the package's wrapped_captures (Capture.untagged_output),
+    one command at a time, each started from the previous one's callback.
+  - Instinct rows marked "(Uses <other skill>)" share another skill's
+    instinct and are left out of the window (inferred from the game text,
+    not confirmed).
+  - Goals and the last levels read are kept per character in
+    IMPGoals_data.lua next to this plugin, not in MUSHclient variables (those
+    are lost on a manual reinstall).
+  - impgoals reload bounces ReloadPlugin through the world's script_prefix
+    (a plugin cannot reload itself); the banner shows VERSION after it.
+  - v1.1: blank window lines are one space - an empty styles table makes
+    TextRect throw (v1.0 crashed opening the window).
+  - v1.2: everything shows Instinct, Mastery, Potential in that order (Eric's
+    request); channel line, echo and window footer give each section's own
+    cost, then the total last.
+  - Window: themed_miniwindows ThemedTextWindow, MarketWatch/Partroxshit
+    pattern. Goal-box links run Lua; the input box is opened from a timer,
+    not from inside the click. Scroll is pinned to the top on first open
+    (links near the top die otherwise) and kept on redraws. Raised to
+    z-order 99999 so the layout's invisible drag bar cannot eat clicks.
+-->
+
+<aliases>
+  <alias match="^imp(?:goals)? +config$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_config"></alias>
+  <alias match="^impgoals$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_totals"></alias>
+  <alias match="^impgoals +(say|reply|spo|gt|ft|clan)$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_channel"></alias>
+  <alias match="^impgoals +clear$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_clear"></alias>
+  <alias match="^impgoals +reload$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_reload"></alias>
+  <alias match="^impgoals +help$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_help"></alias>
+  <alias match="^impgoals +(?:window|show)$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_window"></alias>
+</aliases>
+
+<script>
+<![CDATA[
+dofile (GetInfo (60) .. "aardwolf_colors.lua")
+local gHaveCapture = pcall (require, "wrapped_captures")
+local gHaveWin     = pcall (require, "themed_miniwindows")
+
+local VERSION   = "1.3"
+local DIR       = GetPluginInfo (GetPluginID (), 20)
+local DATA_FILE = DIR .. "IMPGoals_data.lua"
+
+-- set by the embedded cost tables at the very end of this script
+local core_ok, core_err = false, "cost tables not loaded"
+
+-- Eric's standard colours: hex for the window, @-codes for echoes.
+local CLR_TAG  = "#875FFF"   -- x099
+local CLR_NAME = "#00D7FF"   -- x045
+local CLR_MSG  = "#FFFFFF"   -- white
+local CLR_HI   = "#00FF87"   -- x048
+
+-- display order everywhere (window, echo, channel): Eric asked for I-M-P (v1.2)
+local KIND_ORDER = { "instinct", "mastery", "potential" }
+local KIND_TITLE = { potential = "Potential", instinct = "Instinct", mastery = "Mastery" }
+-- currencies each kind costs, in print order
+local KIND_CUR   = { potential = { "qp" }, instinct = { "trains", "gold" }, mastery = { "qp", "gold" } }
+local CUR_ORDER  = { "qp", "trains", "gold" }
+local CUR_LABEL  = { qp = "QP", trains = "trains", gold = "gold" }
+local CHAN_MAX   = 300       -- plain characters before a channel line falls back to counts
+
+-- ---------------------------------------------------------------- echoes
+function cnote (s)
+  AnsiNote (stylesToANSI (ColoursToStyles (s)))
+end
+
+local function tag (msg)
+  cnote ("@x099[@x045IMPGoals@x099]@W " .. msg)
+end
+
+local function commas (n)
+  if IMPCosts and IMPCosts.commas then return IMPCosts.commas (n) end
+  return tostring (n)
+end
+
+local function core_ready ()
+  if core_ok and IMPCosts and IMPCosts.cost and IMPCosts.max then return true end
+  tag ("@x099The built-in cost tables failed to load@W - IMPGoals cannot work out costs.")
+  if core_err then cnote ("  " .. tostring (core_err)) end
+  return false
+end
+
+-- ---------------------------------------------------------------- saved data
+-- gDB[charname] = { when = os.time(), levels = { {kind,name,level}, ... },
+--                   goals = { ["kind|lowername"] = n } }
+local gDB = {}
+
+local function char_name ()
+  local ok, n = pcall (gmcp, "char.base.name")
+  if ok and type (n) == "string" and n ~= "" then return n end
+  return "default"
+end
+
+local function me ()
+  local n = char_name ()
+  gDB [n] = gDB [n] or { when = 0, levels = {}, goals = {} }
+  local d = gDB [n]
+  d.levels = d.levels or {}
+  d.goals  = d.goals or {}
+  return d
+end
+
+local function goal_key (kind, name)
+  return kind .. "|" .. string.lower (name)
+end
+
+local function load_db ()
+  local f = loadfile (DATA_FILE)
+  if not f then return end
+  setfenv (f, {})
+  local ok, t = pcall (f)
+  if ok and type (t) == "table" then gDB = t end
+end
+
+local function save_db ()
+  local out = { "-- IMPGoals saved goals + last levels read. Written by the plugin.", "return {" }
+  for who, d in pairs (gDB) do
+    out [#out + 1] = string.format (" [%q] = {", who)
+    out [#out + 1] = string.format ("  when = %d,", tonumber (d.when) or 0)
+    out [#out + 1] = "  levels = {"
+    for _, r in ipairs (d.levels or {}) do
+      out [#out + 1] = string.format ("   { kind = %q, name = %q, level = %d },", r.kind, r.name, r.level)
+    end
+    out [#out + 1] = "  },"
+    out [#out + 1] = "  goals = {"
+    for k, v in pairs (d.goals or {}) do
+      out [#out + 1] = string.format ("   [%q] = %d,", k, v)
+    end
+    out [#out + 1] = "  },"
+    out [#out + 1] = " },"
+  end
+  out [#out + 1] = "}"
+  local tmp = DATA_FILE .. ".tmp"
+  local fh = io.open (tmp, "wb")
+  if not fh then tag ("@x099Could not save goals@W to " .. DATA_FILE) return end
+  fh:write (table.concat (out, "\r\n"), "\r\n")
+  fh:close ()
+  os.remove (DATA_FILE)
+  local ok = os.rename (tmp, DATA_FILE)
+  if not ok then tag ("@x099Could not save goals@W (rename failed).") end
+end
+
+-- ---------------------------------------------------------------- parsing
+local function trim (s) return (s:gsub ("^%s+", ""):gsub ("%s+$", "")) end
+local function num (s) return tonumber ((tostring (s or ""):gsub (",", ""))) end
+
+-- texts = { instinct = "...", mastery = "...", potential = "..." }
+function IMPGoals_Parse (texts)
+  local rows = {}
+
+  for line in (texts.potential or ""):gmatch ("[^\r\n]+") do
+    local p = line:match ("You have ([%d,]+) points? of potential")
+    if p then
+      rows [#rows + 1] = { kind = "potential", name = "Potential", level = num (p) }
+      break
+    end
+  end
+
+  for line in (texts.instinct or ""):gmatch ("[^\r\n]+") do
+    local body = line:gsub ("^%s*Level%s+%d+%s*:", "")
+    local name, sn, learned, inst = body:match ("^%s*(%a.-)%s+(%d+)%s+(%d+)%%%s+(%d+)%s")
+    if name and not line:find ("(Uses ", 1, true) then
+      rows [#rows + 1] = { kind = "instinct", name = trim (name), level = tonumber (inst) }
+    end
+  end
+
+  for line in (texts.mastery or ""):gmatch ("[^\r\n]+") do
+    local name, lvl = line:match ("^%s*(%a[%a ]-)%s+(%d+)%s+%S+%s+%S+%s*$")
+    if name then
+      rows [#rows + 1] = { kind = "mastery", name = trim (name), level = tonumber (lvl) }
+    end
+  end
+
+  local have = {}
+  for _, r in ipairs (rows) do have [r.kind] = true end
+  local missing = {}
+  for _, k in ipairs (KIND_ORDER) do
+    if not have [k] then missing [#missing + 1] = KIND_TITLE [k] end
+  end
+  return rows, missing
+end
+
+-- ---------------------------------------------------------------- cost maths
+-- Every goal above its current level, each costed from the current level.
+-- Banked QP / gold / trains are deliberately NOT subtracted.
+function IMPGoals_Compute (d)
+  local res = { items = {}, total = { qp = 0, trains = 0, gold = 0 }, count = {}, sub = {} }
+  for _, r in ipairs (d.levels or {}) do
+    local g = d.goals [goal_key (r.kind, r.name)]
+    if g then
+      local top = IMPCosts.max (r.kind) or g
+      if g > top then g = top end
+      if g > r.level then
+        local c = IMPCosts.cost (r.kind, r.level, g) or {}
+        res.items [#res.items + 1] = { row = r, goal = g, cost = c }
+        res.count [r.kind] = (res.count [r.kind] or 0) + 1
+        res.sub [r.kind] = res.sub [r.kind] or {}
+        for cur, v in pairs (c) do
+          res.total [cur] = (res.total [cur] or 0) + v
+          res.sub [r.kind] [cur] = (res.sub [r.kind] [cur] or 0) + v
+        end
+      end
+    end
+  end
+  return res
+end
+
+-- "12,345 QP, 1,000,000 gold" with colour codes
+local function cost_text (kind, c)
+  local parts = {}
+  for _, cur in ipairs (KIND_CUR [kind]) do
+    parts [#parts + 1] = "@x048" .. commas (c [cur] or 0) .. " @W" .. CUR_LABEL [cur]
+  end
+  return table.concat (parts, "@W, ")
+end
+
+local function total_text (t)
+  local parts = {}
+  for _, cur in ipairs (CUR_ORDER) do
+    if (t [cur] or 0) > 0 then
+      parts [#parts + 1] = "@x048" .. commas (t [cur]) .. " @W" .. CUR_LABEL [cur]
+    end
+  end
+  return table.concat (parts, "@W, ")
+end
+
+-- ---------------------------------------------------------------- silent reads
+local CMDS = { "instinct", "mastery", "potential" }
+local gBusy = false
+
+local function styles_text (lines)
+  local out = {}
+  for _, st in ipairs (lines or {}) do
+    local t = {}
+    for _, s in ipairs (st) do t [#t + 1] = s.text or "" end
+    out [#out + 1] = table.concat (t)
+  end
+  return table.concat (out, "\n")
+end
+
+-- Runs the three commands one after another with all output hidden, stores
+-- the levels, then calls on_done(true) or on_done(false, reason).
+local function read_all (on_done)
+  if not gHaveCapture then
+    on_done (false, "wrapped_captures.lua did not load - cannot read silently.")
+    return
+  end
+  if gBusy then
+    tag ("Still reading your levels - try again in a moment.")
+    return
+  end
+  gBusy = true
+  local texts = {}
+  local step
+  step = function (i)
+    local cmd = CMDS [i]
+    if not cmd then
+      gBusy = false
+      local rows, missing = IMPGoals_Parse (texts)
+      if #rows == 0 then
+        on_done (false, "Nothing recognised in the instinct / mastery / potential output.")
+        return
+      end
+      local d = me ()
+      d.levels = rows
+      d.when   = os.time ()
+      save_db ()
+      if #missing > 0 then
+        tag ("@x099Could not read@W " .. table.concat (missing, ", ") .. "@W - those rows are missing.")
+      end
+      on_done (true)
+      return
+    end
+    local ok, err = pcall (Capture.untagged_output, cmd,
+      true,    -- don't echo the command
+      true,    -- hide the output
+      true,    -- no prompt afterwards
+      function (lines)
+        texts [cmd] = styles_text (lines)
+        step (i + 1)
+      end,
+      false,
+      function ()
+        gBusy = false
+        on_done (false, "Timed out reading '" .. cmd .. "'.")
+      end,
+      10)
+    if not ok then
+      gBusy = false
+      on_done (false, "Capture failed: " .. tostring (err))
+    end
+  end
+  step (1)
+end
+
+-- ---------------------------------------------------------------- window
+local WIN_ID        = "IMPGoals_win"
+local WIN_FONT      = "Consolas"
+local WIN_FONT_SIZE = 12
+local WIN_MAX_W     = 1000
+local WIN_MAX_H     = 600
+local gWin          = nil
+
+local gColCache = {}
+local function col (hex)
+  if not gColCache [hex] then gColCache [hex] = ColourNameToRGB (hex) end
+  return gColCache [hex]
+end
+
+-- styles + hyperlinks for one line; link positions count visible text only
+local function win_line (segs)
+  local styles, links, pos = {}, {}, 1
+  for _, s in ipairs (segs) do
+    if s.text ~= "" then
+      styles [#styles + 1] = { text = s.text, textcolour = col (s.colour or CLR_MSG) }
+      if s.code then
+        links [#links + 1] = { start = pos, stop = pos + #s.text - 1, text = s.code, label = s.tip }
+      end
+      pos = pos + #s.text
+    end
+  end
+  return styles, links
+end
+
+local function cost_segs (kind, c)
+  local segs = {}
+  for i, cur in ipairs (KIND_CUR [kind]) do
+    if i > 1 then segs [#segs + 1] = { text = ", " } end
+    segs [#segs + 1] = { text = commas (c [cur] or 0), colour = CLR_HI }
+    segs [#segs + 1] = { text = " " .. CUR_LABEL [cur] }
+  end
+  return segs
+end
+
+function IMPGoals_WinOpen (keep_scroll)
+  if not gHaveWin or type (ThemedTextWindow) ~= "function" then
+    tag ("@x099themed_miniwindows did not load@W - no window possible. Use @x048impgoals@W instead.")
+    return false
+  end
+  if gWin and not (ThemedWindowClass and ThemedWindowClass.window_map
+                   and ThemedWindowClass.window_map [WIN_ID]) then
+    gWin = nil
+    pcall (WindowDelete, WIN_ID)
+  end
+  if not gWin then
+    local ok, w = pcall (ThemedTextWindow,
+      WIN_ID,
+      200, 100,          -- default left, top (it remembers where you drag it)
+      640, 400,          -- default size (fit_contents resizes it)
+      "IMPGoals",
+      "center",
+      true,              -- title-bar close button
+      false,             -- resizeable
+      true,              -- text scrolls (mouse wheel and scrollbar)
+      false, false, false,
+      true,              -- autowrap
+      WIN_FONT, WIN_FONT_SIZE,
+      WIN_FONT, WIN_FONT_SIZE,
+      300,
+      nil,
+      true,              -- draw before showing
+      false, nil,
+      "Close")
+    if not ok or not w then
+      tag ("@x099Window failed@W: " .. tostring (w))
+      return false
+    end
+    gWin = w
+    if gWin.textrect and gWin.textrect.font_bold then
+      gWin.textrect.font = gWin.textrect.font_bold
+    end
+    local prior = gWin.do_on_delete
+    gWin.do_on_delete = function (self)
+      if prior then prior (self) end
+      gWin = nil
+    end
+    gWin.bring_to_front = function (self) pcall (WindowSetZOrder, WIN_ID, 99999) end
+  end
+
+  local d = me ()
+  local keep = nil
+  if keep_scroll and gWin.textrect then keep = tonumber (gWin.textrect.display_start_line) end
+  gWin:clear (false)
+
+  local function add (segs)
+    local st, lk = win_line (segs)
+    -- a blank line must still be one style: TextRect (via ToMultilineStyles)
+    -- throws on an empty styles table (v1.0 crashed on its spacer lines)
+    if #st == 0 then st = { { text = " ", textcolour = col (CLR_MSG) } } end
+    gWin:add_text (st, false, lk)
+  end
+
+  add {
+    { text = "[", colour = CLR_TAG, code = "IMPGoals_Refresh()", tip = "Re-read your levels" },
+    { text = "Refresh", colour = CLR_HI, code = "IMPGoals_Refresh()", tip = "Re-read your levels" },
+    { text = "]", colour = CLR_TAG, code = "IMPGoals_Refresh()", tip = "Re-read your levels" },
+    { text = "  " },
+    { text = "[", colour = CLR_TAG, code = "IMPGoals_Echo()", tip = "Echo the costs to the output window" },
+    { text = "Echo totals", colour = CLR_HI, code = "IMPGoals_Echo()", tip = "Echo the costs to the output window" },
+    { text = "]", colour = CLR_TAG, code = "IMPGoals_Echo()", tip = "Echo the costs to the output window" },
+    { text = "   levels read " .. ((d.when or 0) > 0 and os.date ("%H:%M", d.when) or "never"), colour = CLR_NAME },
+  }
+  add { { text = "Click a [goal] box to set it. Leave it blank to clear it." } }
+
+  local wname = 4
+  for _, r in ipairs (d.levels) do wname = math.max (wname, #r.name) end
+  wname = wname + 2
+
+  local res = IMPGoals_Compute (d)
+  local by_key = {}
+  for _, it in ipairs (res.items) do by_key [goal_key (it.row.kind, it.row.name)] = it end
+
+  for _, kind in ipairs (KIND_ORDER) do
+    local first = true
+    for _, r in ipairs (d.levels) do
+      if r.kind == kind then
+        if first then
+          add { { text = "" } }
+          add {
+            { text = KIND_TITLE [kind], colour = CLR_TAG },
+            { text = string.rep (" ", math.max (1, wname + 2 - #KIND_TITLE [kind])) .. " Now   Goal     Cost to goal", colour = CLR_NAME },
+          }
+          first = false
+        end
+        local k    = goal_key (r.kind, r.name)
+        local goal = d.goals [k]
+        local top  = IMPCosts.max (r.kind) or 0
+        local segs = {
+          { text = "  " },
+          { text = r.name .. string.rep (" ", wname - #r.name) },
+          { text = string.format ("%4d", r.level), colour = CLR_NAME },
+          { text = "   " },
+        }
+        if r.level >= top then
+          segs [#segs + 1] = { text = "[  max]", colour = CLR_TAG }
+        else
+          local code = string.format ("IMPGoals_Edit(%q)", k)
+          local tip  = string.format ("Set a goal for %s (max %d)", r.name, top)
+          segs [#segs + 1] = { text = "[", colour = CLR_TAG, code = code, tip = tip }
+          segs [#segs + 1] = { text = goal and string.format ("%5d", goal) or "  set", colour = goal and CLR_HI or CLR_MSG, code = code, tip = tip }
+          segs [#segs + 1] = { text = "]", colour = CLR_TAG, code = code, tip = tip }
+        end
+        segs [#segs + 1] = { text = "  " }
+        local it = by_key [k]
+        if it then
+          for _, s in ipairs (cost_segs (kind, it.cost)) do segs [#segs + 1] = s end
+        elseif goal then
+          segs [#segs + 1] = { text = "reached", colour = CLR_HI }
+        end
+        add (segs)
+      end
+    end
+  end
+
+  add { { text = "" } }
+  if #res.items == 0 then
+    add { { text = "No goals set yet.", colour = CLR_NAME } }
+  else
+    for _, kind in ipairs (KIND_ORDER) do
+      if res.sub [kind] then
+        local segs = { { text = KIND_TITLE [kind] .. ": ", colour = CLR_TAG } }
+        for _, sg in ipairs (cost_segs (kind, res.sub [kind])) do segs [#segs + 1] = sg end
+        add (segs)
+      end
+    end
+    local segs = { { text = "Total: ", colour = CLR_NAME } }
+    local n = 0
+    for _, cur in ipairs (CUR_ORDER) do
+      if (res.total [cur] or 0) > 0 then
+        if n > 0 then segs [#segs + 1] = { text = ", " } end
+        segs [#segs + 1] = { text = commas (res.total [cur]), colour = CLR_HI }
+        segs [#segs + 1] = { text = " " .. CUR_LABEL [cur] }
+        n = n + 1
+      end
+    end
+    add (segs)
+    add { { text = "(banked QP / gold / trains not taken off)" } }
+  end
+
+  pcall (function () gWin:fit_contents (WIN_MAX_W, WIN_MAX_H) end)
+  pcall (function () gWin:set_scroll (keep or 1) end)
+  gWin:draw ()
+  gWin:show ()
+  pcall (WindowSetZOrder, WIN_ID, 99999)
+  pcall (Repaint)
+  return true
+end
+
+-- link click -> open the input box from a timer, outside the click callback
+function IMPGoals_Edit (k)
+  DoAfterSpecial (0.1, "IMPGoals_EditNow(" .. string.format ("%q", tostring (k)) .. ")", sendto.script)
+end
+
+function IMPGoals_EditNow (k)
+  local d = me ()
+  local row
+  for _, r in ipairs (d.levels) do
+    if goal_key (r.kind, r.name) == k then row = r break end
+  end
+  if not row then return end
+  local top = IMPCosts.max (row.kind) or 0
+  local cur = d.goals [k]
+  local label = row.kind == "potential" and "Potential" or (row.name .. " " .. string.lower (KIND_TITLE [row.kind]))
+  local s = utils.inputbox (string.format ("Goal for %s - now %d, max %d. Leave blank to clear.",
+                            label, row.level, top), "IMPGoals", cur and tostring (cur) or "")
+  if s == nil then return end            -- cancelled
+  s = trim (s):gsub (",", "")
+  if s == "" then
+    d.goals [k] = nil
+  else
+    local n = tonumber (s)
+    if not n or n < 0 or n ~= math.floor (n) then
+      tag ("@x099'" .. s .. "'@W is not a whole number - goal not changed.")
+      return
+    end
+    if n > top then
+      tag (label .. " only goes to @x048" .. top .. "@W - goal set to " .. top .. ".")
+      n = top
+    end
+    d.goals [k] = n
+  end
+  save_db ()
+  if gWin then IMPGoals_WinOpen (true) end
+end
+
+function IMPGoals_Refresh ()
+  read_all (function (ok, err)
+    if not ok then tag ("@x099" .. err) end
+    if gWin then IMPGoals_WinOpen (true) end
+  end)
+end
+
+-- ---------------------------------------------------------------- reports
+local function echo_totals ()
+  local d = me ()
+  if #d.levels == 0 then
+    tag ("No levels read yet - type @x048imp config@W first.")
+    return
+  end
+  local res = IMPGoals_Compute (d)
+  if #res.items == 0 then
+    tag ("No goals left to reach. Set some with @x048imp config@W.")
+    return
+  end
+  tag ("Cost to reach your goals @W(from your current levels; banked QP / gold / trains not taken off):")
+  for _, kind in ipairs (KIND_ORDER) do
+    if res.sub [kind] then
+      if kind == "potential" then
+        for _, it in ipairs (res.items) do
+          if it.row.kind == kind then
+            cnote (string.format ("  @x099Potential@W @x045%d@W -> @x048%d@W : %s",
+                   it.row.level, it.goal, cost_text (kind, it.cost)))
+          end
+        end
+      else
+        cnote ("  @x099" .. KIND_TITLE [kind] .. "@W: " .. cost_text (kind, res.sub [kind]))
+        for _, it in ipairs (res.items) do
+          if it.row.kind == kind then
+            cnote (string.format ("     @W%s @x045%d@W -> @x048%d@W : %s",
+                   it.row.name, it.row.level, it.goal, cost_text (kind, it.cost)))
+          end
+        end
+      end
+    end
+  end
+  cnote ("  @x045Total@W: " .. total_text (res.total))
+end
+
+function IMPGoals_Echo ()
+  echo_totals ()
+end
+
+-- One line for a channel, in Instinct, Mastery, Potential order: each
+-- section's goals and its own cost, then the total. If listing every goal
+-- runs past CHAN_MAX plain characters, sections show a count instead.
+--   [IMPGoals] Instinct (Dodge 139>140): 3,675 trains, 15,900,000 gold |
+--   Mastery (...): ... | Potential (275>300): 267,500 QP | Total: ...
+local function channel_line ()
+  local d = me ()
+  local res = IMPGoals_Compute (d)
+  if #res.items == 0 then return nil end
+
+  local function build (detailed)
+    local parts = {}
+    for _, kind in ipairs (KIND_ORDER) do
+      if res.sub [kind] then
+        local what = {}
+        for _, it in ipairs (res.items) do
+          if it.row.kind == kind then
+            local nm = kind == "potential" and "" or (it.row.name .. " ")
+            what [#what + 1] = "@W" .. nm .. "@x045" .. it.row.level .. "@W>@x048" .. it.goal
+          end
+        end
+        local inside
+        if detailed or kind == "potential" then
+          inside = table.concat (what, "@W, ")
+        else
+          local n = res.count [kind]
+          inside = "@x048" .. n .. "@W " .. (kind == "instinct" and "skill" or "type") .. (n > 1 and "s" or "")
+        end
+        parts [#parts + 1] = "@x045" .. KIND_TITLE [kind] .. " @W(" .. inside .. "@W): " ..
+                             cost_text (kind, res.sub [kind])
+      end
+    end
+    return "@x099[@x045IMPGoals@x099]@W " .. table.concat (parts, "@W | ") ..
+           "@W | @x045Total@W: " .. total_text (res.total) .. "@W"
+  end
+
+  local line = build (true)
+  if #IMPCosts.plain (line) > CHAN_MAX then line = build (false) end
+  return line
+end
+
+-- ---------------------------------------------------------------- aliases
+function impgoals_config (name, line, wc)
+  if not core_ready () then return end
+  tag ("Reading your instinct, mastery and potential...")
+  read_all (function (ok, err)
+    if not ok then
+      tag ("@x099" .. err)
+      if #me ().levels == 0 then return end
+      tag ("Showing the levels read last time.")
+    end
+    IMPGoals_WinOpen (false)
+  end)
+end
+
+function impgoals_window (name, line, wc)
+  if not core_ready () then return end
+  if #me ().levels == 0 then
+    tag ("No levels read yet - type @x048imp config@W first.")
+    return
+  end
+  IMPGoals_WinOpen (false)
+end
+
+function impgoals_totals (name, line, wc)
+  if not core_ready () then return end
+  read_all (function (ok, err)
+    if not ok then tag ("@x099" .. err .. "@W - using the levels read last time.") end
+    echo_totals ()
+    if gWin then IMPGoals_WinOpen (true) end
+  end)
+end
+
+function impgoals_channel (name, line, wc)
+  if not core_ready () then return end
+  local chan = string.lower (wc [1])
+  read_all (function (ok, err)
+    if not ok then tag ("@x099" .. err .. "@W - using the levels read last time.") end
+    if #me ().levels == 0 then
+      tag ("No levels read yet - type @x048imp config@W first.")
+      return
+    end
+    local msg = channel_line ()
+    if not msg then
+      tag ("No goals left to reach - nothing sent.")
+      return
+    end
+    Execute (chan .. " " .. msg)
+    if gWin then IMPGoals_WinOpen (true) end
+  end)
+end
+
+function impgoals_clear (name, line, wc)
+  local d = me ()
+  local n = 0
+  for _ in pairs (d.goals) do n = n + 1 end
+  d.goals = {}
+  save_db ()
+  tag ("Cleared @x048" .. n .. "@W goal" .. (n == 1 and "" or "s") .. ".")
+  if gWin and core_ok then IMPGoals_WinOpen (true) end
+end
+
+-- A plugin cannot ReloadPlugin itself from its own script space (the timer
+-- dies with it), so bounce through the world's script space - SnD's pattern.
+function impgoals_reload (name, line, wc)
+  tag ("Reloading...")
+  if gWin then pcall (function () gWin:delete () end) end
+  gWin = nil
+  pcall (WindowDelete, WIN_ID)
+  Execute (GetAlphaOption ("script_prefix") ..
+           'DoAfterSpecial(1, "ReloadPlugin(\'' .. GetPluginID () .. '\')", sendto.script)')
+end
+
+local HELP = {
+  { "imp config",         "read your levels silently and open the goals window" },
+  { "impgoals",           "echo what it costs to reach your goals" },
+  { "impgoals <channel>", "report it in one line: say reply spo gt ft clan" },
+  { "impgoals clear",     "remove all your goals" },
+  { "impgoals help",      "this help" },
+  { "impgoals reload",    "reload the plugin (your goals are kept)" },
+  { "impgoals window",    "reopen the window without re-reading" },
+}
+table.sort (HELP, function (a, b) return a [1] < b [1] end)
+
+function impgoals_help (name, line, wc)
+  cnote ("@x099[@x045IMPGoals@x099] @Wv" .. VERSION .. " @x099- Instinct / Mastery / Potential goals @W(author Eric)")
+  for _, h in ipairs (HELP) do
+    cnote (string.format ("  @x048%-20s@W %s", h [1], h [2]))
+  end
+  cnote ("  @x099Costs@W run from your current level to the goal. Banked QP / gold / trains are not taken off.")
+  cnote ("  @x099Window@W: click a @x099[@x048goal@x099]@W box to type a goal; leave it blank to clear it.")
+end
+
+load_db ()
+
+function OnPluginInstall ()
+  if core_ready () then
+    tag ("@x048v" .. VERSION .. "@W loaded. Type @x048imp config@W to set goals, @x048impgoals help@W for help.")
+  end
+end
+
+-- ====================================================================
+--  EMBEDDED COST TABLES - verbatim copy of IMPCostsCore.lua (v1.3).
+--  Defines IMPCosts in this plugin's own Lua state. Keep in step with
+--  the shared file if the game's costs ever change.
+-- ====================================================================
+core_ok, core_err = pcall (function ()
+-- ===========================================================================
+--  IMPCostsCore.lua            Author: Eric
+--  Shared cost tables + maths for Mastery / Potential / Instinct.
+--  Pure Lua 5.1: no MUSHclient calls in here, so the IMPCosts plugin AND
+--  MadBot can both dofile() it. Keep it in the same folder as the plugins.
+--
+--  Every table below is CUMULATIVE: DATA.mastery.qp[260] is the total QP to
+--  go from 0 to 260. The cost of a..b is cum[b] - cum[a] (cum[0] = 0).
+--
+--  If Potential and Instinct ever turn out to be the wrong way round, swap
+--  the two names in KINDS at the bottom of the DATA block - nothing else.
+-- ===========================================================================
+
+IMPCosts = IMPCosts or {}
+local M = IMPCosts
+
+local DATA = {
+ mastery = {
+  qp = {
+    100, 220, 360, 520, 700, 900, 1120, 1360, 1620, 1900, 2200, 2520, 2860, 3220, 3600, 4000,
+    4420, 4860, 5320, 5800, 6300, 6820, 7360, 7920, 8500, 9100, 9720, 10360, 11020, 11700,
+    12400, 13120, 13860, 14620, 15400, 16200, 17020, 17860, 18720, 19600, 20500, 21420, 22360,
+    23320, 24300, 25300, 26320, 27360, 28420, 29500, 30600, 31720, 32860, 34020, 35200, 36400,
+    37620, 38860, 40120, 41400, 42700, 44020, 45360, 46720, 48100, 49500, 50920, 52360, 53820,
+    55300, 56800, 58320, 59860, 61420, 63000, 64600, 66220, 67860, 69520, 71200, 72900, 74620,
+    76360, 78120, 79900, 81700, 83520, 85360, 87220, 89100, 91000, 92920, 94860, 96820, 98800,
+    100800, 102820, 104860, 106920, 109000, 111100, 113220, 115360, 117520, 119700, 121900,
+    124120, 126360, 128620, 130900, 133200, 135520, 137860, 140220, 142600, 145000, 147420,
+    149860, 152320, 154800, 157300, 159820, 162360, 164920, 167500, 170100, 172720, 175360,
+    178020, 180700, 183400, 186120, 188860, 191620, 194400, 197200, 200020, 202860, 205720,
+    208600, 211500, 214420, 217360, 220320, 223300, 226300, 229320, 232360, 235420, 238500,
+    241600, 244720, 247860, 251020, 254200, 257400, 260620, 263860, 267120, 270400, 273700,
+    277020, 280360, 283720, 287100, 290500, 293920, 297360, 300820, 304300, 307800, 311320,
+    314860, 318420, 322000, 325600, 329220, 332860, 336520, 340200, 343900, 347620, 351360,
+    355120, 358900, 362700, 366520, 370360, 374220, 378100, 382000, 385920, 389860, 393820,
+    397800, 401800, 405820, 409860, 413920, 418000, 422100, 426220, 430360, 434520, 438700,
+    442900, 447120, 451360, 455620, 459900, 464200, 468520, 472860, 477220, 481600, 486000,
+    490420, 494860, 499320, 503800, 508300, 512820, 517360, 521920, 526500, 531100, 535720,
+    540360, 545020, 549700, 554400, 559120, 563860, 568620, 573400, 578200, 583020, 587860,
+    592720, 597600, 602500, 607420, 612360, 617320, 622300, 627300, 632320, 637360, 642420,
+    647500, 652600, 657720, 662860, 668020, 673200, 678400, 683620, 688860, 694120, 699400,
+    704700, 710020, 715360, 720720, 726100, 731500, 736920, 742360, 747820, 753300, 758800,
+    764320, 769860, 775420, 781000, 786600, 792220, 797860, 803520, 809200, 814900, 820620,
+    826360, 832120, 837900, 843700, 849520, 855360, 861220, 867100, 873000, 878920, 884860,
+    890820, 896800, 902800, 908820, 914860, 920920, 927000, 933100, 939220, 945360, 951520,
+    957700, 963900, 970120, 976360, 982620, 988900, 995200, 1001520, 1007860, 1014220, 1020600,
+    1027000, 1033420, 1039860, 1046320, 1052800, 1059300, 1065820, 1072360, 1078920, 1085500,
+    1092100, 1098720, 1105360, 1112020, 1118700, 1125400, 1132120, 1138860, 1145620, 1152400,
+    1159200, 1166020, 1172860, 1179720, 1186600, 1193500, 1200420, 1207360, 1214320, 1221300,
+    1228300, 1235320, 1242360, 1249420, 1256500, 1263600, 1270720, 1277860, 1285020, 1292200,
+    1299400, 1306620, 1313860, 1321120, 1328400, 1335700, 1343020, 1350360, 1357720, 1365100,
+    1372500, 1379920, 1387360, 1394820, 1402300, 1409800, 1417320, 1424860, 1432420, 1440000,
+    1447600, 1455220, 1462860, 1470520, 1478200, 1485900, 1493620, 1501360, 1509120, 1516900,
+    1524700, 1532520, 1540360, 1548220, 1556100, 1564000, 1571920, 1579860, 1587820, 1595800,
+    1603800, 1611820, 1619860, 1627920, 1636000, 1644100, 1652220, 1660360, 1668520, 1676700,
+    1684900, 1693120, 1701360, 1709620, 1717900, 1726200, 1734520, 1742860, 1751220, 1759600,
+    1768000, 1776420, 1784860, 1793320, 1801800, 1810300, 1818820, 1827360, 1835920, 1844500,
+    1853100, 1861720, 1870360, 1879020, 1887700, 1896400, 1905120, 1913860, 1922620, 1931400,
+    1940200, 1949020, 1957860, 1966720, 1975600, 1984500, 1993420, 2002360, 2011320, 2020300,
+    2029300, 2038320, 2047360, 2056420, 2065500, 2074600, 2083720, 2092860, 2102020, 2111200,
+    2120400, 2129620, 2138860, 2148120, 2157400, 2166700, 2176020, 2185360, 2194720, 2204100,
+    2213500, 2222920, 2232360, 2241820, 2251300, 2260800, 2270320, 2279860, 2289420, 2299000,
+    2308600, 2318220, 2327860, 2337520, 2347200, 2356900, 2366620, 2376360, 2386120, 2395900,
+    2405700, 2415520, 2425360, 2435220, 2445100, 2455000, 2464920, 2474860, 2484820, 2494800,
+    2504800, 2514820, 2524860, 2534920, 2545000,
+  },
+  gold = {
+    2000000, 4250000, 6750000, 9500000, 12500000, 15750000, 19250000, 23000000, 27000000,
+    31250000, 35750000, 40500000, 45500000, 50750000, 56250000, 62000000, 68000000, 74250000,
+    80750000, 87500000, 94500000, 101750000, 109250000, 117000000, 125000000, 133250000,
+    141750000, 150500000, 159500000, 168750000, 178250000, 188000000, 198000000, 208250000,
+    218750000, 229500000, 240500000, 251750000, 263250000, 275000000, 287000000, 299250000,
+    311750000, 324500000, 337500000, 350750000, 364250000, 378000000, 392000000, 406250000,
+    420750000, 435500000, 450500000, 465750000, 481250000, 497000000, 513000000, 529250000,
+    545750000, 562500000, 579500000, 596750000, 614250000, 632000000, 650000000, 668250000,
+    686750000, 705500000, 724500000, 743750000, 763250000, 783000000, 803000000, 823250000,
+    843750000, 864500000, 885500000, 906750000, 928250000, 950000000, 972000000, 994250000,
+    1016750000, 1039500000, 1062500000, 1085750000, 1109250000, 1133000000, 1157000000,
+    1181250000, 1205750000, 1230500000, 1255500000, 1280750000, 1306250000, 1332000000,
+    1358000000, 1384250000, 1410750000, 1437500000, 1464500000, 1491750000, 1519250000,
+    1547000000, 1575000000, 1603250000, 1631750000, 1660500000, 1689500000, 1718750000,
+    1748250000, 1778000000, 1808000000, 1838250000, 1868750000, 1899500000, 1930500000,
+    1961750000, 1993250000, 2025000000, 2057000000, 2089250000, 2121750000, 2154500000,
+    2187500000, 2220750000, 2254250000, 2288000000, 2322000000, 2356250000, 2390750000,
+    2425500000, 2460500000, 2495750000, 2531250000, 2567000000, 2603000000, 2639250000,
+    2675750000, 2712500000, 2749500000, 2786750000, 2824250000, 2862000000, 2900000000,
+    2938250000, 2976750000, 3015500000, 3054500000, 3093750000, 3133250000, 3173000000,
+    3213000000, 3253250000, 3293750000, 3334500000, 3375500000, 3416750000, 3458250000,
+    3500000000, 3542000000, 3584250000, 3626750000, 3669500000, 3712500000, 3755750000,
+    3799250000, 3843000000, 3887000000, 3931250000, 3975750000, 4020500000, 4065500000,
+    4110750000, 4156250000, 4202000000, 4248000000, 4294250000, 4340750000, 4387500000,
+    4434500000, 4481750000, 4529250000, 4577000000, 4625000000, 4673250000, 4721750000,
+    4770500000, 4819500000, 4868750000, 4918250000, 4968000000, 5018000000, 5068250000,
+    5118750000, 5169500000, 5220500000, 5271750000, 5323250000, 5375000000, 5427000000,
+    5479250000, 5531750000, 5584500000, 5637500000, 5690750000, 5744250000, 5798000000,
+    5852000000, 5906250000, 5960750000, 6015500000, 6070500000, 6125750000, 6181250000,
+    6237000000, 6293000000, 6349250000, 6405750000, 6462500000, 6519500000, 6576750000,
+    6634250000, 6692000000, 6750000000, 6808250000, 6866750000, 6925500000, 6984500000,
+    7043750000, 7103250000, 7163000000, 7223000000, 7283250000, 7343750000, 7404500000,
+    7465500000, 7526750000, 7588250000, 7650000000, 7712000000, 7774250000, 7836750000,
+    7899500000, 7962500000, 8025750000, 8089250000, 8153000000, 8217000000, 8281250000,
+    8345750000, 8410500000, 8475500000, 8540750000, 8606250000, 8672000000, 8738000000,
+    8804250000, 8870750000, 8937500000, 9004500000, 9071750000, 9139250000, 9207000000,
+    9275000000, 9343250000, 9411750000, 9480500000, 9549500000, 9618750000, 9688250000,
+    9758000000, 9828000000, 9898250000, 9968750000, 10039500000, 10110500000, 10181750000,
+    10253250000, 10325000000, 10397000000, 10469250000, 10541750000, 10614500000, 10687500000,
+    10760750000, 10834250000, 10908000000, 10982000000, 11056250000, 11130750000, 11205500000,
+    11280500000, 11355750000, 11431250000, 11507000000, 11583000000, 11659250000, 11735750000,
+    11812500000, 11889500000, 11966750000, 12044250000, 12122000000, 12200000000, 12278250000,
+    12356750000, 12435500000, 12514500000, 12593750000, 12673250000, 12753000000, 12833000000,
+    12913250000, 12993750000, 13074500000, 13155500000, 13236750000, 13318250000, 13400000000,
+    13482000000, 13564250000, 13646750000, 13729500000, 13812500000, 13895750000, 13979250000,
+    14063000000, 14147000000, 14231250000, 14315750000, 14400500000, 14485500000, 14570750000,
+    14656250000, 14742000000, 14828000000, 14914250000, 15000750000, 15087500000, 15174500000,
+    15261750000, 15349250000, 15437000000, 15525000000, 15613250000, 15701750000, 15790500000,
+    15879500000, 15968750000, 16058250000, 16148000000, 16238000000, 16328250000, 16418750000,
+    16509500000, 16600500000, 16691750000, 16783250000, 16875000000, 16967000000, 17059250000,
+    17151750000, 17244500000, 17337500000, 17430750000, 17524250000, 17618000000, 17712000000,
+    17806250000, 17900750000, 17995500000, 18090500000, 18185750000, 18281250000, 18377000000,
+    18473000000, 18569250000, 18665750000, 18762500000, 18859500000, 18956750000, 19054250000,
+    19152000000, 19250000000, 19348250000, 19446750000, 19545500000, 19644500000, 19743750000,
+    19843250000, 19943000000, 20043000000, 20143250000, 20243750000, 20344500000, 20445500000,
+    20546750000, 20648250000, 20750000000, 20852000000, 20954250000, 21056750000, 21159500000,
+    21262500000, 21365750000, 21469250000, 21573000000, 21677000000, 21781250000, 21885750000,
+    21990500000, 22095500000, 22200750000, 22306250000, 22412000000, 22518000000, 22624250000,
+    22730750000, 22837500000, 22944500000, 23051750000, 23159250000, 23267000000, 23375000000,
+    23483250000, 23591750000, 23700500000, 23809500000, 23918750000, 24028250000, 24138000000,
+    24248000000, 24358250000, 24468750000, 24579500000, 24690500000, 24801750000, 24913250000,
+    25025000000, 25137000000, 25249250000, 25361750000, 25474500000, 25587500000, 25700750000,
+    25814250000, 25928000000, 26042000000, 26156250000, 26270750000, 26385500000, 26500500000,
+    26615750000, 26731250000, 26847000000, 26963000000, 27079250000, 27195750000, 27312500000,
+    27429500000, 27546750000, 27664250000, 27782000000, 27900000000, 28018250000, 28136750000,
+    28255500000, 28374500000, 28493750000, 28613250000, 28733000000, 28853000000, 28973250000,
+    29093750000, 29214500000, 29335500000, 29456750000, 29578250000, 29700000000, 29822000000,
+    29944250000, 30066750000, 30189500000, 30312500000, 30435750000, 30559250000, 30683000000,
+    30807000000, 30931250000, 31055750000, 31180500000, 31305500000, 31430750000, 31556250000,
+    31682000000, 31808000000, 31934250000, 32060750000, 32187500000,
+  },
+ },
+ potential = {
+  qp = {
+    100, 225, 375, 550, 750, 975, 1225, 1500, 1800, 2125, 2475, 2850, 3250, 3675, 4125, 4600,
+    5100, 5625, 6175, 6750, 7350, 7975, 8625, 9300, 10000, 10725, 11475, 12250, 13050, 13875,
+    14725, 15600, 16500, 17425, 18375, 19350, 20350, 21375, 22425, 23500, 24600, 25725, 26875,
+    28050, 29250, 30475, 31725, 33000, 34300, 35625, 36975, 38350, 39750, 41175, 42625, 44100,
+    45600, 47125, 48675, 50250, 51850, 53475, 55125, 56800, 58500, 60225, 61975, 63750, 65550,
+    67375, 69225, 71100, 73000, 74925, 76875, 78850, 80850, 82875, 84925, 87000, 89100, 91225,
+    93375, 95550, 97750, 99975, 102225, 104500, 106800, 109125, 111475, 113850, 116250, 118675,
+    121125, 123600, 126100, 128625, 131175, 133750, 136350, 138975, 141625, 144300, 147000,
+    149725, 152475, 155250, 158050, 160875, 163725, 166600, 169500, 172425, 175375, 178350,
+    181350, 184375, 187425, 190500, 193600, 196725, 199875, 203050, 206250, 209475, 212725,
+    216000, 219300, 222625, 225975, 229350, 232750, 236175, 239625, 243100, 246600, 250125,
+    253675, 257250, 260850, 264475, 268125, 271800, 275500, 279225, 282975, 286750, 290550,
+    294375, 298225, 302125, 306075, 310075, 314125, 318225, 322375, 326575, 330825, 335125,
+    339475, 343875, 348325, 352825, 357375, 361975, 366625, 371325, 376075, 380875, 385725,
+    390625, 395575, 400575, 405625, 410725, 415875, 421075, 426325, 431625, 436975, 442375,
+    447825, 453325, 458875, 464475, 470125, 475825, 481575, 487375, 493225, 499125, 505075,
+    511075, 517125, 523225, 529375, 535575, 541825, 548125, 554475, 560875, 567325, 573825,
+    580375, 586975, 593625, 600325, 607075, 613875, 620725, 627625, 634575, 641575, 648625,
+    655725, 662875, 670075, 677325, 684625, 691975, 699375, 706825, 714325, 721875, 729475,
+    737125, 744825, 752575, 760375, 768225, 776125, 784075, 792075, 800125, 808225, 816375,
+    824575, 832825, 841125, 849475, 857875, 866325, 874825, 883375, 891975, 900625, 909325,
+    918075, 926875, 935725, 944625, 953575, 962575, 971625, 980725, 989875, 999075, 1008325,
+    1017625, 1026975, 1036375, 1045825, 1055325, 1064875, 1074475, 1084125, 1093825, 1103575,
+    1113375, 1123225, 1133125, 1143075, 1153075, 1163125, 1173225, 1183375, 1193575, 1203825,
+    1214125, 1224475, 1234875, 1245325, 1255825, 1266375, 1276975, 1287625, 1298325, 1309075,
+    1319875, 1330725, 1341625, 1352575, 1363575, 1374625, 1385725, 1396875, 1408075, 1419325,
+    1430625, 1441975, 1453375, 1464825, 1476325, 1487875, 1499475, 1511125, 1522825, 1534575,
+    1546375, 1558225, 1570125, 1582075, 1594075, 1606125, 1618225, 1630375, 1642575, 1654825,
+    1667125, 1679475, 1691875, 1704325, 1716825, 1729375, 1741975, 1754625, 1767325, 1780075,
+    1792875, 1805725, 1818625, 1831575, 1844575, 1857625, 1870725, 1883875, 1897075, 1910325,
+    1923625, 1936975, 1950375, 1963825, 1977325, 1990875, 2004475, 2018125, 2031825, 2045575,
+    2059375, 2073225, 2087125, 2101075, 2115075, 2129125, 2143225, 2157375, 2171575, 2185825,
+    2200125, 2214475, 2228875, 2243325, 2257825, 2272375, 2286975, 2301625, 2316325, 2331075,
+    2345875, 2360725, 2375625, 2390575, 2405575, 2420625, 2435725, 2450875, 2466075, 2481325,
+    2496625, 2511975, 2527375, 2542825, 2558325, 2573875, 2589475, 2605125, 2620825, 2636575,
+    2652375, 2668225, 2684125, 2700075, 2716075, 2732125, 2748225, 2764375, 2780575, 2796825,
+    2813125, 2829475, 2845875, 2862325, 2878825, 2895375, 2911975, 2928625, 2945325, 2962075,
+    2978875, 2995725, 3012625, 3029575, 3046575, 3063625, 3080725, 3097875, 3115075, 3132325,
+    3149625, 3166975, 3184375, 3201825, 3219325, 3236875, 3254475, 3272125, 3289825, 3307575,
+    3325375, 3343225, 3361125, 3379075, 3397075, 3415125, 3433225, 3451375, 3469575, 3487825,
+    3506125, 3524475, 3542875, 3561325, 3579825, 3598375, 3616975, 3635625, 3654325, 3673075,
+    3691875,
+  },
+ },
+ instinct = {
+  trains = {
+    200, 425, 675, 950, 1250, 1575, 1925, 2300, 2700, 3125, 3575, 4050, 4550, 5075, 5625, 6200,
+    6800, 7425, 8075, 8750, 9450, 10175, 10925, 11700, 12500, 13325, 14175, 15050, 15950, 16875,
+    17825, 18800, 19800, 20825, 21875, 22950, 24050, 25175, 26325, 27500, 28700, 29925, 31175,
+    32450, 33750, 35075, 36425, 37800, 39200, 40625, 42075, 43550, 45050, 46575, 48125, 49700,
+    51300, 52925, 54575, 56250, 57950, 59675, 61425, 63200, 65000, 66825, 68675, 70550, 72450,
+    74375, 76325, 78300, 80300, 82325, 84375, 86450, 88550, 90675, 92825, 95000, 97200, 99425,
+    101675, 103950, 106250, 108575, 110925, 113300, 115700, 118125, 120575, 123050, 125550,
+    128075, 130625, 133200, 135800, 138425, 141075, 143750, 146450, 149175, 151925, 154700,
+    157500, 160325, 163175, 166050, 168950, 171875, 174825, 177800, 180800, 183825, 186875,
+    189950, 193050, 196175, 199325, 202500, 205700, 208925, 212175, 215450, 218750, 222075,
+    225425, 228800, 232200, 235625, 239075, 242550, 246050, 249575, 253125, 256700, 260300,
+    263925, 267575, 271250, 274950, 278675, 282425, 286200, 290000, 293825, 297675, 301550,
+    305450, 309375, 313325, 317300, 321300, 325325, 329375, 333450, 337550, 341675, 345825,
+    350000, 354200, 358425, 362675, 366950, 371250, 375575, 379925, 384300, 388700, 393125,
+    397575, 402050, 406550, 411075, 415625, 420200, 424800, 429425, 434075, 438750, 443450,
+    448175, 452925, 457700, 462500, 467325, 472175, 477050, 481950, 486875, 491825, 496800,
+    501800, 506825, 511875, 516950, 522050, 527175, 532325, 537500,
+  },
+  gold = {
+    2000000, 4100000, 6300000, 8600000, 11000000, 13500000, 16100000, 18800000, 21600000,
+    24500000, 27500000, 30600000, 33800000, 37100000, 40500000, 44000000, 47600000, 51300000,
+    55100000, 59000000, 63000000, 67100000, 71300000, 75600000, 80000000, 84500000, 89100000,
+    93800000, 98600000, 103500000, 108500000, 113600000, 118800000, 124100000, 129500000,
+    135000000, 140600000, 146300000, 152100000, 158000000, 164000000, 170100000, 176300000,
+    182600000, 189000000, 195500000, 202100000, 208800000, 215600000, 222500000, 229500000,
+    236600000, 243800000, 251100000, 258500000, 266000000, 273600000, 281300000, 289100000,
+    297000000, 305000000, 313100000, 321300000, 329600000, 338000000, 346500000, 355100000,
+    363800000, 372600000, 381500000, 390500000, 399600000, 408800000, 418100000, 427500000,
+    437000000, 446600000, 456300000, 466100000, 476000000, 486000000, 496100000, 506300000,
+    516600000, 527000000, 537500000, 548100000, 558800000, 569600000, 580500000, 591500000,
+    602600000, 613800000, 625100000, 636500000, 648000000, 659600000, 671300000, 683100000,
+    695000000, 707000000, 719100000, 731300000, 743600000, 756000000, 768500000, 781100000,
+    793800000, 806600000, 819500000, 832500000, 845600000, 858800000, 872100000, 885500000,
+    899000000, 912600000, 926300000, 940100000, 954000000, 968000000, 982100000, 996300000,
+    1010600000, 1025000000, 1039500000, 1054100000, 1068800000, 1083600000, 1098500000,
+    1113500000, 1128600000, 1143800000, 1159100000, 1174500000, 1190000000, 1205600000,
+    1221300000, 1237100000, 1253000000, 1269000000, 1285100000, 1301300000, 1317600000,
+    1334000000, 1350500000, 1367100000, 1383800000, 1400600000, 1417500000, 1434500000,
+    1451600000, 1468800000, 1486100000, 1503500000, 1521000000, 1538600000, 1556300000,
+    1574100000, 1592000000, 1610000000, 1628100000, 1646300000, 1664600000, 1683000000,
+    1701500000, 1720100000, 1738800000, 1757600000, 1776500000, 1795500000, 1814600000,
+    1833800000, 1853100000, 1872500000, 1892000000, 1911600000, 1931300000, 1951100000,
+    1971000000, 1991000000, 2011100000, 2031300000, 2051600000, 2072000000, 2092500000,
+    2113100000, 2133800000, 2154600000, 2175500000, 2196500000, 2217600000, 2238800000,
+    2260100000, 2281500000, 2303000000, 2324600000, 2346300000, 2368100000, 2390000000,
+  },
+ },
+}
+
+
+-- Which table feeds which command, what it costs, and the top level.
+-- cost = list of { data-field, label shown } in the order they are printed.
+local KINDS = {
+  mastery   = { title = "Mastery",   data = DATA.mastery,
+                cost = { { "qp", "QPs" }, { "gold", "Gold" } } },
+  potential = { title = "Potential", data = DATA.potential,
+                cost = { { "qp", "QPs" } } },
+  instinct  = { title = "Instinct",  data = DATA.instinct,
+                cost = { { "trains", "Trains" }, { "gold", "Gold" } } },
+}
+for _, k in pairs(KINDS) do k.max = #k.data[k.cost[1][1]] end
+
+-- Mastery level -> % more damage (from the in-game table). Anything between
+-- the listed points is a straight-line interpolation; 0 mastery = 0%.
+local PCT_POINTS = {
+  { 0, 0 }, { 16, 5 }, { 37, 10 }, { 65, 15 }, { 104, 20 },
+  { 163, 25 }, { 260, 30 }, { 455, 35 }, { 1039, 40 },
+}
+
+function M.mastery_pct(level)
+  local last = PCT_POINTS[#PCT_POINTS]
+  if level >= last[1] then return last[2] end
+  for i = 2, #PCT_POINTS do
+    local lo, hi = PCT_POINTS[i - 1], PCT_POINTS[i]
+    if level <= hi[1] then
+      return lo[2] + (hi[2] - lo[2]) * (level - lo[1]) / (hi[1] - lo[1])
+    end
+  end
+  return last[2]
+end
+
+-- 12345678 -> "12,345,678"
+function M.commas(n)
+  local s = tostring(math.floor(n + 0.5))
+  local out = s
+  while true do
+    local r, k = out:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
+    out = r
+    if k == 0 then break end
+  end
+  return out
+end
+
+-- 12.5 -> "12.5", 30 -> "30", 7.04 -> "7"
+local function pct_text(p)
+  local s = string.format("%.1f", p)
+  s = s:gsub("%.0$", "")
+  return s .. "%"
+end
+
+function M.kind_ok(kind)
+  return KINDS[string.lower(kind or "")] ~= nil
+end
+
+-- Returns the coloured result line, or nil + a plain error message.
+--   kind  "mastery" | "potential" | "instinct" (any case)
+--   a, b  levels. b == nil means "0 to a".
+-- Colours: @x099 yellow, @x045 cyan, @W white, @x048 green.
+function M.build(kind, a, b)
+  local k = KINDS[string.lower(kind or "")]
+  if not k then return nil, "Unknown type '" .. tostring(kind) .. "'." end
+  a = tonumber(a)
+  b = tonumber(b)
+  if not a then return nil, "Give me a level, e.g. " .. string.lower(k.title) .. " 0 100" end
+  if not b then a, b = 0, a end
+  if a > b then a, b = b, a end
+  if b > k.max then
+    return nil, k.title .. " only goes to " .. k.max .. " (you asked for " .. b .. ")."
+  end
+  if a == b then
+    return nil, "Those levels are the same - nothing to cost."
+  end
+
+  local parts = {}
+  for _, c in ipairs(k.cost) do
+    local cum = k.data[c[1]]
+    local hi = cum[b]
+    local lo = (a > 0) and cum[a] or 0
+    parts[#parts + 1] = "@x048" .. M.commas(hi - lo) .. " @W" .. c[2]
+  end
+
+  local msg = "@x099" .. k.title .. " Costs: @W(From @x045" .. a .. "@W to @x045" .. b .. "@W) "
+  if k == KINDS.mastery then
+    msg = msg .. "[@x048" .. pct_text(M.mastery_pct(a)) .. "@W to @x048" ..
+          pct_text(M.mastery_pct(b)) .. "@W] "
+  end
+  return msg .. table.concat(parts, " @x099and ")
+end
+
+-- Top level of a kind (mastery 500, potential 450, instinct 200), or nil.
+-- Added for IMPGoals (2026-11-18).
+function M.max(kind)
+  local k = KINDS[string.lower(kind or "")]
+  return k and k.max
+end
+
+-- Raw numbers for going from level a to level b, e.g.
+--   M.cost("instinct", 139, 150) -> { trains = 41525, gold = 176000000 }
+-- Only the currencies that kind uses are present. b is capped at the top
+-- level; b <= a gives zeros. Nil for an unknown kind. Added for IMPGoals.
+function M.cost(kind, a, b)
+  local k = KINDS[string.lower(kind or "")]
+  a, b = tonumber(a), tonumber(b)
+  if not k or not a or not b then return nil end
+  a = math.max(0, math.floor(a))
+  b = math.min(k.max, math.floor(b))
+  local out = {}
+  for _, c in ipairs(k.cost) do
+    local cum = k.data[c[1]]
+    if b <= a then
+      out[c[1]] = 0
+    else
+      out[c[1]] = cum[b] - ((a > 0) and cum[a] or 0)
+    end
+  end
+  return out
+end
+
+-- Same line with the colour codes stripped (handy for testing / logs).
+function M.plain(s)
+  return (s:gsub("@x%d%d%d", ""):gsub("@%a", ""))
+end
+
+return M
+end)
+if core_ok and not (IMPCosts and IMPCosts.cost and IMPCosts.max) then
+  core_ok, core_err = false, "IMPCosts.cost / IMPCosts.max missing"
+end
+]]>
+</script>
+</muclient>
