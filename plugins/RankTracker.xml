@@ -8,6 +8,13 @@
 
   yrank / mrank / drank / wrank are the game's own commands; the plugin leaves them alone.
 
+  top [d|w|m|y] [channel [name]]
+        -> every stat where you (or name) are in the TOP 10 for that period,
+           with your place and total. No period = daily.
+             top              your daily top 10s, echoed to you
+             top week spo     your weekly top 10s, one line to spo
+             top m - Ultimate Ultimate's monthly top 10s, echoed to you
+
   pupreport / qpreport / cpreport / gqreport / questreport / killreport /
   deathreport / levelreport   [top] [d|w|m|y] [channel [name]]
         (puprank / qprank / cprank ... work exactly the same, v2.6)
@@ -58,7 +65,7 @@
    save_state="y"
    date_written="2026-10-17"
    requires="4.00"
-   version="2.7"
+   version="2.8"
    >
 </plugin>
 
@@ -73,6 +80,7 @@
     line to a channel. Plus the metarank bests (META CACHE).
 
   COMMANDS
+    top [d|w|m|y] [chan [name]]      every stat you are top 10 in (v2.8)
     <stat>report [top] [d|w|m|y] [chan [name]]
                                      by stat name (pup qp cp gq quest kill
                                      death level); no period = all four;
@@ -126,6 +134,14 @@
   unchanged. The internal names (RT, "tdrt" keys passed to start_top) are
   only internal. MadBot's "madbot top" uses RankTracker_Top("<d|w|m|y>|<n>|
   <chan>") instead of Executing the old tdrt alias.
+
+  TOP (v2.8, 2026-11-19)
+    "top [period] [chan [name]]" sends that period's rank command for all
+    eight STATS at once (META_ORDER), the normal scan engine finds the
+    player in each list (TOP_N), and report_tops keeps only places 1-10
+    (TOPS_N). Replies are matched to a stat by title with meta_stat. On a
+    channel it sends only when there is at least one top 10, otherwise it
+    echoes locally (same rule as the stat commands).
 
   STAT COMMANDS (added v1.6, 2026-11-14)
     STATS maps each <stat>report word to a category number. Only 16 =
@@ -197,6 +213,16 @@
 
 <!--  Aliases  -->
 <aliases>
+
+  <!-- top [d|w|m|y] [channel [name]] : every stat you are in the top 10 for (v2.8) -->
+  <alias
+   match="^top(?:\s+(.+?))?\s*$"
+   enabled="y"
+   regexp="y"
+   script="alias_tops"
+   sequence="100"
+   ignore_case="y"
+  ></alias>
 
   <!-- friendly per-stat commands: pupreport, qpreport, cpreport ... (table STATS in the script);
        puprank, qprank ... are the same commands (v2.6) -->
@@ -453,7 +479,7 @@ local PORDER = {
   { key = "yearly",  cmd = "yrank", label = "Yearly"  },
 }
 
-local VERSION  = "2.7"   -- keep in step with version= in the plugin tag above
+local VERSION  = "2.8"   -- keep in step with version= in the plugin tag above
 local TOP_N = 100
 local QUIET = 1.0                            -- seconds of silence = scan finished
 
@@ -1025,6 +1051,43 @@ local function report_multi(s)
   end
 end
 
+-- "top": every stat the player is top 10 in, for one period (v2.8)
+local TOPS_N = 10
+local function report_tops(s)
+  local label = s.p.label
+  local hits, who = {}, s.target
+  for i, c in ipairs(s.done) do
+    if c.rank and c.rank <= TOPS_N then
+      hits[#hits + 1] = { key = meta_stat(c.cat, i), rank = c.rank, total = c.total or "?" }
+      who = c.who or who
+    end
+  end
+  -- show them in the usual stat order
+  local pos = {}
+  for i, k in ipairs(META_ORDER) do pos[k] = i end
+  table.sort(hits, function(a, b) return (pos[a.key] or 99) < (pos[b.key] or 99) end)
+
+  if #hits == 0 then
+    cnote("@x045[@x099RankTracker@x045] @x099" .. who .. "@W is not in the " .. label:lower() ..
+          " top " .. TOPS_N .. " for any stat" .. (#s.done == 0 and " (no lists came back)" or "") .. ".")
+    if s.chan then cnote("  @D(so nothing was sent to " .. s.chan .. ")") end
+    return
+  end
+  if s.chan then
+    local parts = {}
+    for _, h in ipairs(hits) do
+      parts[#parts + 1] = string.format("@x045%s @x099#%d @x048%s", STATS[h.key].short, h.rank, h.total)
+    end
+    Execute(s.chan .. " @x045" .. who .. "@W " .. label:lower() .. " top " .. TOPS_N .. "s: " ..
+            table.concat(parts, "@W, ") .. "@w")
+    return
+  end
+  cnote("@x045[@x099RankTracker@x045] @x099" .. who .. "@W - " .. label:lower() .. " top " .. TOPS_N .. "s:")
+  for _, h in ipairs(hits) do
+    cnote(string.format("  @x045%-13s @x099#%-3d @x048%s", STATS[h.key].label, h.rank, h.total))
+  end
+end
+
 finish = function()
   EnableTriggerGroup("scan", false)
   EnableTriggerGroup("meta", false)
@@ -1052,6 +1115,7 @@ finish = function()
   elseif s.multi then report_multi(s)
   elseif s.rt then report_rt(s)
   elseif s.top then report_top(s)
+  elseif s.tops then report_tops(s)
   end
   -- friendly stat commands: flag a category number that is not the stat it claims to be
   if s.stat and s.done[1] and not stat_ok(s.stat, s.done[1].cat) then
@@ -1228,9 +1292,42 @@ local function start_multi(stat, chan, target)
   DoAfterSpecial(6, "OnRankStart(" .. scan.gen .. ")", 12)
 end
 
+-- "top": one period's rank list for all eight stats at once
+local function start_tops(cmd, chan, target)
+  if scan then
+    cnote("@x045[@x099RankTracker@x045]@W A scan is already running, hang on.")
+    return
+  end
+  scan = { p = PERIODS[cmd], tops = true, chan = norm_chan(chan), target = norm_target(target),
+           gen = 0, done = {}, hits = {} }
+  EnableTriggerGroup("scan", true)
+  cnote("@x045[@x099RankTracker@x045]@W Checking " .. scan.p.label:lower() .. " top " .. TOPS_N ..
+        "s for @x099" .. scan.target .. "@W (lists gagged)...")
+  for _, k in ipairs(META_ORDER) do
+    Send(cmd .. " " .. STATS[k].num)
+  end
+  scan.gen = scan.gen + 1
+  DoAfterSpecial(6, "OnRankStart(" .. scan.gen .. ")", 12)
+end
+
 ---------------------------------------------------------------------
 -- aliases
 ---------------------------------------------------------------------
+
+-- top [d|w|m|y] [channel [name]]
+function alias_tops(name, line, w)
+  local t = {}
+  for tok in (w[1] or ""):gmatch("%S+") do t[#t + 1] = tok end
+  local i, rtkey = 1, "drt"
+  if t[i] and PERIOD_WORDS[t[i]:lower()] then rtkey = PERIOD_WORDS[t[i]:lower()]; i = i + 1 end
+  local chan, target, extra = t[i], t[i + 1], t[i + 2]
+  if extra or (chan and not (chan == "-" or chan:match("^[A-Za-z]"))) then
+    cnote("@x045[@x099RankTracker@x045]@W Usage: @x048top @W[@x048d@W|@x048w@W|@x048m@W|@x048y@W] [channel [name]]" ..
+          "  @D(e.g. top, top week spo, top m - Ultimate)")
+    return
+  end
+  start_tops(RT[rtkey], chan, target)
+end
 
 -- For MadBot ("madbot top pups week"): CallPlugin(id, "RankTracker_Top", "<d|w|m|y>|<n>|<chan>").
 -- <chan> may be two words ("tell Bob"). Returns "ok", "busy" (a lookup is running) or "bad".
@@ -1370,6 +1467,11 @@ function alias_help(name, line, w)
   cnote("  @wFinds you, or anyone, in Aardwolf's yearly, monthly, weekly and")
   cnote("  @wdaily top " .. TOP_N .. " rankings. Looking up: @x048" .. who ..
         "@w  @D(rankname to change)@w")
+  cnote("")
+  cnote("@x048Top 10s@w, every stat you are in the top 10 for:")
+  cnote("  @x048top@w                             today  @D(top week / top month / top year, or d/w/m/y)@w")
+  cnote("  @x048top week spo@w                    one line to spo")
+  cnote("  @x048top m - Ultimate@w                someone else, echoed only to you")
   cnote("")
   cnote("@x048By stat@w, your daily, weekly, monthly and yearly in one go:")
   local names = {}
