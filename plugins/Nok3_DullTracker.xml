@@ -14,7 +14,7 @@
    purpose="Aardwolf Character Development Tracking (Rewrite of SharpTracker)"
    save_state="y"   
    requires="4.70"
-   version="3.1"
+   version="3.2"
    >
 <description trim="n">
 		<![CDATA[
@@ -43,7 +43,7 @@ THIRD PARTY PLUGIN WITH LOCAL PATCHES. This is Nokfah's DullTracker (a
   single digit: 2.8, 2.9, then 3.0 - never 2.10, which reads as 2.1).
   The exception is a comment-only change: leave the version alone then,
   so mpm offers nobody a pointless reinstall that resets their saved
-  state. The version history is 2.1, 2.5, 2.7, 2.8, 2.9, 3.0, 3.1 - all local.
+  state. The version history is 2.1, 2.5, 2.7, 2.8, 2.9, 3.0, 3.1, 3.2 - all local.
 
 WHAT IT DOES
   Aardwolf character development tracking: campaigns, quests, global
@@ -205,6 +205,16 @@ THE LOCAL PATCHES, in the order they appear
      package uses both 18 and 19 - and after a reload the banner is the
      only way to tell which build loaded, so it has to be right. KEEP
      VERSION IN STEP WITH version= at the top of the file.
+
+  6. GQ WINS NO LONGER GO UNREPORTED (v3.2, 2026-11-23).
+     EndTimer threw away a gq end line whenever gqCompleted was still set,
+     and only a gq START line ever cleared it. Join a gq after it has
+     started and there is no start line, so the second gq of a session was
+     dropped as a "duplicate": rewards credited, but no report, no history
+     entry and no time. The duplicate check is now by time (GQ_END_DEDUPE,
+     60s since the last end line), and the real join line "You have now
+     joined Global Quest # N" also starts the gq timer. The old join
+     pattern ("joined the quest") is kept in case that wording still shows.
 
 THE XPR FIGURES, which are easy to get wrong
   XPR is SECONDS PER 1000 EXP, so LOWER is faster.
@@ -852,7 +862,7 @@ WHEN EDITING
 	-- client package uses both 18 and 19 - and because after `dull reload` the banner is the
 	-- only way to tell which build actually loaded. KEEP IT IN STEP WITH version= at the
 	-- top of this file.
-	local VERSION = "3.1"
+	local VERSION = "3.2"
 	
 	local defaultSettings = {
 		channel = "default",
@@ -914,6 +924,10 @@ WHEN EDITING
 	-- gq timer helpers
 	local gqStarted = false
 	local gqCompleted = false
+	-- LOCAL PATCH: when the last gq end line was seen. A win can print more than one
+	-- end line, so a second one this soon after is the same gq, not a new one.
+	local gqLastEnd = 0
+	local GQ_END_DEDUPE = 60
 	
 	-- Couldn't figure out how to get the colors I wanted from AddTrigger() so using importXML() instead
 	local highlightXML = "<triggers><trigger name=\"%s\" group=\"highlight\" match=\"%s\" other_text_colour=\"%s\" other_back_colour=\"%s\" enabled=\"y\" regexp=\"y\" keep_evaluating=\"y\" custom_colour=\"17\"></trigger></triggers>"	
@@ -1537,7 +1551,10 @@ WHEN EDITING
 		{ func = "StartTimer", attributes = { field = "pup" }, sequence = 300, match = "^Congratulations, .*\\. You have (increased your powerups to [0-9]+)|(gained your first powerup this remort)\\.$" },		
 		{ func = "StartTimer", attributes = { field = "quest" },  sequence = 200, match = "^.*tells you \'You have [0-9]+ minutes to complete your quest\\.\'$" },
 		{ func = "StartTimer", attributes = { field = "gq" },  sequence = 200, match = "^You have now joined the quest. See \'help gquest\' for available commands\\.$" },		
-		{ func = "StartTimer", attributes = { field = "gq" },  sequence = 250, match = "^Global Quest: Global quest # [0-9]+ for levels (.*) to (.*) has now started\\.$" },		
+		{ func = "StartTimer", attributes = { field = "gq" },  sequence = 250, match = "^Global Quest: Global quest # [0-9]+ for levels (.*) to (.*) has now started\\.$" },
+		-- LOCAL PATCH: the real join line. Joining after the start means no start line, so
+		-- the clock starts at the join; joining before it, the start line resets it later.
+		{ func = "StartTimer", attributes = { field = "gq" },  sequence = 200, match = "^You have now joined Global Quest # [0-9]+\\. See \'help gquest\' for available commands\\.$" },
 		{ func = "StartTimer", attributes = { field = "dbl" },  sequence = 200, match = "^For the next ([0-9]+) minutes experience is doubled in honor of .+\\.|Double experience for ([0-9]+) minutes courtesy of.+|\\[    ([0-9]+) minutes of double exp started courtesy of donations being open   \\]|For the next ([0-9]+) minutes all experience is doubled\\!\\!$" },				
 		
 		
@@ -2327,12 +2344,14 @@ WHEN EDITING
 	function EndTimer(name, line, wildcards)			
 		local timer = triggerAttr[name]["field"]
 		
-		if (timer == "gq" and gqCompleted) then
-			-- gq is already done, reduntant trigger, gtfo
-			gqStarted = false
-			gqCompleted = false
-			return
-		else 			
+		-- LOCAL PATCH: the duplicate check is by time now. It used to be a flag that only a
+		-- gq START line cleared, so joining a gq after it had started (no start line seen)
+		-- left the flag set from the previous gq and the win was thrown away unreported.
+		if (timer == "gq") then
+			if (os.time() - gqLastEnd < GQ_END_DEDUPE) then
+				return -- same gq's second end line
+			end
+			gqLastEnd = os.time()
 			gqStarted = false
 			gqCompleted = true
 		end
