@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-09-18"
    requires="4.73"
-   version="2.1"
+   version="2.2"
    >
 <description trim="y">
 <![CDATA[
@@ -128,6 +128,18 @@ OWN CORPSE (v1.9)
   "blootreport name NAME" (off clears it), then to the saved cfg.charname.
   "blootreport name" alone shows which name is in use.  Debug mode prints
   the corpse owner and the name it compared against on every bloot line.
+
+AARD DAMAGE IN THE WINDOW (v2.2, Eric's request)
+  Same rule as ReportID: a weapon's "Average Dam" line in the window gets
+  its difference vs an aard weapon of the same level added after the
+  number, green with + when above, red with - when below, nothing at all
+  when it matches exactly. Aard avg dam = level x2.5 for 1-79, x3 for 80+,
+  and 287-291 all count as 291 (bonus loot drops the level, no aard weapon
+  exists at 287-290). The level comes from the box's Type line. The extra
+  text eats padding spaces before the closing | so the box keeps its width.
+  Done on the captured style lines in BR_IdCaptured (addAardDiff), so it
+  works whether or not ReportID is loaded. Keep AardDamDiff in step with
+  ReportID's copy if Eric changes the rules.
 
 DATA AND STATE
   SetVariable "cfg" (bag, idchan, debug, spellid, off = set of lower case OFF tiers) and "tally" (per tier got and kept).
@@ -897,11 +909,98 @@ local function trimToIdBox (lines)
   return out
 end
 
+-- ---------------------------------------------------------------------
+-- Aard damage (v2.2): same rules as ReportID.  Avg dam minus an aard
+-- weapon of the same level, or nil if unreadable.
+-- ---------------------------------------------------------------------
+local CLR_NEG = "#FF0000"   -- @R, below aard
+
+local function AardDamDiff (level, avgDam)
+  level  = tonumber (level)
+  avgDam = tonumber (avgDam)
+  if level == nil or avgDam == nil or level < 1 then return nil end
+  -- 287-290 only happen when bonus loot dropped a 291 weapon's level
+  if level >= 287 and level <= 291 then level = 291 end
+  local aard = (level < 80) and (level * 2.5) or (level * 3)
+  return avgDam - aard
+end
+
+local function formatNum (n)
+  if n == math.floor (n) then return string.format ("%d", n) end
+  return string.format ("%.1f", n)
+end
+
+-- Rebuild a captured style line with " +42" / " -30" after the Average Dam
+-- number, taking the same number of padding spaces out so the | stays put.
+local function insertDiff (line, numEnd, insert, colour)
+  local text  = styleLineText (line)
+  local spaces = #(string.match (text, "^ *", numEnd + 1))
+  local drop  = math.min (#insert, math.max (spaces - 1, 0))
+
+  -- one entry per character, each with its own run's colours
+  local chars = {}
+  for _, run in ipairs (line) do
+    local t = run.text or ""
+    for i = 1, #t do
+      chars [#chars + 1] = { ch = t:sub (i, i), fore = run.textcolour,
+                             back = run.backcolour, style = run.style }
+    end
+  end
+  if not chars [numEnd] then return line end
+
+  local out = {}
+  for i = 1, numEnd do out [#out + 1] = chars [i] end
+  local ref = chars [numEnd]
+  for i = 1, #insert do
+    out [#out + 1] = { ch = insert:sub (i, i), fore = col (colour),
+                       back = ref.back, style = ref.style }
+  end
+  for i = numEnd + 1 + drop, #chars do out [#out + 1] = chars [i] end
+
+  -- join neighbours that share colours back into runs
+  local runs, i = {}, 1
+  while i <= #out do
+    local c = out [i]
+    local buf = { c.ch }
+    i = i + 1
+    while i <= #out and out [i].fore == c.fore and out [i].back == c.back
+          and out [i].style == c.style do
+      buf [#buf + 1] = out [i].ch
+      i = i + 1
+    end
+    local s = table.concat (buf)
+    runs [#runs + 1] = { text = s, length = #s, textcolour = c.fore,
+                         backcolour = c.back, style = c.style }
+  end
+  return runs
+end
+
+local function addAardDiff (lines)
+  local level
+  for idx, line in ipairs (lines) do
+    local text = styleLineText (line)
+    local lv = string.match (text, "^| Type%s+: .*Level%s+:%s+(%d+)")
+    if lv then level = lv end
+    if string.find (text, "^| Weapon Type: .*Average Dam :%s+%d+ *|%s*$") then
+      local ok, newLine = pcall (function ()
+        local _, numEnd = string.find (text, "Average Dam :%s*%d+")
+        local diff = numEnd and AardDamDiff (level, string.match (text, "Average Dam :%s*(%d+)"))
+        if diff == nil or diff == 0 then return nil end   -- exact match shows nothing
+        local insert = " " .. (diff > 0 and "+" or "") .. formatNum (diff)
+        return insertDiff (line, numEnd, insert, diff > 0 and CLR_HI or CLR_NEG)
+      end)
+      if ok and newLine then lines [idx] = newLine end
+      if not ok then dbg ("aard diff failed: " .. tostring (newLine)) end
+    end
+  end
+  return lines
+end
+
 function BR_IdCaptured (lines)
   local it = gIdItem
   if not it then return end
   lines = lines or {}
-  it.stats = trimToIdBox (lines)
+  it.stats = addAardDiff (trimToIdBox (lines))
   if gCfg.spellid then
     local box = false
     for _, line in ipairs (lines) do
@@ -1008,6 +1107,11 @@ function BR_Cmd_Help ()
               CLR_HI, "", "keep <number>", CLR_MSG, "", "), then")
   ColourNote (CLR_MSG, "", "  its stats (", CLR_HI, "", "id <number>",
               CLR_MSG, "", ") open in a window. Several drops queue up.")
+  ColourTell (CLR_MSG, "", "  A weapon's Average Dam shows how far it is ")
+  ColourTell (CLR_HI, "", "above (+)")
+  ColourTell (CLR_MSG, "", " or ")
+  ColourTell (CLR_NEG, "", "below (-)")
+  ColourNote (CLR_MSG, "", " an aard weapon.")
   ColourNote (CLR_MSG, "", "")
   noteSegs (joinSegs ({ { "  Exception: ", CLR_MSG }, { "a jagged shard of obsidian", CLR_HI },
                         { " at ", CLR_MSG } }, tierSegs ("Shiny"),
