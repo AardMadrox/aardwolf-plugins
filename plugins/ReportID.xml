@@ -1,0 +1,657 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="ReportID"
+   author="Eric"
+   id="71b9c7c30bee0d92a42e94d3"
+   language="Lua"
+   purpose="Report item identify stats to a channel, weapon dam vs aard (based on Nokfah's Report Identify)"
+   save_state="y"
+   date_written="2026-11-24"
+   requires="4.80"
+   version="1.0"
+>
+<description trim="y">
+<![CDATA[
+ReportID - report an item's identify stats on one line, to yourself or a channel.
+Based on Nokfah's Report Identify plugin.
+
+Type: rid help
+]]>
+</description>
+</plugin>
+
+<!--
+MAINTAINER NOTES (added 2026-11-24)
+====================================================================
+CREDIT
+  Rewritten from Nokfah's Report Identify (Nok3_report_identify.v2.xml,
+  plugin id a5b534a09df80b4093cabbfd). Same commands and report line;
+  Eric's color theme on the echo and help. Do not run both at once:
+  they share the rid commands and would both rewrite the Average Dam line.
+
+WHAT IT DOES
+  rid <item> [channel] identifies an item and prints one line:
+    (name) [id] [lv290] [wield] [843dam -30] [740pts] [10str 10int]
+      [16dr] [150hp] [10mental] [SRI]
+  With a channel it sends that line there with @ color codes, otherwise
+  it echoes it locally behind a [ReportID] tag.
+  rid bag <bag id> [channel] does the same for every item in a bag.
+  Always on, for ANY identify: the "Average Dam" line of a weapon gets
+  the difference vs an aard weapon of the same level added after the
+  number, eating the same number of padding spaces so the box keeps
+  its width.
+
+AARD WEAPON MATH (Eric's rules)
+  level 1 to 79: aard avg dam = level x 2.5
+  level 80 and up: level x 3
+  level 287 to 291 all count as 291 (873): bonus loot drops the level,
+  and no aard weapon exists at 287 to 290.
+  Plus shows green with a +, minus red, an exact match shows nothing.
+  Halves from the x2.5 range print as e.g. -2.5.
+
+COMMANDS
+  rid <item> [channel], rid N.<item>, rid <item> worn, rid 'two words'
+  rid bag <bag id> [channel]
+  rid id | spell | lore      identify method (identify, c identify, lore)
+  rid help, rid reload
+
+HOW IT WORKS
+  One capture trigger (rid_capture) is enabled only while a rid is
+  running. It reads every boxed line; the first border starts a 0.5s
+  quiet timer that every later line resets, and when it fires the
+  item is done. A 5s no-reply timer abandons an id that never shows
+  (item not found) so the queue never sticks.
+  Lines are parsed by the fixed 11 character label field after "| ",
+  so continuation lines know which section they belong to. Flags
+  (solidified, resonated, illuminated) are only read inside the Flags
+  section, so a custom keyword can never fake one.
+  The item name is cut out of the Name line by column from the styles,
+  so the colors survive both the echo and the channel line
+  (TruncateStyles and StylesToColours from aardwolf_colors.lua).
+  rid bag: invdata <bag> lists the items (those lines are hidden), then
+  each one is fetched, identified and put back in turn, and all the
+  reports print at the end.
+  Damage line rewrite: aard_level_capture remembers the Type line level,
+  aard_dam_line hides the Average Dam line and prints a rebuilt copy.
+  The level is used once and cleared. Any error prints the original line.
+  Each finished item is broadcast (BroadcastPlugin 1, serialized table),
+  as the original did.
+
+DATA AND STATE
+  idType (identify / c identify / lore) via SetVariable, save_state on.
+
+WHEN EDITING
+  Keep VERSION in the script in step with version= in the plugin tag.
+  Keep this file free of double hyphens inside this comment.
+====================================================================
+-->
+
+<aliases>
+  <alias name="rid_help" match="^rid(?: help)?$" regexp="y" enabled="y" sequence="50"
+         send_to="12" script="ShowHelp"></alias>
+  <alias name="rid_method" match="^rid (id|spell|lore)$" regexp="y" enabled="y" sequence="50"
+         send_to="12" script="SetMethod"></alias>
+  <alias name="rid_reload" match="^rid reload$" regexp="y" enabled="y" sequence="50"
+         send_to="12" script="ReloadMe"></alias>
+  <alias name="rid_bag" match="^rid bag (?&lt;bag>[0-9]+)(?&lt;channel> [\w\s]+)?$" regexp="y" enabled="y" sequence="50"
+         send_to="12" script="BagIdentify"></alias>
+  <alias name="rid_quoted" match="^rid (?&lt;num>[0-9]+\.)?'(?&lt;item>[\w\d\s]+)'(?&lt;channel> [\w\s]+)?$" regexp="y" enabled="y" sequence="100"
+         send_to="12" script="ItemIdentify"></alias>
+  <alias name="rid_worn" match="^rid (?&lt;num>[0-9]+\.)?(?&lt;item>[\w\d]+ worn)(?&lt;channel> [\w\s]+)?$" regexp="y" enabled="y" sequence="200"
+         send_to="12" script="ItemIdentify"></alias>
+  <alias name="rid_item" match="^rid (?&lt;num>[0-9]+\.)?(?&lt;item>[\w\d]+)(?&lt;channel> [\w\s]+)?$" regexp="y" enabled="y" sequence="300"
+         send_to="12" script="ItemIdentify"></alias>
+</aliases>
+
+<triggers>
+  <!-- Always on: Average Dam line rewrite for any identify -->
+  <trigger name="aard_level_capture"
+           match="^\| Type\s+: .*\bLevel\s+:\s+([0-9]+)"
+           regexp="y" enabled="y" keep_evaluating="y" sequence="90"
+           send_to="12" script="AardLevelCapture"></trigger>
+  <trigger name="aard_dam_line"
+           match="^\| Weapon Type: .*Average Dam :\s+[0-9]+ *\|\s*$"
+           regexp="y" enabled="y" keep_evaluating="y" sequence="90"
+           omit_from_output="y"
+           send_to="12" script="AardDamLine"></trigger>
+
+  <!-- Only while a rid is running -->
+  <trigger name="rid_capture"
+           match="^(\+-+\+|\|.*\|)\s*$"
+           regexp="y" enabled="n" keep_evaluating="y" sequence="100"
+           send_to="12" script="CaptureLine"></trigger>
+
+  <!-- Only while rid bag is reading the bag -->
+  <trigger name="rid_invdata_start" match="^\{invdata ?[0-9]*\}$"
+           regexp="y" enabled="n" keep_evaluating="y" omit_from_output="y"
+           send_to="12" script="InvdataStart"></trigger>
+  <trigger name="rid_invdata_line" match="^([0-9]+),.*$"
+           regexp="y" enabled="n" keep_evaluating="y" omit_from_output="y"
+           send_to="12" script="InvdataLine"></trigger>
+  <trigger name="rid_invdata_end" match="^\{/invdata\}$"
+           regexp="y" enabled="n" keep_evaluating="y" omit_from_output="y"
+           send_to="12" script="InvdataEnd"></trigger>
+</triggers>
+
+<script>
+<![CDATA[
+require "serialize"
+require "aardwolf_colors"   -- TruncateStyles, StylesToColours
+
+local VERSION = "1.0"
+
+------------------------------------------------------------------------
+-- Colors: Eric's standard theme
+------------------------------------------------------------------------
+local CLR_TAG  = "#875FFF"   -- x099 brackets
+local CLR_NAME = "#00D7FF"   -- x045 names
+local CLR_MSG  = "#FFFFFF"   -- white text
+local CLR_HI   = "#00FF87"   -- x048 highlights
+local CLR_NEG  = "#FF0000"   -- @R negatives
+
+-- Report line colors: channel = @ codes sent to the MUD, echo = local colors
+local C = {
+   tag = { channel = "@x099", echo = CLR_TAG  },
+   val = { channel = "@W",    echo = CLR_MSG  },
+   pos = { channel = "@x048", echo = CLR_HI   },
+   neg = { channel = "@R",    echo = CLR_NEG  },
+   pts = { channel = "@x045", echo = CLR_NAME },
+}
+
+------------------------------------------------------------------------
+-- Stat tables
+------------------------------------------------------------------------
+-- Stat groups in report order: { identify label, short label }
+local STAT_GROUPS = {
+   { {"Strength","str"}, {"Intelligence","int"}, {"Wisdom","wis"},
+     {"Dexterity","dex"}, {"Constitution","con"}, {"Luck","luk"} },
+   { {"Hit roll","hr"}, {"Damage roll","dr"} },
+   { {"Hit points","hp"}, {"Mana","mn"}, {"Moves","mv"} },
+}
+
+local RESISTS = {
+   "All magic", "All physical", "Bash", "Pierce", "Slash", "Acid", "Air",
+   "Cold", "Disease", "Earth", "Electric", "Energy", "Fire", "Holy",
+   "Light", "Magic", "Mental", "Negative", "Poison", "Shadow", "Sonic", "Water",
+}
+
+local FLAGS = { "solidified", "resonated", "illuminated" }
+
+-- Every label that carries a +/- number, for the line parser
+local SIGNED_LABELS = {}
+for _, group in ipairs(STAT_GROUPS) do
+   for _, s in ipairs(group) do table.insert(SIGNED_LABELS, s[1]) end
+end
+for _, r in ipairs(RESISTS) do table.insert(SIGNED_LABELS, r) end
+
+------------------------------------------------------------------------
+-- State
+------------------------------------------------------------------------
+local idType   = GetVariable("idType") or "identify"
+local channel  = ""
+local queue    = {}     -- items waiting: { arg = "...", bag = "..." or nil }
+local current  = nil    -- item being identified now
+local reports  = {}     -- finished { item = ..., parts = ... }
+local item     = {}     -- what the capture has read so far
+local section  = nil    -- which labelled section of the box we're in
+local started  = false  -- seen the first border of this id yet
+local bagId    = nil
+local bagItems = {}
+local aardLevel = nil   -- level from the last Type line (dam line rewrite)
+
+------------------------------------------------------------------------
+-- Small helpers
+------------------------------------------------------------------------
+local function trim(s)
+   return (string.gsub(s or "", "^%s*(.-)%s*$", "%1"))
+end
+
+local function escape(s)
+   return (string.gsub(s, "(%W)", "%%%1"))
+end
+
+-- [ReportID] message, in the standard theme
+local function Notice(...)
+   ColourTell(CLR_TAG, "", "[", CLR_NAME, "", "ReportID", CLR_TAG, "", "] ")
+   local args = {...}
+   for i = 1, #args, 2 do
+      ColourTell(args[i], "", args[i + 1])
+   end
+   Note("")
+end
+
+------------------------------------------------------------------------
+-- Aard weapon math
+------------------------------------------------------------------------
+-- avg dam minus an aard weapon of the same level, or nil if unreadable
+function AardDamDiff(level, avgDam)
+   level = tonumber(level)
+   avgDam = tonumber(avgDam)
+   if level == nil or avgDam == nil or level < 1 then return nil end
+
+   -- 287-290 only happen when bonus loot dropped a 291 weapon's level
+   if level >= 287 and level <= 291 then level = 291 end
+
+   local aard
+   if level < 80 then
+      aard = level * 2.5
+   else
+      aard = level * 3
+   end
+   return avgDam - aard
+end
+
+-- Whole numbers without a decimal, halves as e.g. 2.5
+function FormatNum(n)
+   if n == math.floor(n) then return string.format("%d", n) end
+   return string.format("%.1f", n)
+end
+
+------------------------------------------------------------------------
+-- Help, method, reload
+------------------------------------------------------------------------
+local HELP = {
+   { "rid <item> [channel]",       "report an item (also N.<item> and 'two words')" },
+   { "rid <item> worn [channel]",  "report something you are wearing" },
+   { "rid bag <bag id> [channel]", "report every item in a bag" },
+   { "rid id | spell | lore",      "how to identify (now: %s)" },
+   { "rid help",                   "this list" },
+   { "rid reload",                 "reload the plugin" },
+}
+table.sort(HELP, function(a, b) return a[1] < b[1] end)
+
+function ShowHelp()
+   Note("")
+   ColourTell(CLR_TAG, "", "[", CLR_NAME, "", "ReportID", CLR_TAG, "", "] ")
+   ColourNote(CLR_MSG, "", "v" .. VERSION .. " by Eric, based on Nokfah's Report Identify")
+   for _, h in ipairs(HELP) do
+      ColourTell(CLR_HI, "", "  " .. string.format("%-28s", h[1]))
+      ColourNote(CLR_MSG, "", string.format(h[2], idType))
+   end
+   ColourTell(CLR_MSG, "", "  Weapon ids also show Average Dam ")
+   ColourTell(CLR_HI, "", "+")
+   ColourTell(CLR_MSG, "", "/")
+   ColourTell(CLR_NEG, "", "-")
+   ColourNote(CLR_MSG, "", " vs an aard weapon of that level.")
+   ColourNote(CLR_MSG, "", "  Aard: level x2.5 up to 79, x3 from 80, 287-291 count as 291.")
+   Note("")
+end
+
+function SetMethod(name, line, wildcards)
+   local pick = wildcards[1]
+   if pick == "id" then idType = "identify"
+   elseif pick == "spell" then idType = "c identify"
+   else idType = "lore" end
+   SetVariable("idType", idType)
+   Notice(CLR_MSG, "Identify method set to: ", CLR_HI, idType)
+end
+
+function ReloadMe()
+   Notice(CLR_MSG, "Reloading...")
+   Execute(GetAlphaOption("script_prefix") ..
+      'DoAfterSpecial(1, "ReloadPlugin(\'' .. GetPluginID() .. '\')", sendto.script)')
+end
+
+------------------------------------------------------------------------
+-- Running a queue of identifies
+------------------------------------------------------------------------
+local function Busy()
+   if current ~= nil or #queue > 0 or bagId ~= nil then
+      Notice(CLR_MSG, "Still working on the last one, try again in a moment.")
+      return true
+   end
+   return false
+end
+
+local function Report(entry)
+   local name, parts = entry.item.name, entry.parts
+
+   if channel ~= "" then
+      local s = channel .. " " .. (name.channel or "") .. " "
+      local last = nil   -- only send a color code when the color changes
+      for _, p in ipairs(parts) do
+         if p.color.channel ~= last then
+            s = s .. p.color.channel
+            last = p.color.channel
+         end
+         s = s .. p.text
+      end
+      SendNoEcho(s)
+      return
+   end
+
+   ColourTell(CLR_TAG, "", "[", CLR_NAME, "", "ReportID", CLR_TAG, "", "] ")
+   for _, s in ipairs(name.styles or {}) do
+      ColourTell(RGBColourToName(s.textcolour), RGBColourToName(s.backcolour), s.text)
+   end
+   ColourTell(CLR_MSG, "", " ")
+   for _, p in ipairs(parts) do ColourTell(p.color.echo, "", p.text) end
+   Note("")
+end
+
+local function FinishAll()
+   for _, entry in ipairs(reports) do Report(entry) end
+   reports = {}
+   current = nil
+end
+
+local function NextItem()
+   if #queue == 0 then
+      FinishAll()
+      return
+   end
+
+   current = table.remove(queue, 1)
+   item = { flags = {} }
+   section = nil
+   started = false
+
+   if current.bag then SendNoEcho("get " .. current.arg .. " " .. current.bag) end
+
+   EnableTrigger("rid_capture", true)
+   AddTimer("rid_noreply", 0, 0, 5, "",
+      timer_flag.Enabled + timer_flag.OneShot + timer_flag.Temporary + timer_flag.Replace, "NoReply")
+   SendNoEcho(idType .. " " .. current.arg)
+end
+
+-- One item finished (or abandoned): put it back if it came from a bag, go on
+local function ItemDone()
+   EnableTrigger("rid_capture", false)
+   DeleteTimer("rid_end")
+   DeleteTimer("rid_noreply")
+   if current and current.bag then
+      SendNoEcho("put " .. current.arg .. " " .. current.bag)
+   end
+   current = nil
+   NextItem()
+end
+
+function NoReply()
+   Notice(CLR_MSG, "No identify output for ", CLR_HI, current and current.arg or "?", CLR_MSG, ", skipped.")
+   ItemDone()
+end
+
+function ItemIdentify(name, line, wildcards)
+   if Busy() then return end
+   channel = trim(wildcards.channel)
+   reports = {}
+   queue = { { arg = (wildcards.num or "") .. wildcards.item } }
+   NextItem()
+end
+
+------------------------------------------------------------------------
+-- rid bag: read the bag with invdata, then queue every item
+------------------------------------------------------------------------
+function BagIdentify(name, line, wildcards)
+   if Busy() then return end
+   channel = trim(wildcards.channel)
+   reports = {}
+   bagId = wildcards.bag
+   bagItems = {}
+   EnableTrigger("rid_invdata_start", true)
+   AddTimer("rid_bag_noreply", 0, 0, 5, "",
+      timer_flag.Enabled + timer_flag.OneShot + timer_flag.Temporary + timer_flag.Replace, "BagNoReply")
+   SendNoEcho("invdata " .. bagId)
+end
+
+local function BagTriggersOff()
+   EnableTrigger("rid_invdata_start", false)
+   EnableTrigger("rid_invdata_line", false)
+   EnableTrigger("rid_invdata_end", false)
+   DeleteTimer("rid_bag_noreply")
+end
+
+function BagNoReply()
+   BagTriggersOff()
+   Notice(CLR_MSG, "No reply reading bag ", CLR_HI, bagId or "?", CLR_MSG, ".")
+   bagId = nil
+end
+
+function InvdataStart()
+   EnableTrigger("rid_invdata_start", false)
+   EnableTrigger("rid_invdata_line", true)
+   EnableTrigger("rid_invdata_end", true)
+end
+
+function InvdataLine(name, line, wildcards)
+   table.insert(bagItems, wildcards[1])
+end
+
+function InvdataEnd()
+   BagTriggersOff()
+   local bag = bagId
+   bagId = nil
+
+   if #bagItems == 0 then
+      Notice(CLR_MSG, "Bag ", CLR_HI, bag, CLR_MSG, " is empty.")
+      return
+   end
+
+   queue = {}
+   for _, id in ipairs(bagItems) do table.insert(queue, { arg = id, bag = bag }) end
+   Notice(CLR_MSG, "Identifying ", CLR_HI, tostring(#queue), CLR_MSG, " items from bag ", CLR_HI, bag, CLR_MSG, "...")
+   NextItem()
+end
+
+------------------------------------------------------------------------
+-- Reading the identify box
+------------------------------------------------------------------------
+-- The item name, cut out of the Name line by column so its colors survive
+local function ReadName(line, styles)
+   local _, labelEnd = string.find(line, "^| Name%s*: ")
+   local closeAt = string.find(line, "%s*|%s*$")
+   if not labelEnd or not closeAt or closeAt <= labelEnd + 1 then return end
+
+   local cut = TruncateStyles(styles, labelEnd + 1, closeAt - 1)
+   local echo = {}
+   for _, s in ipairs(cut) do
+      table.insert(echo, { text = s.text, textcolour = s.textcolour, backcolour = s.backcolour })
+   end
+   item.name = { channel = "@w" .. StylesToColours(cut), styles = echo }
+end
+
+function CaptureLine(name, line, wildcards, styles)
+   if not started then
+      if string.sub(line, 1, 1) ~= "+" then return end   -- wait for the top border
+      started = true
+      DeleteTimer("rid_noreply")
+   end
+
+   -- Every line pushes the end back; 0.5s of quiet means the box is done
+   AddTimer("rid_end", 0, 0, 0.5, "",
+      timer_flag.Enabled + timer_flag.OneShot + timer_flag.Temporary + timer_flag.Replace, "CaptureEnd")
+
+   if string.sub(line, 1, 1) ~= "|" then return end
+
+   -- Fixed 11 character label field after "| "; blank on continuation lines
+   local label = trim(string.sub(line, 3, 13))
+   if label ~= "" then section = label end
+
+   if label == "Id" then
+      item.Id = string.match(line, ":%s*(%d+)")
+   elseif label == "Name" then
+      ReadName(line, styles)
+   elseif label == "Wearable" then
+      item.Wearable = string.match(line, ":%s*(%w+)")
+   elseif label == "Score" then
+      item.Score = string.match(line, ":%s*([+-]?%d+)")
+   end
+
+   item.Level = item.Level or string.match(line, "%f[%a]Level%s*:%s*(%d+)")
+   item.AvgDam = item.AvgDam or string.match(line, "Average Dam%s*:%s*(%d+)")
+
+   if section == "Flags" then
+      for _, f in ipairs(FLAGS) do
+         if string.find(line, "%f[%a]" .. f .. "%f[%A]") then table.insert(item.flags, f) end
+      end
+   end
+
+   for _, l in ipairs(SIGNED_LABELS) do
+      local sign, num = string.match(line, "%f[%a]" .. escape(l) .. "%s*:%s*([+-])(%d+)")
+      if num then item[l] = { sign = sign, val = num } end
+   end
+end
+
+-- Build the report line from what was read
+local function BuildParts()
+   local parts = {}
+   local function add(color, text) table.insert(parts, { color = color, text = text }) end
+
+   -- each group: open bracket, pieces, close bracket, space between groups
+   local function group(pieces)
+      if #pieces == 0 then return end
+      if #parts > 0 then add(C.tag, " ") end
+      add(C.tag, "[")
+      for _, p in ipairs(pieces) do add(p[1], p[2]) end
+      add(C.tag, "]")
+   end
+
+   group({ {C.val, item.Id} })
+   group({ {C.tag, "lv"}, {C.val, item.Level or "?"} })
+   if item.Wearable then group({ {C.val, item.Wearable} }) end
+
+   if item.AvgDam then
+      local pieces = { {C.val, item.AvgDam}, {C.tag, "dam"} }
+      local diff = AardDamDiff(item.Level, item.AvgDam)
+      if diff and diff ~= 0 then
+         table.insert(pieces, {C.tag, " "})
+         if diff > 0 then
+            table.insert(pieces, {C.pos, "+" .. FormatNum(diff)})
+         else
+            table.insert(pieces, {C.neg, FormatNum(diff)})
+         end
+      end
+      group(pieces)
+   end
+
+   if item.Score then group({ {C.pts, item.Score}, {C.tag, "pts"} }) end
+
+   local function statPieces(list)
+      local pieces = {}
+      for _, s in ipairs(list) do
+         local label, short = s[1], s[2]
+         local v = item[label]
+         if v then
+            if #pieces > 0 then table.insert(pieces, {C.tag, " "}) end
+            if v.sign == "-" then
+               table.insert(pieces, {C.neg, "-" .. v.val})
+            else
+               table.insert(pieces, {C.pos, v.val})
+            end
+            table.insert(pieces, {C.tag, short})
+         end
+      end
+      return pieces
+   end
+
+   for _, g in ipairs(STAT_GROUPS) do group(statPieces(g)) end
+
+   local resistList = {}
+   for _, r in ipairs(RESISTS) do table.insert(resistList, { r, string.lower(r) }) end
+   group(statPieces(resistList))
+
+   if #item.flags > 0 then
+      local letters = ""
+      for _, f in ipairs(item.flags) do letters = letters .. string.upper(string.sub(f, 1, 1)) end
+      group({ {C.pos, letters} })
+   end
+
+   return parts
+end
+
+function CaptureEnd()
+   EnableTrigger("rid_capture", false)
+
+   if item.Id then
+      if not item.name then item.name = { channel = "", styles = {} } end
+      table.insert(reports, { item = item, parts = BuildParts() })
+      BroadcastPlugin(1, serialize.save_simple(item))
+   else
+      Notice(CLR_MSG, "Couldn't read the identify output for ", CLR_HI, current and current.arg or "?", CLR_MSG, ".")
+   end
+
+   ItemDone()
+end
+
+------------------------------------------------------------------------
+-- Always on: add the aard difference to any weapon's Average Dam line
+------------------------------------------------------------------------
+function AardLevelCapture(name, line, wildcards)
+   aardLevel = wildcards[1]
+end
+
+local function EchoStyles(styles)
+   for _, s in ipairs(styles) do
+      ColourTell(RGBColourToName(s.textcolour), RGBColourToName(s.backcolour), s.text)
+   end
+   Note("")
+end
+
+-- The game's line is hidden; print it again with " +42" / " -30" after the
+-- number, taking the same number of padding spaces out so the | stays put.
+function AardDamLine(name, line, wildcards, styles)
+   local level = aardLevel
+   aardLevel = nil   -- use it once, never let a stale level carry over
+
+   local ok = pcall(function()
+      local _, numEnd = string.find(line, "Average Dam :%s*%d+")
+      local diff = numEnd and AardDamDiff(level, string.match(line, "Average Dam :%s*(%d+)"))
+
+      if diff == nil or diff == 0 then
+         EchoStyles(styles)
+         return
+      end
+
+      local insert = " " .. (diff > 0 and "+" or "") .. FormatNum(diff)
+      local insertColor = (diff > 0) and CLR_HI or CLR_NEG
+
+      -- padding after the number; keep at least one space before the |
+      local spaces = #(string.match(line, "^ *", numEnd + 1))
+      local drop = math.min(#insert, math.max(spaces - 1, 0))
+
+      -- one entry per character, each with its own colors
+      local chars = {}
+      for _, s in ipairs(styles) do
+         local fore, back = RGBColourToName(s.textcolour), RGBColourToName(s.backcolour)
+         for i = 1, #s.text do
+            table.insert(chars, { ch = string.sub(s.text, i, i), fore = fore, back = back })
+         end
+      end
+
+      local out = {}
+      for i = 1, numEnd do table.insert(out, chars[i]) end
+      local back = chars[numEnd] and chars[numEnd].back or ""
+      for i = 1, #insert do
+         table.insert(out, { ch = string.sub(insert, i, i), fore = insertColor, back = back })
+      end
+      for i = numEnd + 1 + drop, #chars do table.insert(out, chars[i]) end
+
+      -- print, joining neighbours that share colors
+      local i = 1
+      while i <= #out do
+         local fore, back, text = out[i].fore, out[i].back, out[i].ch
+         i = i + 1
+         while i <= #out and out[i].fore == fore and out[i].back == back do
+            text = text .. out[i].ch
+            i = i + 1
+         end
+         ColourTell(fore, back, text)
+      end
+      Note("")
+   end)
+
+   if not ok then Note(line) end   -- never lose the line
+end
+
+------------------------------------------------------------------------
+function OnPluginInstall()
+   ColourTell(CLR_TAG, "", "[", CLR_NAME, "", "ReportID", CLR_TAG, "", "] ")
+   ColourTell(CLR_MSG, "", "v" .. VERSION .. " loaded. Type ")
+   ColourTell(CLR_HI, "", "rid help")
+   ColourNote(CLR_MSG, "", " for commands.")
+end
+]]>
+</script>
+</muclient>
