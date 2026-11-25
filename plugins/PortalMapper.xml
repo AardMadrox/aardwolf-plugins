@@ -10,7 +10,7 @@
    purpose="Walks a bag of handheld portals and records every one as a mapper portal exit"
    date_written="2026-09-17"
    requires="4.59"
-   version="1.4"
+   version="1.5"
    save_state="y"
    >
 </plugin>
@@ -216,8 +216,59 @@ DATA
   them.  GetPluginInfo(id, 6) returns the plugin's .xml FILE, not its
   folder, so the path is trimmed to the last separator first.
 
-  This plugin is private.  Decide before pushing it anywhere - the data
-  file holds Eric's own item serials, but the plugin itself does not.
+  Published on GitHub (aardwolf-plugins).  The data file holds a player's
+  own item serials; the plugin itself holds none - keep it that way.
+
+CUSTOM MODE  (v1.5 - third mode, Eric asked for it)
+  "portalmapper custom <template>" - the user writes the whole command, so
+  the plugin can produce strings IDENTICAL to portals they mapped by hand
+  (fullportal is INSERT OR REPLACE on dir, so an identical string replaces
+  instead of duplicating).  In the template the WHOLE WORD "port" becomes
+  the serial and "bag" becomes "portalbag"; everything else is literal.
+  Eric's example "take port bag;wear port;ent port;r port;put port bag;
+  aliastorewear" -> "take 3828209 portalbag;wear 3828209;ent 3828209;...".
+  (His message wrote "portalb" for the first bag and "ent por" - read as
+  typos for portalbag / port.  Only "port" is substituted.)
+
+  The enter step is the first step whose first word abbreviates "enter"
+  (>= 2 letters).  Steps up to it run, then we wait for room.info; the rest
+  run on arrival.  stepsFor() returns (steps, enterIndex) for all three
+  modes, so the run is one code path; built-in modes are the fixed 6 steps
+  with enter at 3.  Every step is Execute()d (v1.4 sent wear/enter/remove
+  with SendNoEcho) - same path the mapper walks.
+
+  Mode is stored per record the same way as before: the restore field is
+  "custom=<template>", so staleList / rewrite need no special case.  The
+  template may not contain | { } (data file / mapper alias regex).
+
+  TYPING IT: command stacking splits the typed line at ";" BEFORE aliases.
+  OnPluginCommandEntered sees the whole line first (verified in MUSHclient
+  source, sendvw.cpp: SendToAllPluginCallbacksRtn(ON_PLUGIN_COMMAND_ENTERED)
+  then SendCommand), handles "portalmapper custom ..." there and returns
+  "\t" = discard.  The alias of the same shape is only a fallback.
+
+  The bag alias is now generic: "^(\S+) (\d+) portalbag$" (any verb), so
+  "take <n> portalbag" works.  It replaced the get/put pair.
+
+  exitInMapper no longer matches "wear <n>;enter" (a custom command need
+  not say that); it LIKEs the serial and then checks it as a whole number
+  with %f frontiers.
+
+START BAG / END BAG  (v1.5)
+  "endbag" is the same setting as "bag" - where mapped portals live and
+  what portalbag expands to.  "startbag" is optional: if set, go/scan read
+  it instead.  Live run only: toStartBag() swaps portalbag for the start
+  bag serial in the steps before enter (take it from the start bag) and,
+  on a failure / unmappable room, in the steps after (put it back).  On
+  success the post steps run untouched, so it lands in the end bag.  If the
+  mapper refuses the record after the portal already went to the end bag,
+  recordFailed moves it back with raw get/put.  Already-mapped portals found
+  in the start bag are moved across without walking.  In custom mode a
+  start bag needs "bag" both before and after the enter step (missingConfig
+  says so).
+
+  Help opens with a warning that every portal is ENTERED (Eric asked for
+  it) - careful with high level portals.
 -->
 
 <!-- =====================  ALIASES  ===================== -->
@@ -241,6 +292,15 @@ DATA
   <alias script="pmAliasDual"   match="^portalmapper dualweapon (\d+)$" enabled="y" regexp="y" sequence="80"></alias>
   <alias script="pmAliasWear"   match="^portalmapper wearportal (\d+)$" enabled="y" regexp="y" sequence="80"></alias>
 
+  <alias script="pmAliasEndbag"   match="^portalmapper endbag (\d+)$"        enabled="y" regexp="y" sequence="80"></alias>
+  <alias script="pmAliasStartbag" match="^portalmapper startbag (\d+|off)$"  enabled="y" regexp="y" sequence="80"></alias>
+
+  <!-- Typed by hand this is caught earlier, in OnPluginCommandEntered, because
+       the template has semicolons in it and command stacking would split
+       the line before any alias saw it.  This alias is the fallback for the
+       forms with no semicolon and for Execute() from other scripts. -->
+  <alias script="pmAliasCustom" match="^portalmapper custom(?:\s+(.+))?$"  enabled="y" regexp="y" sequence="80"></alias>
+
   <alias script="pmAliasWish"   match="^portalwish(?:\s+(on|off))?$"     enabled="y" regexp="y" sequence="80"></alias>
 
   <!-- THE TWO EXPANSION ALIASES.  These are the words that get baked into
@@ -251,8 +311,9 @@ DATA
        work at 201 with completely different equipment. -->
   <alias script="pmAliasDoDual" match="^dualweapon$" enabled="y" regexp="y" sequence="80"></alias>
   <alias script="pmAliasDoWear" match="^wearportal$" enabled="y" regexp="y" sequence="80"></alias>
-  <alias script="pmAliasDoGet"  match="^get (\d+) portalbag$" enabled="y" regexp="y" sequence="80"></alias>
-  <alias script="pmAliasDoPut"  match="^put (\d+) portalbag$" enabled="y" regexp="y" sequence="80"></alias>
+  <!-- Any verb: get / take / put / ... <n> portalbag.  (v1.5 - was get and
+       put only; a custom command may say "take port bag".) -->
+  <alias script="pmAliasDoBag"  match="^(\S+) (\d+) portalbag$" enabled="y" regexp="y" sequence="80"></alias>
 
   <alias script="pmAliasStatus" match="^portalmapper$"                   enabled="y" regexp="y" sequence="100"></alias>
 
@@ -349,6 +410,9 @@ local gCfg = {
   dualweapon = nil,     -- object serial re-equipped with "dual" (no-wish mode)
   wearportal = nil,     -- object serial re-equipped with "wear" (wish mode)
   wish       = false,
+  custom     = nil,     -- custom mode template, e.g. "take port bag;wear port;..."
+  customOn   = false,   -- custom mode wins over wish/dual while this is on
+  startbag   = nil,     -- optional: unmapped portals wait here (bag = end bag)
 }
 
 local gMapped  = {}     -- [serial] = { room = "1234", level = "50", name = "..." }
@@ -439,9 +503,93 @@ end
 --
 -- restoreLive() is the real command, used when the word has to be turned
 -- into something the mud understands.
+--
+-- v1.5: in CUSTOM mode the "restore token" is the whole template, as
+-- "custom=<template>".  It plays exactly the same role - it is what a record
+-- remembers it was made with, so staleList / rewrite work unchanged.
+local CUSTOM_PREFIX = "custom="
+
+local function modeName ()
+  if gCfg.customOn and gCfg.custom then return "custom" end
+  if gCfg.wish then return "wish" end
+  return "dual"
+end
+
 local function restoreToken ()
-  if gCfg.wish then return "wearportal" end
+  local mode = modeName ()
+  if mode == "custom" then return CUSTOM_PREFIX .. gCfg.custom end
+  if mode == "wish" then return "wearportal" end
   return "dualweapon"
+end
+
+-- Whole-word test / replace.  %f frontier patterns work in Lua 5.1.
+local function hasWord (s, word)
+  return string.find (s, "%f[%w]" .. word .. "%f[%W]") ~= nil
+end
+
+local function replaceWord (s, word, with)
+  return (string.gsub (s, "%f[%w]" .. word .. "%f[%W]", with))
+end
+
+-- Turn a custom template into the steps for one portal:
+--   the word  port  -> the portal's serial
+--   the word  bag   -> portalbag (the alias word that expands to your bag)
+-- Everything else is kept exactly as typed, so the result can match portals
+-- you mapped by hand.
+local function fillTemplate (tpl, serial)
+  local steps = {}
+  for raw in string.gmatch (tpl or "", "[^;]+") do
+    local s = trim (raw)
+    if s ~= "" then
+      s = replaceWord (s, "port", serial)
+      s = replaceWord (s, "bag", "portalbag")
+      table.insert (steps, s)
+    end
+  end
+  return steps
+end
+
+-- Which step goes through the portal: the first one whose first word is
+-- "enter" or an abbreviation of it (en, ent, ente).
+local function findEnter (steps)
+  for i, s in ipairs (steps) do
+    local w = string.lower (string.match (s, "^(%S+)") or "")
+    if #w >= 2 and string.sub ("enter", 1, #w) == w then
+      return i
+    end
+  end
+  return nil
+end
+
+-- Does the custom template use the bag word before / after the enter step?
+-- (Needed for startbag: that is where the start bag gets swapped in.)
+local function templateBagSides (tpl)
+  local steps = fillTemplate (tpl, "0")
+  local e = findEnter (steps)
+  if not e then return false, false end
+  local before, after = false, false
+  for i, s in ipairs (steps) do
+    if hasWord (s, "portalbag") then
+      if i < e then before = true elseif i > e then after = true end
+    end
+  end
+  return before, after
+end
+
+-- nil if the template is usable, otherwise the reason it is not.
+local function templateProblem (tpl)
+  if tpl == nil or trim (tpl) == "" then return "it is empty." end
+  if string.find (tpl, "[|{}]") then
+    return "it cannot contain | { or } (the mapper and the data file both use them)."
+  end
+  if not hasWord (tpl, "port") then
+    return "it never says 'port', so every portal would get the same command."
+  end
+  if not findEnter (fillTemplate (tpl, "0")) then
+    return "there is no 'enter' step (enter / ente / ent / en), so I cannot tell "
+           .. "which step goes through the portal."
+  end
+  return nil
 end
 
 -- Same trick for the bag: the stored command says "portalbag", never a bag
@@ -453,27 +601,42 @@ local function bagToken ()
 end
 
 local function restoreLive ()
-  if gCfg.wish then
+  local mode = modeName ()
+  if mode == "custom" then
+    return "(custom command)"
+  end
+  if mode == "wish" then
     return "wear " .. tostring (gCfg.wearportal or "<not set>")
   end
   return "dual " .. tostring (gCfg.dualweapon or "<not set>")
 end
 
--- The exact round trip, as recorded and as run.
+-- The round trip as a list of steps, plus which step is the "enter".
+-- Steps before and including it are sent, then we wait to arrive; the
+-- steps after it are the gear-back-on / back-in-the-bag part.
 --
 -- Built from bag + restore rather than read from a stored string, so that
 -- "portalmapper rewrite" can regenerate the OLD command (from what each
 -- record says was in force at the time) and the NEW one side by side.
-local function portalCommandFor (serial, bag, restore)
-  local sep = separator ()
-  return table.concat ({
+local function stepsFor (serial, bag, restore)
+  if string.sub (restore, 1, #CUSTOM_PREFIX) == CUSTOM_PREFIX then
+    local steps = fillTemplate (string.sub (restore, #CUSTOM_PREFIX + 1), serial)
+    return steps, findEnter (steps)
+  end
+  return {
     "get " .. serial .. " " .. bag,
     "wear " .. serial,
     "enter",
     "remove " .. serial,
     restore,
     "put " .. serial .. " " .. bag,
-  }, sep)
+  }, 3
+end
+
+-- The exact round trip, as recorded.
+local function portalCommandFor (serial, bag, restore)
+  local steps = stepsFor (serial, bag, restore)
+  return table.concat (steps, separator ())
 end
 
 local function portalCommand (serial)
@@ -521,14 +684,24 @@ end
 -- Is this portal's exit in the mapper, the way 'mapper portals' would list
 -- it (exit from anywhere, destination room known)?  room is optional.
 -- true / false, or nil if the database could not be queried.
+--
+-- v1.5: matches the serial anywhere in the stored command, as a whole
+-- number, because a custom command need not say "wear <n>;enter".  LIKE
+-- narrows it down, then a frontier pattern stops 3828209 matching 13828209.
 local function exitInMapper (db, serial, room)
-  local q = "SELECT 1 FROM exits LEFT OUTER JOIN rooms ON rooms.uid = exits.touid "
+  serial = tostring (serial or "")
+  if not string.match (serial, "^%d+$") then return nil end
+  if room and not string.match (tostring (room), "^%-?%d+$") then return nil end
+  local q = "SELECT exits.dir AS dir FROM exits LEFT OUTER JOIN rooms ON rooms.uid = exits.touid "
          .. "WHERE exits.fromuid IN ('*','**') AND rooms.area IS NOT NULL "
-         .. "AND exits.dir LIKE '%wear " .. serial .. ";enter%' "
+         .. "AND exits.dir LIKE '%" .. serial .. "%' "
          .. (room and ("AND CAST(exits.touid AS TEXT) = '" .. room .. "' ") or "")
-         .. "LIMIT 1"
   local ok, found = pcall (function ()
-    for _ in db:nrows (q) do return true end
+    for row in db:nrows (q) do
+      if string.find (row.dir or "", "%f[%d]" .. serial .. "%f[%D]") then
+        return true
+      end
+    end
     return false
   end)
   if not ok then return nil end
@@ -539,9 +712,25 @@ end
 local function missingConfig ()
   local missing = {}
   if not gCfg.bag then
-    table.insert (missing, "portalmapper bag <id>")
+    table.insert (missing, "portalmapper bag <id>   (or endbag - same thing)")
   end
-  if gCfg.wish then
+  local mode = modeName ()
+  if mode == "custom" then
+    -- only needed if the custom command actually uses those words
+    if hasWord (gCfg.custom, "wearportal") and not gCfg.wearportal then
+      table.insert (missing, "portalmapper wearportal <id>   (your custom command uses wearportal)")
+    end
+    if hasWord (gCfg.custom, "dualweapon") and not gCfg.dualweapon then
+      table.insert (missing, "portalmapper dualweapon <id>   (your custom command uses dualweapon)")
+    end
+    if gCfg.startbag then
+      local before, after = templateBagSides (gCfg.custom)
+      if not (before and after) then
+        table.insert (missing, "a start bag needs the word 'bag' in your custom command, "
+                      .. "before AND after the enter step - or: portalmapper startbag off")
+      end
+    end
+  elseif mode == "wish" then
     if not gCfg.wearportal then
       table.insert (missing, "portalmapper wearportal <id>")
     end
@@ -551,6 +740,20 @@ local function missingConfig ()
     end
   end
   return missing
+end
+
+-- The bag a run looks in: the start bag if there is one, else the bag.
+local function scanBag ()
+  return gCfg.startbag or gCfg.bag
+end
+
+-- For the live run only: point the bag word at the START bag.  Used on the
+-- way in (take it out of the start bag) and when a portal fails (put it
+-- back there).  The recorded command never sees this - it always says
+-- portalbag, which is the end bag, where the portal lives once mapped.
+local function toStartBag (step)
+  if not gCfg.startbag then return step end
+  return replaceWord (step, "portalbag", gCfg.startbag)
 end
 
 -- =====================================================================
@@ -584,6 +787,9 @@ local function saveData ()
   if gCfg.dualweapon then f:write ("set dualweapon " .. gCfg.dualweapon .. "\n") end
   if gCfg.wearportal then f:write ("set wearportal " .. gCfg.wearportal .. "\n") end
   f:write ("set wish " .. (gCfg.wish and "1" or "0") .. "\n")
+  if gCfg.startbag   then f:write ("set startbag "   .. gCfg.startbag   .. "\n") end
+  if gCfg.custom     then f:write ("set custom "     .. gCfg.custom     .. "\n") end
+  f:write ("set customon " .. (gCfg.customOn and "1" or "0") .. "\n")
 
   local serials = {}
   for s in pairs (gMapped) do table.insert (serials, s) end
@@ -601,6 +807,7 @@ end
 local function loadData ()
   gCfg.bag, gCfg.dualweapon, gCfg.wearportal = nil, nil, nil
   gCfg.wish = false
+  gCfg.custom, gCfg.customOn, gCfg.startbag = nil, false, nil
   gMapped = {}
 
   local f = io.open (dataPath (), "r")
@@ -613,7 +820,10 @@ local function loadData ()
       if key then
         if key == "wish" then
           gCfg.wish = (value == "1")
-        elseif key == "bag" or key == "dualweapon" or key == "wearportal" then
+        elseif key == "customon" then
+          gCfg.customOn = (value == "1")
+        elseif key == "bag" or key == "dualweapon" or key == "wearportal"
+            or key == "startbag" or key == "custom" then
           gCfg [key] = value
         end
       else
@@ -656,12 +866,12 @@ local function stopScanTriggers ()
 end
 
 local function beginScan (want)
-  gScan = { want = want, items = {}, ticks = 0 }
+  gScan = { want = want, items = {}, ticks = 0, bag = scanBag () }
   gStep = "scanning"
   EnableTrigger ("pm_inv_header", true)
   EnableTimer ("pm_tick", true)
   ResetTimer ("pm_tick")
-  SendNoEcho ("invdata " .. gCfg.bag)
+  SendNoEcho ("invdata " .. gScan.bag)
 end
 
 function pmInvHeader (name, line, wildcards)
@@ -671,7 +881,7 @@ function pmInvHeader (name, line, wildcards)
     EnableTrigger ("pm_inv_header", false)
     return
   end
-  if wildcards [1] ~= gCfg.bag then return end
+  if wildcards [1] ~= gScan.bag then return end
 
   EnableTrigger ("pm_inv_header", false)
   EnableTriggerGroup ("pm_inv_body", true)
@@ -723,18 +933,24 @@ function pmInvFooter ()
   end
 
   local portals, already, other = {}, 0, 0
+  local alreadyList = {}
   for _, item in ipairs (scan.items) do
     if item.itype ~= ITEM_TYPE_PORTAL then
       other = other + 1
     elseif gMapped [item.serial] then
       already = already + 1
+      table.insert (alreadyList, item)
     else
       table.insert (portals, item)
     end
   end
 
+  local fromStart = gCfg.startbag and scan.bag == gCfg.startbag
+                    and gCfg.startbag ~= gCfg.bag
+
   if scan.want == "list" then
-    echoHi ("bag ", tostring (gCfg.bag), " holds " .. #scan.items .. " item(s):")
+    echoHi (fromStart and "start bag " or "bag ", tostring (scan.bag),
+            " holds " .. #scan.items .. " item(s):")
     echoHi ("  portals not yet mapped : ", tostring (#portals), "")
     echoHi ("  portals already mapped : ", tostring (already), "")
     echoHi ("  not portals (ignored)  : ", tostring (other), "")
@@ -746,19 +962,34 @@ function pmInvFooter ()
   end
 
   -- want == "run"
+
+  -- Start bag: anything in it that is ALREADY mapped just moves across to
+  -- the end bag - no need to walk it again.
+  if fromStart and #alreadyList > 0 then
+    for _, item in ipairs (alreadyList) do
+      SendNoEcho ("get " .. item.serial .. " " .. gCfg.startbag)
+      SendNoEcho ("put " .. item.serial .. " " .. gCfg.bag)
+    end
+    echoHi ("moved ", tostring (#alreadyList),
+            " already-mapped portal(s) from the start bag to the end bag.")
+  end
+
   if #portals == 0 then
-    if already > 0 then
+    if fromStart then
+      echoHi ("no unmapped portals in start bag ", tostring (scan.bag), ".")
+    elseif already > 0 then
       echoHi ("nothing new in the bag - all ", tostring (already),
               " portal(s) in there are already mapped.")
     else
-      echoHi ("no unmapped portals found in bag ", tostring (gCfg.bag), ".")
+      echoHi ("no unmapped portals found in bag ", tostring (scan.bag), ".")
     end
     return
   end
 
   gRun = { queue = portals, index = 0, stopping = false, done = 0, skipped = 0 }
   echoHi ("mapping ", tostring (#portals), " portal(s)"
-          .. (already > 0 and (", skipping " .. already .. " already known") or "")
+          .. ((already > 0 and not fromStart) and (", skipping " .. already .. " already known") or "")
+          .. (fromStart and (" from the start bag; each goes to the end bag once mapped") or "")
           .. ".  'portalmapper stop' halts after the current one.")
   nextPortal ()
 end
@@ -766,13 +997,19 @@ end
 -- =====================================================================
 -- The run
 -- =====================================================================
-local function sendRestore ()
-  SendNoEcho ("remove " .. gCurrent.serial)
-  -- Deliberately Execute the ALIAS WORD rather than sending the command
-  -- directly: the live run then exercises exactly the path the mapper will
-  -- use later, so a broken alias shows up here and not weeks from now.
-  Execute (restoreToken ())
-  Execute ("put " .. gCurrent.serial .. " " .. bagToken ())
+-- Everything after the enter step: gear back on, portal back in the bag.
+--
+-- Every step is Execute()d, not sent: the alias WORDS (dualweapon,
+-- portalbag, a custom command's own aliases) then go through exactly the
+-- path the mapper will use later, so a broken alias shows up here and not
+-- weeks from now.
+--
+-- backToStart: the portal was NOT mapped, so with a start bag it goes back
+-- there instead of into the end bag.
+local function sendRestore (backToStart)
+  for _, step in ipairs (gCurrent.post or {}) do
+    Execute (backToStart and toStartBag (step) or step)
+  end
 end
 
 function finishRun (why)
@@ -816,11 +1053,25 @@ function nextPortal ()
 
   dbg ("portal " .. gCurrent.serial .. " from room " .. tostring (gFromRoom))
 
+  -- Split the recorded command at its enter step: the first half is run
+  -- now, the second half once we have arrived (sendRestore).
+  local steps, enterAt = stepsFor (gCurrent.serial, bagToken (), restoreToken ())
+  gCurrent.pre, gCurrent.post = {}, {}
+  for i, step in ipairs (steps) do
+    if i <= enterAt then
+      table.insert (gCurrent.pre, step)
+    else
+      table.insert (gCurrent.post, step)
+    end
+  end
+
   -- Execute, not Send: these go through the same aliases the mapper will
-  -- use later, so the live run is a real test of the stored command.
-  Execute ("get "  .. gCurrent.serial .. " " .. bagToken ())
-  SendNoEcho ("wear " .. gCurrent.serial)
-  SendNoEcho ("enter")
+  -- use later, so the live run is a real test of the stored command.  The
+  -- one live-only difference: with a start bag, the portal comes out of
+  -- the start bag rather than the end bag the recorded command names.
+  for _, step in ipairs (gCurrent.pre) do
+    Execute (toStartBag (step))
+  end
 
   EnableTimer ("pm_tick", true)
   ResetTimer ("pm_tick")
@@ -868,6 +1119,14 @@ local function recordFailed ()
 
   echoWarn ("the mapper would not store portal " .. rec.portal.serial
             .. " (" .. rec.portal.name .. ") - it was NOT recorded.")
+
+  -- It already went into the end bag on arrival.  Not mapped, so with a
+  -- start bag it belongs back there.
+  if gCfg.startbag and gCfg.startbag ~= gCfg.bag then
+    SendNoEcho ("get " .. rec.portal.serial .. " " .. gCfg.bag)
+    SendNoEcho ("put " .. rec.portal.serial .. " " .. gCfg.startbag)
+    echo ("put it back in the start bag.")
+  end
   echo ("mapper said: " .. tostring (gRecFail or "(nothing)"))
   echo ("If it says the room is unknown, the mapper has no data for room "
         .. rec.room .. ": check the mapper plugin is enabled, 'look' there, "
@@ -956,7 +1215,7 @@ local function arrived (roomNum)
     gRun.skipped = gRun.skipped + 1
     echoWarn ("portal " .. portal.serial .. " leads somewhere unmappable "
               .. "(room -1) - not recorded, carrying on.")
-    sendRestore ()
+    sendRestore (true)
     nextPortal ()
     return
   end
@@ -986,7 +1245,7 @@ local function enterFailed ()
           .. "leads right back here, it looks identical to a failure)")
   end
 
-  sendRestore ()
+  sendRestore (true)
 
   local run = gRun
   gRun = nil
@@ -1017,7 +1276,7 @@ function pmTick ()
       gStep = "idle"
       stopScanTriggers ()
       EnableTimer ("pm_tick", false)
-      echoWarn ("no invdata reply for bag " .. tostring (gCfg.bag)
+      echoWarn ("no invdata reply for bag " .. tostring (gScan and gScan.bag or scanBag ())
                 .. " - is that the right bag id?")
       if want == "run" then
         echoHi ("check it with ", "portalmapper scan", "")
@@ -1084,6 +1343,15 @@ function startRun ()
     return
   end
 
+  if modeName () == "custom" then
+    local problem = templateProblem (gCfg.custom)
+    if problem then
+      echoWarn ("your custom command will not work: " .. problem)
+      echoHi ("set it again with ", "portalmapper custom <command>", "")
+      return
+    end
+  end
+
   local ready, why = mapperReady ()
   if not ready then
     echoWarn (why .. "  Nothing can be recorded without it.")
@@ -1122,7 +1390,7 @@ function pmAliasScan ()
     echo ("busy right now - try again when the run has stopped.")
     return
   end
-  if not gCfg.bag then
+  if not scanBag () then
     echoHi ("set the bag first: ", "portalmapper bag <id>", "")
     return
   end
@@ -1183,8 +1451,8 @@ end
 local function warnIfStale ()
   local stale = staleList ()
   if #stale == 0 then return end
-  echoWarn (#stale .. " portal(s) already in the mapper still use the old "
-            .. "item numbers, so they would fail if walked.")
+  echoWarn (#stale .. " portal(s) already in the mapper were recorded with a "
+            .. "different command (older mode or custom command).")
   echoHi ("fix them all with ", "portalmapper rewrite",
           " - no re-walking, it just edits the stored commands.")
 end
@@ -1252,7 +1520,7 @@ function pmAliasRewrite ()
 
   saveData ()
   echoHi ("rewrote ", tostring (#stale),
-          " portal exit(s) to use '" .. bag .. "' and '" .. restore .. "'.")
+          " portal exit(s) to the current " .. modeName () .. " mode command.")
   echo ("the mapper prints one confirmation line per portal above.")
 end
 
@@ -1284,18 +1552,113 @@ local function bagOrComplain ()
   return gCfg.bag
 end
 
-function pmAliasDoGet (name, line, wildcards)
+-- "<verb> <serial> portalbag" - get, take, put, whatever the command says.
+function pmAliasDoBag (name, line, wildcards)
   local bag = bagOrComplain ()
-  if bag then SendNoEcho ("get " .. wildcards [1] .. " " .. bag) end
-end
-
-function pmAliasDoPut (name, line, wildcards)
-  local bag = bagOrComplain ()
-  if bag then SendNoEcho ("put " .. wildcards [1] .. " " .. bag) end
+  if bag then SendNoEcho (wildcards [1] .. " " .. wildcards [2] .. " " .. bag) end
 end
 
 function pmAliasBag (name, line, wildcards)
-  setSerial ("bag", "portal bag", wildcards [1])
+  setSerial ("bag", "portal bag (end bag)", wildcards [1])
+end
+
+function pmAliasEndbag (name, line, wildcards)
+  setSerial ("bag", "end bag (portal bag)", wildcards [1])
+  echo ("mapped portals end up here, and the stored commands use it.")
+end
+
+function pmAliasStartbag (name, line, wildcards)
+  local arg = string.lower (wildcards [1] or "")
+  if arg == "off" then
+    gCfg.startbag = nil
+    saveData ()
+    echo ("start bag off - portalmapper go looks in the bag itself again.")
+    return
+  end
+  if arg == gCfg.bag then
+    echoWarn ("that is the end bag too - the start bag has to be a different bag.")
+    return
+  end
+  gCfg.startbag = arg
+  saveData ()
+  echoHi ("start bag set to ", arg, "")
+  echo ("put the portals you want mapped in it; each one moves to the end bag "
+        .. "once it is mapped, so whatever is left in the start bag is what still "
+        .. "needs doing.")
+  local missing = missingConfig ()
+  if #missing > 0 then
+    echoWarn ("still needed:")
+    for _, m in ipairs (missing) do ColourNote (CLR_HI, "", "  " .. m) end
+  end
+end
+
+-- portalmapper custom [<command> | off]
+function pmCustomSet (arg)
+  arg = trim (arg or "")
+
+  if arg == "" then
+    if not gCfg.custom then
+      echoWarn ("no custom command set yet.")
+      echoHi ("example: ", "portalmapper custom take port bag;wear port;ent port;r port;put port bag;myrewear", "")
+      echo ("'port' becomes each portal's number, 'bag' becomes portalbag (your bag).")
+      return
+    end
+    gCfg.customOn = true
+    saveData ()
+  elseif string.lower (arg) == "off" then
+    gCfg.customOn = false
+    saveData ()
+    echoHi ("custom mode ", "OFF", " - back to " .. modeName () .. " mode ("
+            .. restoreToken () .. " -> " .. restoreLive () .. ").")
+    warnIfStale ()
+    return
+  else
+    -- ";;" is what you type to get a literal ";" past command stacking.
+    -- Accept it, since the mapper needs single ones anyway.
+    arg = string.gsub (arg, ";;", ";")
+    local problem = templateProblem (arg)
+    if problem then
+      echoWarn ("not set - " .. problem)
+      return
+    end
+    gCfg.custom   = arg
+    gCfg.customOn = true
+    saveData ()
+  end
+
+  echoHi ("custom mode ", "ON", " - command: " .. gCfg.custom)
+  local sample = fillTemplate (gCfg.custom, "1234567")
+  local e = findEnter (sample)
+  echoHi ("portal 1234567 would be mapped as: ",
+          table.concat (sample, ";"), "")
+  echoHi ("the enter step is: ", sample [e] or "?",
+          "  (the plugin waits to arrive after this one)")
+  local missing = missingConfig ()
+  if #missing > 0 then
+    echoWarn ("still needed:")
+    for _, m in ipairs (missing) do ColourNote (CLR_HI, "", "  " .. m) end
+  end
+  warnIfStale ()
+end
+
+function pmAliasCustom (name, line, wildcards)
+  pmCustomSet (wildcards [1])
+end
+
+-- A custom command is typed with semicolons in it.  Command stacking would
+-- split the line at the first one before any alias saw it, and the rest
+-- (wear port, ent port, ...) would go to the mud.  This callback gets the
+-- WHOLE line first (MUSHclient sendvw.cpp: OnPluginCommandEntered runs
+-- before SendCommand), so take it here and return "\t", which tells the
+-- client to discard the line.
+function OnPluginCommandEntered (sText)
+  local t = trim (sText or "")
+  local rest = string.match (t, "^portalmapper%s+custom(.*)$")
+  if rest and (rest == "" or string.match (rest, "^%s")) then
+    pmCustomSet (rest)
+    return "\t"
+  end
+  return sText
 end
 
 function pmAliasDual (name, line, wildcards)
@@ -1320,7 +1683,14 @@ function pmAliasWish (name, line, wildcards)
   end
 
   gCfg.wish = (arg == "on")
+  -- Picking wish / no-wish is picking a mode, so it ends custom mode.
+  local wasCustom = gCfg.customOn
+  gCfg.customOn = false
   saveData ()
+  if wasCustom then
+    echo ("custom mode turned off (your custom command is kept - "
+          .. "'portalmapper custom' turns it back on).")
+  end
 
   if gCfg.wish then
     echoHi ("portal wish ", "ON", " - restore step: wearportal -> " .. restoreLive ())
@@ -1345,9 +1715,18 @@ function pmAliasDebug ()
 end
 
 function pmAliasStatus ()
-  echoHi ("mode: ", gCfg.wish and "WISH" or "no wish",
-          "   restore step: " .. restoreToken () .. " -> " .. restoreLive ())
-  echoHi ("bag: ", tostring (gCfg.bag or "not set"), "")
+  local mode = modeName ()
+  if mode == "custom" then
+    echoHi ("mode: ", "CUSTOM", "   command: " .. gCfg.custom)
+  else
+    echoHi ("mode: ", mode == "wish" and "WISH" or "no wish",
+            "   restore step: " .. restoreToken () .. " -> " .. restoreLive ())
+    if gCfg.custom then
+      echo ("  (custom command saved but off: " .. gCfg.custom .. ")")
+    end
+  end
+  echoHi ("bag (end bag): ", tostring (gCfg.bag or "not set"), "")
+  echoHi ("start bag: ", tostring (gCfg.startbag or "off"), "")
   echoHi ("dual weapon: ", tostring (gCfg.dualweapon or "not set"), "")
   echoHi ("wear portal: ", tostring (gCfg.wearportal or "not set"), "")
   echoHi ("portals mapped: ", tostring (countMapped ()), "")
@@ -1378,6 +1757,13 @@ end
 function pmAliasHelp ()
   echo ("maps a whole bag of handheld portals into the Aardwolf mapper, one at a time.")
   Note ("")
+  ColourNote (CLR_WARN, "", "  WARNING: to map a portal, PortalMapper ENTERS it.  Every unmapped")
+  ColourNote (CLR_WARN, "", "  portal in the bag gets walked through, one after another.  Be careful")
+  ColourNote (CLR_WARN, "", "  with higher level portals - they can drop you into areas far above")
+  ColourNote (CLR_WARN, "", "  you.  Check first with ", CLR_HI, "", "portalmapper scan",
+              CLR_WARN, "", " (it shows each portal's level),")
+  ColourNote (CLR_WARN, "", "  and take out anything you are not ready for - or use a start bag.")
+  Note ("")
   ColourNote (CLR_NAME, "", "  SETTINGS - do these first, and again any time your gear changes")
   helpLine ("portalwish on",             "ONLY if you have the portal wish")
   helpLine ("portalwish off",            "turn wish mode back off")
@@ -1386,11 +1772,37 @@ function pmAliasHelp ()
   helpLine ("portalmapper dualweapon <id>", "weapon to re-wield (no-wish mode)")
   helpLine ("portalmapper wearportal <id>",  "item to re-wear (wish mode)")
   Note ("")
+  ColourNote (CLR_NAME, "", "  CUSTOM MODE - write the command yourself (third mode)")
+  helpLine ("portalmapper custom <cmd>", "use your own command instead of dual/wish")
+  helpLine ("portalmapper custom",       "turn custom mode back on (saved command)")
+  helpLine ("portalmapper custom off",   "back to dual / wish mode")
+  ColourNote (CLR_MSG, "", "  In your command, the word ", CLR_HI, "", "port",
+              CLR_MSG, "", " becomes each portal's number and ", CLR_HI, "", "bag",
+              CLR_MSG, "", " becomes")
+  ColourNote (CLR_MSG, "", "  portalbag.  Everything else is sent exactly as typed, so it can match")
+  ColourNote (CLR_MSG, "", "  portals you already mapped by hand.  It needs an enter step (ent works).")
+  ColourNote (CLR_MSG, "", "  Example:")
+  ColourNote (CLR_HI,  "", "    portalmapper custom take port bag;wear port;ent port;r port;put port bag;myrewear")
+  ColourNote (CLR_MSG, "", "  maps portal 3828209 as")
+  ColourNote (CLR_HI,  "", "    take 3828209 portalbag;wear 3828209;ent 3828209;r 3828209;put 3828209 portalbag;myrewear")
+  ColourNote (CLR_MSG, "", "  Type it on one line with single semicolons - the plugin catches it")
+  ColourNote (CLR_MSG, "", "  before command stacking can split it.")
+  Note ("")
+  ColourNote (CLR_NAME, "", "  START BAG AND END BAG - map only the portals you choose")
+  helpLine ("portalmapper startbag <id>", "bag of portals waiting to be mapped")
+  helpLine ("portalmapper startbag off",  "stop using a start bag")
+  helpLine ("portalmapper endbag <id>",   "where mapped portals go (same as bag)")
+  ColourNote (CLR_MSG, "", "  Put the portals you want mapped in the start bag and type ",
+              CLR_HI, "", "portalmapper go")
+  ColourNote (CLR_MSG, "", "  Each one is taken from the start bag, mapped, and put in the end bag.")
+  ColourNote (CLR_MSG, "", "  Anything that fails goes back in the start bag, so whatever is still")
+  ColourNote (CLR_MSG, "", "  in the start bag is what still needs mapping.  The mapper always")
+  ColourNote (CLR_MSG, "", "  stores the END bag (portalbag), since that is where portals live.")
+  Note ("")
   ColourNote (CLR_NAME, "", "  THE WORDS THE MAPPER STORES INSTEAD OF ITEM NUMBERS")
   helpLine ("dualweapon",              "sends 'dual' + whatever you set above")
   helpLine ("wearportal",              "sends 'wear' + whatever you set above")
-  helpLine ("get <n> portalbag",       "gets item n out of whatever bag you set")
-  helpLine ("put <n> portalbag",       "puts item n into whatever bag you set")
+  helpLine ("<verb> <n> portalbag",    "get/take/put item n with whatever bag you set")
   Note ("")
   ColourNote (CLR_MSG, "", "  Your bag, weapon and portal item numbers are NOT written into")
   ColourNote (CLR_MSG, "", "  the mapper.  The words above are, and they turn into your current")
@@ -1399,8 +1811,8 @@ function pmAliasHelp ()
   ColourNote (CLR_MSG, "", "  your portals into a new bag is one setting change - change it")
   ColourNote (CLR_MSG, "", "  above and every portal you have ever mapped follows along.")
   Note ("")
-  ColourNote (CLR_MSG, "", "  The one thing still written in is WHICH of the two restore words")
-  ColourNote (CLR_MSG, "", "  was used, so turning the wish on or off needs ",
+  ColourNote (CLR_MSG, "", "  The one thing still written in is WHICH mode was used, so switching")
+  ColourNote (CLR_MSG, "", "  wish / no-wish / custom (or changing your custom command) needs ",
               CLR_HI, "", "portalmapper rewrite")
   ColourNote (CLR_MSG, "", "  afterwards.  It updates every portal already mapped, no re-walking,")
   ColourNote (CLR_MSG, "", "  and it reminds you at the time.")
