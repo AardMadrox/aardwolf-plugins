@@ -9,7 +9,7 @@
    language="Lua"
    purpose="All-around key manager: keyring window, walk-to key rooms, keyrecord, krk, warnkey"
    date_written="2026-06-18"
-   version="3.6"
+   version="3.7"
    save_state="y"
 >
 </plugin>
@@ -111,6 +111,16 @@ HISTORY
   v1.x KeyWarning: Crynn 24h spouse warning + missing-key list.
   v1.9-2.7 (2026-11-25): window, keyroom, tabs, keyrecord, own krk, Key
   Added, [remove]/[delete], warnkey, renamed Keycheck (same plugin id).
+  v3.7 (2026-11-25): wandering mobs. keyrecord asks SnD's mobs table how
+  many rooms it has seen the mob in (this area); 2+ = it wanders, so the
+  key gets the area's first room (SnD area.startRoom) and rough = true.
+  "keyroom <#> area" does the same by hand: the area comes from the key's
+  room in the mapper db (rooms.area; db path = mapper's db_name variable
+  or the world name), else from where you stand. Both databases are read
+  only and optional (QueryRow never opens a file that does not exist, so
+  sqlite cannot create an empty one). SnD only knows a mob moves once it
+  has seen it in two rooms: Philip the rat (Fury) was seen in one, hence
+  the hand command. Default Fury example now points at Fury's first room.
   v3.6 (2026-11-25): the 2-hour reminder no longer opens the keycheck
   window; it reads the keyring quietly and prints the [Gather Keys] line.
   v3.5 (2026-11-25): a watched key that is not on the keyring (expired,
@@ -354,7 +364,7 @@ HISTORY
 require "gmcphelper"
 
 -- Keep in step with version= above; shown on load so a reload is visible.
-local VERSION = "3.6"
+local VERSION = "3.7"
 
 -- Standard colour theme
 local CLR_TAG  = "#875FFF"   -- x099 brackets
@@ -423,7 +433,7 @@ end
 --   cmd    what to run when you get it (default "krk")
 local DEFAULT_KEYS = {
   ["201"] = {
-    { name = "the tower key", from = "Philip the rat", area = "Fury", room = 45678 },
+    { name = "the tower key", from = "Philip the rat", area = "Fury", room = 45668, rough = true },
   },
   ["Sub"] = {
     { name = "a thin dragonscale key", from = "Bagger, the entrance guard", area = "Ascent", room = 43150 },
@@ -1096,13 +1106,17 @@ local HELP = {
                                  "you by a mob. Passes count too: anything the keyring accepts is",
                                  "recorded with this room (two at once = both). New ones join the tab",
                                  "for your level and go on the keyring on every later pickup; one",
-                                 "already listed just gets this room. Gives up after 10 minutes." },
+                                 "already listed just gets this room. If Search and Destroy has seen",
+                                 "the mob in more than one room, it gets the area's first room",
+                                 "instead (marked *). Gives up after 10 minutes." },
   { "keyrecord sub / 201",       "Same, but into that tab whatever your level." },
   { "keyrecord stop",            "Stop watching." },
   { "keyroom",                   "List every key with its number and walk-to room. Numbers stay the",
                                  "same at any level: 201 keys are 1-100, Sub keys 101-200." },
   { "keyroom <#>",               "Set key <#>'s room to the room you are standing in." },
   { "keyroom <#> <room>",        "Set key <#>'s room to a mapper room number." },
+  { "keyroom <#> area",          "Point key <#> at its area's first room, for a key from a mob that",
+                                 "moves around (needs Search and Destroy's area list)." },
   { "keyroom <#> clear",         "Forget key <#>'s room." },
   { "krk",                       "Put the key in your inventory on your keyring (keyring replace key)." },
   { "warnkey",                   "List the keys you are watching." },
@@ -1180,6 +1194,70 @@ local function HereRoom()
   return uid, tostring(info.zone or ""), tostring(info.name or "")
 end
 
+-- ---------------- SnD / mapper lookups (read only) ----------------
+-- Search and Destroy's SnDdb.db keeps every room it has seen each mob in
+-- (mobs: mob, roomid, zone) and each area's first room (area: key,
+-- startRoom). The mapper's database maps a room to its area (rooms: uid,
+-- area). Both are optional: with neither installed these return nil and
+-- keyrecord just records the exact room, as before.
+local SND_DB = GetInfo(66) .. "SnDdb.db"
+local MAPPER_ID = "b6eae87ccedd84f510b74714"   -- Aardwolf_GMCP_Mapper
+
+local function MapperDb()
+  -- same rule as the mapper: its db_name variable, else the world name
+  local name = GetPluginVariable(MAPPER_ID, "db_name")
+  if not name or name == "" then
+    name = (WorldName():gsub("[^%w%s()_-]", ""):gsub("^%s+", ""):gsub("%s+$", ""))
+  end
+  return GetInfo(66) .. name .. ".db"
+end
+
+local function SqlStr(s)
+  return "'" .. tostring(s):gsub("'", "''") .. "'"
+end
+
+-- First row of a query, or nil. Never creates a database file: sqlite3.open
+-- would make an empty one, so the file must already exist.
+local function QueryRow(path, sql)
+  if not sqlite3 then return nil end
+  local probe = io.open(path, "rb")
+  if not probe then return nil end
+  probe:close()
+  local row = nil
+  pcall(function()
+    local db = sqlite3.open(path)
+    if not db then return end
+    for r in db:nrows(sql) do
+      if not row then row = r end
+    end
+    pcall(function() db:close_vm() end)
+    db:close()
+  end)
+  return row
+end
+
+-- How many different rooms SnD has seen a mob in, in one area.
+local function WanderRooms(mob, zone)
+  if not mob or mob == "" or not zone or zone == "" then return nil end
+  local r = QueryRow(SND_DB, "SELECT count(DISTINCT roomid) AS n FROM mobs WHERE mob = " ..
+                     SqlStr(mob) .. " AND zone = " .. SqlStr(zone))
+  return r and tonumber(r.n) or nil
+end
+
+-- An area's first room, from SnD's area list.
+local function AreaStart(zone)
+  if not zone or zone == "" then return nil end
+  local r = QueryRow(SND_DB, "SELECT startRoom AS s FROM area WHERE key = " .. SqlStr(zone))
+  return r and tonumber(r.s) or nil
+end
+
+-- The area key a mapper room belongs to.
+local function RoomZone(uid)
+  if not uid then return nil end
+  local r = QueryRow(MapperDb(), "SELECT area AS a FROM rooms WHERE uid = " .. SqlStr(uid))
+  return r and r.a and r.a ~= "" and r.a or nil
+end
+
 -- keyroom [<#> [here|<roomid>|clear]]  (numbers: 1-100 = 201 tab, 101-200 = Sub)
 function KeyRoomCmd(name, line, wildcards)
   local arg = (wildcards[1] or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -1218,6 +1296,24 @@ function KeyRoomCmd(name, line, wildcards)
     k.room, k.rough = nil, nil
     Save()
     KeyNote(k.name .. " has no room now.")
+  elseif rest == "area" then
+    -- the area's first room: area from the key's room (mapper), else from
+    -- where you stand; first room from SnD's area list
+    local zone = RoomZone(k.room)
+    if not zone then
+      local _, here_zone = HereRoom()
+      zone = (here_zone and here_zone ~= "") and here_zone or nil
+    end
+    local start = AreaStart(zone)
+    if not start then
+      KeyNote("Can't find that area's first room (it comes from Search and Destroy's area list). " ..
+              "Stand at the entrance and type keyroom " .. n .. ".", CLR_WARN)
+      return
+    end
+    k.room, k.rough = start, true
+    if (k.area or "") == "" then k.area = NiceArea(zone) end
+    Save()
+    KeyNote(k.name .. " now walks to the first room of " .. zone .. " (" .. start .. ").", CLR_HI)
   elseif rest:match("^%d+$") then
     k.room, k.rough = tonumber(rest), nil
     Save()
@@ -1229,11 +1325,12 @@ function KeyRoomCmd(name, line, wildcards)
       return
     end
     k.room, k.rough = uid, nil
-    if zone ~= "" then k.area = NiceArea(zone) end
+    -- keep an area label the user already has (short names like "BL")
+    if zone ~= "" and (k.area or "") == "" then k.area = NiceArea(zone) end
     Save()
     KeyNote(k.name .. " now walks to room " .. uid .. " (" .. rname .. ").", CLR_HI)
   else
-    KeyNote("Usage: keyroom <#>, keyroom <#> <roomid>, keyroom <#> clear", CLR_WARN)
+    KeyNote("Usage: keyroom <#>, keyroom <#> <roomid>, keyroom <#> area, keyroom <#> clear", CLR_WARN)
     return
   end
 
@@ -1327,7 +1424,7 @@ function KeyRecordCmd(name, line, wildcards)
   end
   StopRecording()
   rec_gen = rec_gen + 1
-  rec = { tab = tab, uid = uid, area = NiceArea(zone), rname = rname, loot = {}, settle = 0, gen = rec_gen }
+  rec = { tab = tab, uid = uid, zone = zone, area = NiceArea(zone), rname = rname, loot = {}, settle = 0, gen = rec_gen }
   DoAfterSpecial(REC_TIMEOUT, "KR_Timeout(" .. rec_gen .. ")", sendto.script)
   ColourTell(CLR_TAG, "black", "[")
   ColourTell(CLR_NAME, "black", "Keycheck")
@@ -1424,14 +1521,29 @@ local function RecordKey(item, from)
       if CleanName(k.from) == CleanName(from) then hit = i break end
     end
   end
+  local k, idx, new
   if hit then
-    local k = list[hit]
+    k, idx, new = list[hit], hit, false
     k.room, k.rough = rec.uid, nil
-    if rec.area ~= "" then k.area = rec.area end
-    return hit, false
+    -- keep an area label the user already has (short names like "BL")
+    if rec.area ~= "" and (k.area or "") == "" then k.area = rec.area end
+  else
+    k = { name = item, from = from, area = rec.area, room = rec.uid, cmd = DefaultCmd(item) }
+    list[#list + 1] = k
+    idx, new = #list, true
   end
-  list[#list + 1] = { name = item, from = from, area = rec.area, room = rec.uid, cmd = DefaultCmd(item) }
-  return #list, true
+  -- A mob SnD has seen in 2+ rooms of this area wanders: point [go] at the
+  -- area's first room instead of the room it happened to die in.
+  local seen = WanderRooms((from:gsub(" %(steal%)$", "")), rec.zone)
+  local wander = nil
+  if seen and seen >= 2 then
+    local start = AreaStart(rec.zone)
+    if start then
+      k.room, k.rough = start, true
+      wander = seen
+    end
+  end
+  return idx, new, wander
 end
 
 local function FinishRecord()
@@ -1477,8 +1589,8 @@ local function FinishRecord()
     if not done[n] then
       done[n] = true
       if on_ring[n] then
-        local idx, new = RecordKey(L.item, L.from)
-        got[#got + 1] = { item = L.item, from = L.from, idx = idx, new = new }
+        local idx, new, wander = RecordKey(L.item, L.from)
+        got[#got + 1] = { item = L.item, from = L.from, idx = idx, new = new, wander = wander }
       else
         notkey[#notkey + 1] = L.item
       end
@@ -1504,7 +1616,18 @@ local function FinishRecord()
     ColourTell(CLR_HI, "black", g.item)
     ColourTell(CLR_MSG, "black", " (" .. g.from .. ") at " .. rname .. " (" .. uid .. ") into keycheck, ")
     ColourTell(CLR_HI, "black", tab)
-    ColourNote(CLR_MSG, "black", " tab #" .. g.idx .. (g.new and ", new key." or ", room updated."))
+    ColourNote(CLR_MSG, "black", " tab #" .. KeyNum(tab, g.idx) .. (g.new and ", new key." or ", room updated."))
+    if g.wander then
+      ColourTell(CLR_TAG, "black", "[")
+      ColourTell(CLR_NAME, "black", "Keycheck")
+      ColourTell(CLR_TAG, "black", "] ")
+      ColourTell(CLR_MSG, "black", (g.from:gsub(" %(steal%)$", "")) .. " moves around (Search and Destroy has seen it in " ..
+                 g.wander .. " rooms), so ")
+      ColourTell(CLR_HI, "black", "[go]")
+      ColourTell(CLR_MSG, "black", " takes you to the area's first room. ")
+      ColourTell(CLR_HI, "black", "keyroom " .. KeyNum(tab, g.idx))
+      ColourNote(CLR_MSG, "black", " sets an exact room instead.")
+    end
   end
   RedrawIfOpen()
 end
