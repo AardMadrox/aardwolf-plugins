@@ -10,7 +10,7 @@
    purpose="Walks a bag of handheld portals and records every one as a mapper portal exit"
    date_written="2026-09-17"
    requires="4.59"
-   version="1.5"
+   version="1.6"
    save_state="y"
    >
 </plugin>
@@ -80,7 +80,8 @@ THE RESTORE STEP IS AN ALIAS WORD, NOT AN ITEM NUMBER  (v1.3 - important)
   portal, so it must be) and the portal's level.  Plus which of the two
   restore WORDS was used - which is all "portalmapper rewrite" is for now.
 
-SETTINGS (also printed on first load while anything is missing)
+SETTINGS (v1.6: load prints ONE line - version + pmhelp - nothing else;
+          missing setup is reported by 'portalmapper' and 'portalmapper go')
   portalwish on|off|<bare toggle>     only if you have the portal wish
   portalmapper bag <id>               the bag the portals live in
   portalmapper dualweapon <id>        no-wish mode restore
@@ -372,6 +373,7 @@ local CLR_HI   = "#00FF87"   -- x048
 local CLR_WARN = "#FF5F00"   -- x202, used for the "cannot portal here" line
 
 local TAG = "PortalMapper"
+local VERSION = "1.6"   -- keep in step with version= above (GetPluginInfo's version field is unreliable)
 
 local ITEM_TYPE_PORTAL = 20   -- aardwolf.com/wiki Help/Invdata
 local ENTER_TIMEOUT    = 5    -- seconds to wait for a new room after "enter"
@@ -1861,19 +1863,9 @@ function OnPluginInstall ()
     syncRoom ()
   end
 
-  local missing = missingConfig ()
-  if #missing > 0 then
-    Note ("")
-    pmAliasHelp ()
-    Note ("")
-    echoWarn ("not set up yet.  Still needed:")
-    for _, m in ipairs (missing) do
-      ColourNote (CLR_HI, "", "  " .. m)
-    end
-  else
-    echoHi ("loaded - " .. countMapped () .. " portal(s) known.  ",
-            "portalmapper go", " to map new ones, pmhelp for commands.")
-  end
+  -- v1.6: one line only (Eric: the old load-time help dump was too spammy).
+  -- Setup gaps still show up on 'portalmapper' and 'portalmapper go'.
+  echoHi ("v" .. VERSION .. " loaded - ", "pmhelp", " for commands.")
 end
 
 function OnPluginEnable ()
