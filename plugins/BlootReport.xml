@@ -10,7 +10,7 @@
    save_state="y"
    date_written="2026-09-18"
    requires="4.73"
-   version="2.2"
+   version="2.3"
    >
 <description trim="y">
 <![CDATA[
@@ -31,7 +31,7 @@ WHAT IT DOES
   holding that item's stats with three buttons:
     KEEP    put ID BAG, counts as Kept, closes the window
     UNKEEP  unkeep ID, closes the window
-    REPORT  rid ID CHANNEL (Nok3 report identify plugin), window stays open
+    REPORT  rid ID CHANNEL (ReportID plugin, v2.3), window stays open
   The title bar close button just dismisses the item (it stays keep flagged).
   Several drops at once queue up and open one after another.
   Tally "Sparkling Kept 1/5" is ONLY ever sent to a channel, by
@@ -145,6 +145,10 @@ DATA AND STATE
   SetVariable "cfg" (bag, idchan, debug, spellid, off = set of lower case OFF tiers) and "tally" (per tier got and kept).
   The queue is not saved; a reload drops any open window.
   Kept means "put in the bag with KEEP".
+
+REPORT BUTTON (v2.3)
+  Points at ReportID (Eric's rewrite, id 71b9c7c3...). Nokfah's original
+  Nok3_Report_Identify is still accepted as a fallback; never load both.
 
 WHEN EDITING
   The world trigger in Aardwolf.mcl (keep %1 on the same line) must be removed
@@ -375,7 +379,10 @@ local AUTO_BAG = {
 -- =====================================================================
 -- State
 -- =====================================================================
-local RID_ID        = "a5b534a09df80b4093cabbfd"   -- Nok3_Report_Identify
+-- REPORT runs "rid": ReportID first (v2.3), Nokfah's original as a fallback
+-- for anyone who has not switched.  Both use the same rid command.
+local RID_IDS       = { "71b9c7c30bee0d92a42e94d3",    -- ReportID
+                        "a5b534a09df80b4093cabbfd" }   -- Nok3_Report_Identify
 local RESOLVE_DELAY = 1      -- seconds after the last bloot line
 local INV_TIMEOUT   = 8      -- seconds to wait for the invdata reply
 local ID_TIMEOUT    = 10     -- seconds to wait for the id reply
@@ -1049,7 +1056,10 @@ end
 -- Window buttons
 -- =====================================================================
 local function ridAvailable ()
-  return IsPluginInstalled (RID_ID) and GetPluginInfo (RID_ID, 17)
+  for _, id in ipairs (RID_IDS) do
+    if IsPluginInstalled (id) and GetPluginInfo (id, 17) then return true end
+  end
+  return false
 end
 
 function BR_Act (action)
@@ -1078,7 +1088,7 @@ function BR_Act (action)
       return
     end
     if not ridAvailable () then
-      warn ("the Report Identify (rid) plugin is not loaded, so REPORT cannot send.")
+      warn ("the ReportID (rid) plugin is not loaded, so REPORT cannot send.")
       return
     end
     Execute ("rid " .. it.objid .. " " .. gCfg.idchan)
@@ -1168,7 +1178,7 @@ function BR_Cmd_Help ()
   end
   if #offs == 0 then offs = { { "none", CLR_MSG } } end
   noteSegs (joinSegs ({ { string.format ("  %-28s", "tiers off"), CLR_HI } }, offs))
-  helpLine ("rid plugin",     ridAvailable () and "loaded" or "NOT loaded - REPORT needs it")
+  helpLine ("ReportID plugin", ridAvailable () and "loaded" or "NOT loaded - REPORT needs it")
   ColourNote (CLR_MSG, "", "")
   noteSegs (joinSegs ({ { "  Tally reads like ", CLR_MSG } }, tierSegs ("Sparkling"),
                       { { " Kept ", CLR_TAG }, { "1/5", CLR_HI },
