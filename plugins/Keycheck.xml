@@ -1,0 +1,1677 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="Keycheck"
+   author="Eric"
+   id="6b65797761726e696e673031"
+   language="Lua"
+   purpose="All-around key manager: keyring window, walk-to key rooms, keyrecord, krk, warnkey"
+   date_written="2026-06-18"
+   version="3.6"
+   save_state="y"
+>
+</plugin>
+
+<!--
+MAINTAINER NOTES (rewritten for v3.0, 2026-11-25)
+====================================================================
+WHAT IT DOES
+  All-around key manager for the Aardwolf keyring:
+    1. keycheck: a Keyring window with 201 / Sub tabs listing every key
+       on your list, missing first, with click-to-walk rooms.
+    2. keyrecord: records where a key comes from as you get it.
+    3. Getting any listed key runs its pickup command (krk by default);
+       the plugin defines krk itself (keyring replace key).
+    4. warnkey: a local [Gather Keys] warning, repeated every 2 hours,
+       while a watched key is close to melting.
+
+COMMANDS (keycheck help prints the same, sorted)
+  keycheck                open the window (201 tab at 201, Sub below)
+  keycheck help / reload
+  keyrecord [sub|201|stop]
+  keyroom [<#> [<room>|clear]]   (# = 1-100 on 201, 101-200 on Sub)
+  krk                     keyring replace key (no echo)
+  warnkey [<#>|off]       watch a key (toggle) / stop all / list
+
+DATA FILE: GetInfo(66) .. "Keycheck_data.lua" (the MUSHclient folder)
+  return { keys = { ["201"] = {...}, ["Sub"] = {...} },
+           warn = { melt_at } }
+  Each key: name, from, area, room (mapper uid or nil), rough (room is
+  only the area entrance, shown with *), cmd (pickup command, default
+  krk; e.g. orbs use "keyr replace orb", Grax "keyr replace grax",
+  Crynn's Key "uncurse;krk"), warn (true = watched by warnkey).
+  The key list is NOT in the plugin. DEFAULT_KEYS (one example key per
+  tab: the Fury tower key on 201, the thin dragonscale key from Bagger in
+  Ascent on Sub, recorded live by keyrecord) is written only when no data
+  file exists, so the
+  published copy carries no one's personal key list. A data file that
+  will not load is never overwritten (data_ok); fix it and reload.
+  Written to a .tmp file, then os.remove + os.rename (Windows rename
+  will not replace).
+
+THE WINDOW
+  themed_miniwindows ThemedTextWindow, same recipe as MarketWatch: link
+  text is Lua run in this plugin, so the KW_* functions must stay
+  GLOBAL; set_scroll AFTER fit_contents or the top rows lose their
+  hotspots; z-order 99999 so the layout's invisible drag bar (z 154)
+  does not eat clicks; 400px cap, scrolls; body font redefined bold
+  right after creation (TextRect loads it once), so it does not depend
+  on the world's show_bold. Redraws after a click keep the scroll.
+  Rows: [go] (mapper goto), [remove] (keyring get <object id>, only for
+  keys on the ring), [delete] (two clicks: [sure?] for 5s, then gone
+  from the data file; no undo). Missing = bright red, on the ring but
+  melting within MELT_HOURS (20) = x200 pink. "1 of 2?" = a doubled
+  name where you hold one; the keyring cannot say which.
+
+CAPTURES
+  keyring data / invdata come between tags; KeyringLine (match *,
+  sequence 100, omitted) is only enabled between a start tag and its end
+  tag (start/end triggers at 90 so they win). invdata purposes queue
+  (RequestInv / InvEnd). Keyring data: id,flags,name,level,type,?,?,secs
+  (field 8 = seconds until it melts, -1 = none).
+
+PICKUPS AND KEYRECORD
+  KeyLoot triggers (always on, sequence 50, keep_evaluating): get /
+  get from container or corpse / receive with or without "from" /
+  deftly steal / "<mob> gives you <item>" / "<mob> gives <item> to you" /
+  "You buy <item> from <shop> for <price>." (v3.1).
+  A listed name runs its cmd (once per "(N)" count, max 5). "... from
+  your keyring" is skipped so [remove] is not undone. keyrecord: room is
+  where you stood when you typed it; 1.5s after the last loot line it
+  asks invdata + keyring data. Already on the keyring = key. Still loose
+  in inventory = offered with "keyring put <object id>", then KR_Recheck
+  reads the keyring again 1s later; whatever it took is a key or pass
+  (v3.1: the game decides; the old item-type-13 test was dropped so
+  passes work). New loot during the wait restarts the check. Known name
+  -> room updated; new name -> appended to the tab for your level with
+  cmd = DefaultCmd: nil (krk) if the name has the word "key", else
+  "keyring replace <last word>", since krk only finds items called key.
+
+KEYRING REPLIES (wording from the client log, not guessed)
+  "You replace|put <key> on your keyring." -> gagged, green "Key Added".
+  "<key> will expire before the one already on your keyring." -> gagged.
+
+WARNKEY
+  Keys with warn = true are watched ("warnkey <#>" toggles). Every
+  keycheck stores warn.melt_at = when the soonest watched key melts
+  (v3.5: only keys on the keyring with a running timer count; an expired
+  or not-yet-gathered key never warns, e.g. on a long redo).
+  WarnKeyTick (timer, 30s): when that is inside MELT_HOURS and the last
+  keycheck or reminder was 2+ hours ago, it reads the keyring quietly
+  (capture mode "warn") and prints only the [Gather Keys] lines, no
+  window (v3.6). Each read refreshes melt_at, so replacing the key ends
+  it. Nothing watched = melt_at nil = no reminders.
+
+DEBUG
+  local debug = true prints each keyring name and keyrecord's counts.
+
+HISTORY
+  v1.x KeyWarning: Crynn 24h spouse warning + missing-key list.
+  v1.9-2.7 (2026-11-25): window, keyroom, tabs, keyrecord, own krk, Key
+  Added, [remove]/[delete], warnkey, renamed Keycheck (same plugin id).
+  v3.6 (2026-11-25): the 2-hour reminder no longer opens the keycheck
+  window; it reads the keyring quietly and prints the [Gather Keys] line.
+  v3.5 (2026-11-25): a watched key that is not on the keyring (expired,
+  or not gathered yet on a long redo) stops warning: no [Gather Keys]
+  line, no 2-hour reopen, until a keycheck sees it back with a timer.
+  v3.4 (2026-11-25): ONE NUMBER PER KEY: 201-tab keys 1-100; Sub keys
+  SUB_BASE (100) + index = 101-200 (KeyNum / FromNum), the same
+  in the window, keyroom (which now lists both tabs; "sub" prefix gone)
+  and warnkey. WARNKEY now watches chosen keys: "warnkey <#>" toggles
+  warn = true on that key (several allowed), "warnkey off" clears all,
+  bare lists. A watched key warns under MELT_HOURS (20h, same as pink);
+  warn_melt_at = the soonest watched melt. An old warn.on = true (the
+  v3.3 Crynn's Key switch) migrates to a watch on Crynn's Key. Watched
+  numbers show cyan.
+  v3.3 (2026-11-25): warnkey defaults to 20 hours (WARN_DEFAULT, was 24).
+  "warnkey 1" / "warnkey 0" mean on / off (a bare 1 had read as a
+  1-hour warning). Hours must be 2+, and a saved hours below 2 loads as
+  20. (Superseded by v3.4.)
+  v3.2 (2026-11-25): Sub tab example key (thin dragonscale key, Ascent
+  43150) in DEFAULT_KEYS.
+  v3.1 (2026-11-25): keyrecord sees "You buy ..." lines; the keyring
+  decides what counts (keyring put + re-read), so passes record; new
+  non-"key" names get "keyring replace <last word>" as their cmd.
+  v3.0 (2026-11-25): key list moved to the data file (per-key cmd
+  replaces ~40 hard-coded pickup triggers); quest-complete trigger
+  removed; x200 melting highlight; warnkey 2-hour auto-open.
+-->
+
+<triggers>
+  <!-- keyring data capture: start/end at sequence 90 so they win over
+       the catch-all collector at 100 -->
+  <trigger
+    enabled="n"
+    name="KeyringStart"
+    match="{keyring}"
+    omit_from_output="y"
+    script="KeyringStart"
+    sequence="90"
+  >
+  </trigger>
+
+  <trigger
+    enabled="n"
+    name="KeyringEnd"
+    match="{/keyring}"
+    omit_from_output="y"
+    script="KeyringEnd"
+    sequence="90"
+  >
+  </trigger>
+
+  <trigger
+    enabled="n"
+    name="KeyringLine"
+    match="*"
+    omit_from_output="y"
+    script="KeyringLine"
+    sequence="100"
+  >
+  </trigger>
+
+  <!-- invdata capture for keyrecord (shares KeyringLine) -->
+  <trigger
+    enabled="n"
+    name="InvStart"
+    match="^\{invdata\}$"
+    regexp="y"
+    omit_from_output="y"
+    script="InvStart"
+    sequence="90"
+  >
+  </trigger>
+
+  <trigger
+    enabled="n"
+    name="InvEnd"
+    match="^\{/invdata\}$"
+    regexp="y"
+    omit_from_output="y"
+    script="InvEnd"
+    sequence="90"
+  >
+  </trigger>
+
+  <!-- keyring replies: swapped for a green "Key Added" (KeyAdded) -->
+  <trigger
+    enabled="y"
+    name="KeyAdded_Replace"
+    match="^You replace .+ on your keyring\.$"
+    regexp="y"
+    omit_from_output="y"
+    script="KeyAdded"
+    sequence="100"
+  >
+  </trigger>
+
+  <trigger
+    enabled="y"
+    name="KeyAdded_Put"
+    match="^You put .+ on your keyring\.$"
+    regexp="y"
+    omit_from_output="y"
+    script="KeyAdded"
+    sequence="100"
+  >
+  </trigger>
+
+  <!-- the newer copy is already on the ring: nothing added, hide it -->
+  <trigger
+    enabled="y"
+    name="KeyAdded_Older"
+    match="^.+ will expire before the one already on your keyring\.$"
+    regexp="y"
+    omit_from_output="y"
+    sequence="100"
+  >
+  </trigger>
+
+  <!-- loot watchers (always on): run a listed key's pickup command and
+       feed keyrecord. keep_evaluating so other plugins' triggers on the
+       same line still fire. -->
+  <trigger enabled="y" group="KeyLoot" name="KR_Get"
+    match="^You get (.+?) from (.+?)\.?$"
+    regexp="y" keep_evaluating="y" script="KR_Loot" sequence="50">
+  </trigger>
+  <trigger enabled="y" group="KeyLoot" name="KR_GetFloor"
+    match="^You get (.+?)\.?$"
+    regexp="y" keep_evaluating="y" script="KR_Loot" sequence="50">
+  </trigger>
+  <trigger enabled="y" group="KeyLoot" name="KR_Receive"
+    match="^You receive (.+?) from (.+?)\.?$"
+    regexp="y" keep_evaluating="y" script="KR_Loot" sequence="50">
+  </trigger>
+  <trigger enabled="y" group="KeyLoot" name="KR_ReceiveBare"
+    match="^You receive (.+?)\.?$"
+    regexp="y" keep_evaluating="y" script="KR_Loot" sequence="50">
+  </trigger>
+  <trigger enabled="y" group="KeyLoot" name="KR_Steal"
+    match="^You deftly steal (.+?) from (.+?)\.?$"
+    regexp="y" keep_evaluating="y" script="KR_Loot" sequence="50">
+  </trigger>
+  <trigger enabled="y" group="KeyLoot" name="KR_Gives"
+    match="^(.+?) gives you (.+?)\.?$"
+    regexp="y" keep_evaluating="y" script="KR_Loot" sequence="50">
+  </trigger>
+  <trigger enabled="y" group="KeyLoot" name="KR_GivesTo"
+    match="^(.+?) gives (.+?) to you\.?$"
+    regexp="y" keep_evaluating="y" script="KR_Loot" sequence="50">
+  </trigger>
+  <trigger enabled="y" group="KeyLoot" name="KR_Buy"
+    match="^You buy (.+?) from (.+?) for .+\.$"
+    regexp="y" keep_evaluating="y" script="KR_Loot" sequence="50">
+  </trigger>
+</triggers>
+
+<timers>
+  <!-- warnkey: repeats the [Gather Keys] warning every 2 hours while a
+       watched key is close to melting (WarnKeyTick decides; this only
+       wakes it up) -->
+  <timer name="WarnKeyTick"
+     second="30"
+     enabled="y"
+     send_to="12"
+     >
+  <send>WarnKeyTick ()</send>
+  </timer>
+</timers>
+
+<!-- Aliases -->
+
+<aliases>
+  <alias
+    enabled="y"
+    match="keycheck"
+    name="ManualKeyCheck"
+    script="ManualKeyCheck"
+    sequence="100"
+  >
+  </alias>
+  <alias
+    enabled="y"
+    match="^keycheck\s+reload\s*$"
+    regexp="y"
+    name="KeyCheckReload"
+    script="KeyCheckReload"
+    sequence="90"
+  >
+  </alias>
+  <alias
+    enabled="y"
+    match="^keycheck\s+help\s*$"
+    regexp="y"
+    name="KeyCheckHelp"
+    script="KeyCheckHelp"
+    sequence="90"
+  >
+  </alias>
+  <alias
+    enabled="y"
+    match="^warnkey(?:\s+(\S+))?\s*$"
+    regexp="y"
+    name="WarnKey"
+    script="WarnKeyCmd"
+    sequence="100"
+  >
+  </alias>
+  <alias
+    enabled="y"
+    match="^krk$"
+    regexp="y"
+    name="Krk"
+    script="KrkCmd"
+    sequence="100"
+  >
+  </alias>
+  <alias
+    enabled="y"
+    match="^keyrecord(?:\s+(\S+))?\s*$"
+    regexp="y"
+    name="KeyRecord"
+    script="KeyRecordCmd"
+    sequence="100"
+  >
+  </alias>
+  <alias
+    enabled="y"
+    match="^keyroom(?:\s+(.+?))?\s*$"
+    regexp="y"
+    name="KeyRoom"
+    script="KeyRoomCmd"
+    sequence="100"
+  >
+  </alias>
+</aliases>
+
+<!-- Script -->
+
+<script>
+<![CDATA[
+
+require "gmcphelper"
+
+-- Keep in step with version= above; shown on load so a reload is visible.
+local VERSION = "3.6"
+
+-- Standard colour theme
+local CLR_TAG  = "#875FFF"   -- x099 brackets
+local CLR_NAME = "#00D7FF"   -- x045 plugin name
+local CLR_MSG  = "#FFFFFF"   -- message text
+local CLR_HI   = "#00FF87"   -- x048 good news, values, links
+local CLR_WARN = "#FFAF00"   -- errors/usage (semantic, not part of the theme)
+local CLR_MISS = "#FF0000"   -- missing keys: bright red
+local CLR_MELT = "#FF00D7"   -- x200: a key melting within MELT_HOURS
+
+local MELT_HOURS = 20
+
+-- "[Keycheck] message" echo. `colour` defaults to the plain message colour.
+local function KeyNote(text, colour)
+  ColourTell(CLR_TAG,  "black", "[")
+  ColourTell(CLR_NAME, "black", "Keycheck")
+  ColourTell(CLR_TAG,  "black", "] ")
+  ColourNote(colour or CLR_MSG, "black", text)
+end
+
+local manual_check = false
+
+-- Set to true to print each captured key name (to confirm name parsing).
+local debug = false
+
+-- Split a comma-separated line preserving empty fields (an empty flags field
+-- like "id,,name,..." must not collapse, or every later field shifts left).
+local function SplitFields(s)
+  local t = {}
+  local start = 1
+  while true do
+    local i = string.find(s, ",", start, true)
+    if not i then
+      t[#t + 1] = string.sub(s, start)
+      break
+    end
+    t[#t + 1] = string.sub(s, start, i - 1)
+    start = i + 1
+  end
+  return t
+end
+
+-- Strip Aardwolf colour codes (@x123 extended, @w/@Y/etc standard, @@ literal).
+local function StripColours(s)
+  s = s:gsub("@x%d+", "")
+  s = s:gsub("@%a", "")
+  s = s:gsub("@@", "@")
+  return s
+end
+
+-- Normalise a raw name field to a plain lowercase key for comparison.
+local function CleanName(s)
+  s = StripColours(s or "")
+  s = s:gsub("^%s+", ""):gsub("%s+$", "")
+  return s:lower()
+end
+
+-- ---------------- the key list ----------------
+-- The key list lives in the data file, not here. DEFAULT_KEYS is only what
+-- a brand-new data file starts with: one example key per tab, so each tab
+-- has something to show. Each key:
+--   name   the keyring name (case-insensitive match)
+--   from   who / what it comes from (shown in the window)
+--   area   area label;  room = mapper room for [go] (nil = not known)
+--   rough  true = room is only the area entrance (shown with a *)
+--   cmd    what to run when you get it (default "krk")
+local DEFAULT_KEYS = {
+  ["201"] = {
+    { name = "the tower key", from = "Philip the rat", area = "Fury", room = 45678 },
+  },
+  ["Sub"] = {
+    { name = "a thin dragonscale key", from = "Bagger, the entrance guard", area = "Ascent", room = 43150 },
+  },
+}
+
+local TABS = { "201", "Sub" }
+local keys = { ["201"] = {}, ["Sub"] = {} }
+local cur_tab = "201"
+
+-- "201" / "sub" (any case) -> tab name, else nil.
+local function TabFromWord(w)
+  w = (w or ""):lower()
+  for _, tab in ipairs(TABS) do
+    if tab:lower() == w then return tab end
+  end
+  return nil
+end
+
+-- Level from GMCP; nil if not known yet.
+local function CurrentLevel()
+  local ok, v = pcall(gmcp, "char.status.level")
+  return ok and tonumber(v) or nil
+end
+
+-- The tab keycheck and keyrecord use: Sub below 201, otherwise 201.
+local function TabForLevel()
+  local lv = CurrentLevel()
+  if lv and lv < 201 then return "Sub" end
+  return "201"
+end
+
+-- ---------------- data file ----------------
+-- Our own file, not SetVariable: a reinstall or a hang can lose SetVariable
+-- data that was never flushed to the state file.
+local DATA_FILE = GetInfo(66) .. "Keycheck_data.lua"
+-- warnkey: keys with warn = true are watched. Under MELT_HOURS left,
+-- keycheck shows a [Gather Keys] warning, and the WarnKeyTick timer repeats
+-- that warning (no window) every WARN_EVERY_SECS until the key is replaced.
+-- warn_melt_at = when the soonest watched key melts (os.time()), from the
+-- last keyring read; nil = unknown or nothing watched.
+local warn_melt_at = nil
+local WARN_EVERY_SECS = 2 * 3600
+local last_warn = 0            -- os.time() of the last keycheck / reminder
+
+-- A clean copy of one key entry (drops anything unexpected).
+local function CopyKey(k)
+  if type(k) ~= "table" or type(k.name) ~= "string" or k.name == "" then return nil end
+  return { name = k.name, from = tostring(k.from or "?"), area = tostring(k.area or ""),
+           room = tonumber(k.room), rough = (k.rough == true) or nil,
+           cmd = (type(k.cmd) == "string" and k.cmd ~= "") and k.cmd or nil,
+           warn = (k.warn == true) or nil }
+end
+
+local function SaveData()
+  local out = { "-- Keycheck data: your key list and settings. Safe to edit with the\n",
+                "-- client closed or the plugin removed; keycheck reload picks up edits.\n",
+                "return {\n  keys = {\n" }
+  for _, tab in ipairs(TABS) do
+    out[#out + 1] = string.format("    [%q] = {\n", tab)
+    for _, k in ipairs(keys[tab]) do
+      local extra = ""
+      if k.rough then extra = extra .. ", rough = true" end
+      if k.cmd then extra = extra .. string.format(", cmd = %q", k.cmd) end
+      if k.warn then extra = extra .. ", warn = true" end
+      out[#out + 1] = string.format("      { name = %q, from = %q, area = %q, room = %s%s },\n",
+        k.name, k.from or "?", k.area or "", k.room and tostring(k.room) or "nil", extra)
+    end
+    out[#out + 1] = "    },\n"
+  end
+  out[#out + 1] = string.format("  },\n  warn = { melt_at = %s },\n}\n",
+    warn_melt_at and string.format("%d", warn_melt_at) or "nil")
+  local tmp = DATA_FILE .. ".tmp"
+  local f = io.open(tmp, "wb")
+  if not f then
+    KeyNote("Could not write " .. DATA_FILE, CLR_WARN)
+    return
+  end
+  f:write(table.concat(out))
+  f:close()
+  os.remove(DATA_FILE)          -- os.rename will not replace a file on Windows
+  if not os.rename(tmp, DATA_FILE) then
+    KeyNote("Could not save " .. DATA_FILE, CLR_WARN)
+  end
+end
+
+-- Load the data file. No file (first run) -> start from DEFAULT_KEYS and
+-- write it. A file that will not load is left alone, never overwritten.
+local data_ok = true
+local function LoadData()
+  keys = { ["201"] = {}, ["Sub"] = {} }
+  warn_melt_at = nil
+  local f = io.open(DATA_FILE, "rb")
+  if not f then
+    for _, tab in ipairs(TABS) do
+      for _, k in ipairs(DEFAULT_KEYS[tab]) do keys[tab][#keys[tab] + 1] = CopyKey(k) end
+    end
+    SaveData()
+    return
+  end
+  local text = f:read("*a")
+  f:close()
+  local fn = loadstring(text or "")
+  local ok, t = false, nil
+  if fn then
+    setfenv(fn, {})
+    ok, t = pcall(fn)
+  end
+  if not ok or type(t) ~= "table" or type(t.keys) ~= "table" then
+    data_ok = false
+    KeyNote("Could not read " .. DATA_FILE .. "; nothing will be saved until it is fixed.", CLR_WARN)
+    return
+  end
+  for _, tab in ipairs(TABS) do
+    for _, k in ipairs(type(t.keys[tab]) == "table" and t.keys[tab] or {}) do
+      local c = CopyKey(k)
+      if c then keys[tab][#keys[tab] + 1] = c end
+    end
+  end
+  if type(t.warn) == "table" then
+    warn_melt_at = tonumber(t.warn.melt_at)
+    -- v3.3 and older: warnkey was one on/off switch for Crynn's Key. Carry
+    -- an "on" over as a watch on Crynn's Key when nothing is watched yet.
+    if t.warn.on == true then
+      local any, crynn = false, nil
+      for _, tab in ipairs(TABS) do
+        for _, k in ipairs(keys[tab]) do
+          if k.warn then any = true end
+          if not crynn and k.name:lower() == "crynn's key" then crynn = k end
+        end
+      end
+      if not any and crynn then crynn.warn = true end
+    end
+  end
+end
+
+-- Every change goes through here, so a broken file is never overwritten.
+local function Save()
+  if data_ok then SaveData() end
+end
+
+LoadData()
+
+-- The room to walk to for a key, and the area label (with * when rough).
+local function RoomFor(k)
+  return k.room, (k.rough and k.room) and (k.area .. "*") or k.area
+end
+
+-- One number per key whatever your level: 201-tab keys are 1-100, Sub-tab
+-- keys 101-200 (SUB_BASE + index). Used in the window, keyroom and warnkey.
+local SUB_BASE = 100
+local function KeyNum(tab, i)
+  return tab == "Sub" and (SUB_BASE + i) or i
+end
+local function FromNum(n)
+  n = tonumber(n)
+  if not n or n < 1 then return nil end
+  if n > SUB_BASE then return "Sub", n - SUB_BASE end
+  return "201", n
+end
+
+-- "kearvek" -> "Kearvek"
+local function NiceArea(zone)
+  if not zone or zone == "" then return "" end
+  return zone:sub(1, 1):upper() .. zone:sub(2)
+end
+
+-- ---------------- keyring window ----------------
+-- Same chrome as MarketWatch's pop-up: themed_miniwindows' ThemedTextWindow
+-- with the package theme, our palette on the text only. Link text is Lua run
+-- in this plugin (text_rect.lua browseUrl -> loadstring), so the KW_*
+-- functions are global.
+local gHaveWin = pcall(require, "themed_miniwindows")
+
+local WIN_ID        = "Keycheck_keyring"
+local WIN_FONT      = "Consolas"
+local WIN_FONT_SIZE = 13
+
+local gWin = nil
+local last_have = nil   -- name -> list of { id, secs }, from the latest keycheck
+
+local gColCache = {}
+local function col(hex)
+  if not gColCache[hex] then gColCache[hex] = ColourNameToRGB(hex) end
+  return gColCache[hex]
+end
+
+-- One line of style runs plus its hyperlinks. Link positions count the
+-- VISIBLE text only, which is what TextRect indexes against.
+local function winLine(segs)
+  local styles, links, pos = {}, {}, 1
+  for _, s in ipairs(segs) do
+    if s.text ~= "" then
+      styles[#styles + 1] = { text = s.text, textcolour = col(s.colour or CLR_MSG) }
+      if s.code then
+        links[#links + 1] = { start = pos, stop = pos + #s.text - 1, text = s.code, label = s.tip }
+      end
+      pos = pos + #s.text
+    end
+  end
+  return styles, links
+end
+
+-- Never reuse an object the library no longer knows about (a zombie window
+-- has live hotspots and no window_map entry).
+local function ensureWin()
+  if not gHaveWin then return false end
+  if gWin and not (ThemedWindowClass and ThemedWindowClass.window_map
+                   and ThemedWindowClass.window_map[WIN_ID]) then
+    gWin = nil
+    pcall(WindowDelete, WIN_ID)
+  end
+  if not gWin then
+    local ok, w = pcall(ThemedTextWindow,
+      WIN_ID,
+      0, 0,            -- first-run position; after that it stays where dragged
+      700, 600,        -- default size; fit_contents sizes it to the text
+      "Keyring",
+      "center",        -- title alignment
+      true,            -- is_temporary: gives the title-bar close button
+      false,           -- resizeable
+      true,            -- text_scrollable: the list can be taller than the cap
+      false,           -- text_selectable
+      false,           -- text_copyable
+      false,           -- url_hyperlinks: ours are explicit
+      false,           -- autowrap: rows are laid out in columns
+      WIN_FONT, WIN_FONT_SIZE,   -- title font
+      WIN_FONT, WIN_FONT_SIZE,   -- text font
+      200,             -- max lines
+      nil,             -- padding
+      true,            -- defer showing until drawn
+      false, nil,
+      "Close")
+    if not ok or not w then
+      gHaveWin = false
+      return false
+    end
+    gWin = w
+    -- Bold body text. A style's bold flag only shows when the world's
+    -- show_bold option is on, so instead redefine the TextRect's normal
+    -- font as bold. TextRect:loadFont creates it once at init and never
+    -- again for the same name/size, so this sticks, and widths and link
+    -- hotspots are measured with the same (bold) font.
+    pcall(function()
+      local tr = gWin.textrect
+      WindowFont(tr.window, tr.font, WIN_FONT, WIN_FONT_SIZE, true, false, false, false, 0)
+      tr.font_height = WindowFontInfo(tr.window, tr.font, 1)
+      tr:setLineSpacing(tr.line_spacing)
+    end)
+    local prior = gWin.do_on_delete
+    gWin.do_on_delete = function(self)
+      if prior then prior(self) end
+      if gWin == self then gWin = nil end
+    end
+  end
+  return true
+end
+
+-- "3d 4h" / "5h 12m" / "" for no timer.
+local function TimeLeft(secs)
+  if not secs or secs < 0 then return "" end
+  local d = math.floor(secs / 86400)
+  local h = math.floor((secs % 86400) / 3600)
+  local m = math.floor((secs % 3600) / 60)
+  if d > 0 then return string.format("%dd %dh", d, h) end
+  return string.format("%dh %dm", h, m)
+end
+
+local function pad(s, n)
+  if #s >= n then return s:sub(1, n) end
+  return s .. string.rep(" ", n - #s)
+end
+
+-- Match the captured keyring against one tab. Returns rows + shortfall.
+-- status: "ok", "missing", or "unsure" (a doubled name where you hold some
+-- but not all, so which one is gone cannot be told).
+local function BuildRows(tab, have)
+  local list = keys[tab]
+  local want = {}
+  for _, k in ipairs(list) do
+    local n = k.name:lower()
+    want[n] = (want[n] or 0) + 1
+  end
+  local seen, rows, short, counted = {}, {}, 0, {}
+  for i, k in ipairs(list) do
+    local n = k.name:lower()
+    seen[n] = (seen[n] or 0) + 1
+    local got = have[n] and #have[n] or 0
+    local status = "ok"
+    if got == 0 then status = "missing"
+    elseif got < want[n] then status = "unsure" end
+    if not counted[n] then
+      counted[n] = true
+      if got < want[n] then short = short + (want[n] - got) end
+    end
+    local uid, area = RoomFor(k)
+    rows[#rows + 1] = { tab = tab, idx = i, key = k, status = status, uid = uid,
+                        area = area or "", ring = have[n] and have[n][seen[n]] or nil }
+  end
+  return rows, short
+end
+
+-- [delete] needs a second click: the first arms it for that key and the
+-- row shows [sure?] until it is clicked or 5 seconds pass.
+local pending_delete = nil     -- { key = <entry>, gen = <n> }
+local delete_gen = 0
+
+-- One window row. The [go] link and the key name both walk to the room.
+-- [remove] (only for a key on the keyring) takes it off the keyring;
+-- [delete] takes the key out of Keycheck for good. A key on the ring that
+-- melts within MELT_HOURS has its name and time in x200.
+local function RowSegs(r)
+  local ref = string.format("%q,%d", r.tab, r.idx)
+  local arming = pending_delete and pending_delete.key == r.key
+  local secs = r.ring and r.ring.secs
+  local melting = r.status == "ok" and secs and secs >= 0 and secs < MELT_HOURS * 3600
+  local go_code = r.uid and ("KW_Goto(" .. ref .. ")") or nil
+  local tip = r.uid and ("Walk to room " .. r.uid .. " for " .. r.key.name) or nil
+  local name_colour = (r.status ~= "ok") and CLR_MISS or (melting and CLR_MELT or CLR_MSG)
+  local mark = ""
+  if r.status == "unsure" then mark = " (1 of 2?)" end
+  local name_txt = r.key.name .. mark
+  return {
+    { text = string.format(" %3d  ", KeyNum(r.tab, r.idx)), colour = r.key.warn and CLR_NAME or CLR_TAG },
+    { text = r.uid and "[go]" or " -- ", colour = r.uid and CLR_HI or CLR_TAG, code = go_code, tip = tip },
+    { text = "  " },
+    { text = name_txt, colour = name_colour, code = go_code, tip = tip },
+    { text = string.rep(" ", math.max(1, 34 - #name_txt)) },
+    { text = pad(r.key.from or "?", 26), colour = CLR_MSG },
+    { text = " " },
+    { text = pad(r.area ~= "" and r.area or "?", 11), colour = CLR_NAME },
+    { text = " " },
+    { text = pad(TimeLeft(secs), 8), colour = melting and CLR_MELT or CLR_HI },
+    { text = "  " },
+    (r.ring and r.ring.id)
+      and { text = "[remove]", colour = CLR_NAME, code = "KW_Unring(" .. ref .. ")",
+            tip = "Take " .. r.key.name .. " off your keyring" }
+      or  { text = "        " },
+    { text = " " },
+    arming
+      and { text = "[sure?]", colour = CLR_MISS, code = "KW_Delete(" .. ref .. ")",
+            tip = "Click again to delete " .. r.key.name .. " from Keycheck for good" }
+      or  { text = "[delete]", colour = CLR_WARN, code = "KW_Delete(" .. ref .. ")",
+            tip = "Delete " .. r.key.name .. " from Keycheck for good (asks once more)" },
+  }
+end
+
+-- The tab buttons: the open tab in green, the other one clickable.
+local function TabSegs()
+  local segs = { { text = " " } }
+  for _, tab in ipairs(TABS) do
+    if tab == cur_tab then
+      segs[#segs + 1] = { text = "[ " .. tab .. " ]", colour = CLR_HI }
+    else
+      segs[#segs + 1] = { text = "[ " .. tab .. " ]", colour = CLR_TAG,
+                          code = string.format("KW_Tab(%q)", tab), tip = "Show the " .. tab .. " keys" }
+    end
+    segs[#segs + 1] = { text = "   " }
+  end
+  return segs
+end
+
+-- Output-window version for when themed_miniwindows will not load.
+local function ShowKeyNotes(rows)
+  for _, r in ipairs(rows) do
+    if r.status ~= "ok" then
+      ColourTell(CLR_TAG, "black", string.format("  %3d  ", KeyNum(r.tab, r.idx)))
+      if r.uid then
+        Hyperlink("mapper goto " .. r.uid, r.key.name, "Walk to room " .. r.uid, CLR_MISS, "black", false)
+      else
+        ColourTell(CLR_MISS, "black", r.key.name)
+      end
+      ColourNote(CLR_MSG, "black", "  " .. (r.key.from or "?") .. "  ", CLR_NAME, "black", r.area)
+    end
+  end
+end
+
+-- Draw cur_tab from the last keyring capture. keep_scroll: a redraw of a
+-- window that is already up (after a click, keyroom, keyrecord) stays where
+-- you were reading instead of jumping back to the top.
+local function ShowKeyWindow(keep_scroll)
+  if not last_have then return end
+  local rows, short = BuildRows(cur_tab, last_have)
+  local keep = nil
+  if keep_scroll and gWin and gWin.textrect then
+    keep = tonumber(gWin.textrect.display_start_line)
+  end
+  if not ensureWin() then
+    ShowKeyNotes(rows)
+    return
+  end
+  gWin:clear(false)
+
+  local s, l = winLine(TabSegs())
+  gWin:add_text(s, false, l)
+  gWin:add_text(winLine { { text = " " } }, false, {})
+
+  if #rows == 0 then
+    gWin:add_text(winLine { { text = " No keys on the " .. cur_tab .. " tab yet.", colour = CLR_MSG } }, false, {})
+    gWin:add_text(winLine {
+      { text = " Stand where a key comes from, type ", colour = CLR_TAG },
+      { text = "keyrecord", colour = CLR_HI },
+      { text = ", then get the key.", colour = CLR_TAG },
+    }, false, {})
+  else
+    s, l = winLine {
+      { text = " Keyring " .. cur_tab .. ": ", colour = CLR_MSG },
+      { text = tostring(#rows - short), colour = CLR_HI },
+      { text = " of ", colour = CLR_MSG },
+      { text = tostring(#rows), colour = CLR_HI },
+      { text = " keys", colour = CLR_MSG },
+      { text = short > 0 and ("   " .. short .. " missing") or "   all present",
+        colour = short > 0 and CLR_MISS or CLR_HI },
+    }
+    gWin:add_text(s, false, l)
+
+    local function section(title, want_ok)
+      local any = false
+      for _, r in ipairs(rows) do
+        if (r.status == "ok") == want_ok then
+          if not any then
+            gWin:add_text(winLine { { text = " " } }, false, {})
+            gWin:add_text(winLine { { text = " " .. title, colour = CLR_NAME } }, false, {})
+            any = true
+          end
+          s, l = winLine(RowSegs(r))
+          gWin:add_text(s, false, l)
+        end
+      end
+    end
+    section("Missing", false)
+    section("On your keyring", true)
+  end
+
+  gWin:add_text(winLine { { text = " " } }, false, {})
+  gWin:add_text(winLine {
+    { text = " Click ", colour = CLR_TAG },
+    { text = "[go]", colour = CLR_HI },
+    { text = " to walk there.  ", colour = CLR_TAG },
+    { text = "keyroom <#>", colour = CLR_HI },
+    { text = " sets a key's room to where you stand.", colour = CLR_TAG },
+  }, false, {})
+  gWin:add_text(winLine {
+    { text = " ", colour = CLR_TAG },
+    { text = "[remove]", colour = CLR_NAME },
+    { text = " takes a key off your keyring.  ", colour = CLR_TAG },
+    { text = "[delete]", colour = CLR_WARN },
+    { text = " drops it from Keycheck for good (click twice).", colour = CLR_TAG },
+  }, false, {})
+  gWin:add_text(winLine {
+    { text = " ", colour = CLR_TAG },
+    { text = "keyrecord", colour = CLR_HI },
+    { text = " in the room a key comes from, then get it, adds it here.", colour = CLR_TAG },
+  }, false, {})
+  gWin:add_text(winLine {
+    { text = " ", colour = CLR_TAG },
+    { text = "pink", colour = CLR_MELT },
+    { text = " = melts within " .. MELT_HOURS .. " hours.  * = only the area entrance; ", colour = CLR_TAG },
+    { text = "keyroom <#>", colour = CLR_HI },
+    { text = " it.", colour = CLR_TAG },
+  }, false, {})
+
+  -- 400px tall at most; the rest scrolls (wheel or scrollbar).
+  pcall(function() gWin:fit_contents(2000, 400) end)
+  -- Scroll AFTER fitting: add_text follows the newest line like a console,
+  -- and rows above the viewport get no hotspot when drawn. setScroll clamps
+  -- an out-of-range line, so a kept position past the end is safe.
+  pcall(function() gWin:set_scroll(keep or 1) end)
+  gWin:draw()
+  gWin:show()
+  -- The layout's invisible drag bar (z 154) eats clicks on windows under it.
+  pcall(WindowSetZOrder, WIN_ID, 99999)
+  pcall(Repaint)
+end
+
+-- Redraw the window if it is up, keeping the scroll.
+-- Safe from inside a link click: no WindowDelete happens here.
+local function RedrawIfOpen()
+  if gWin and last_have then
+    ShowKeyWindow(true)
+  end
+end
+
+-- Tab button click. A different tab starts at the top.
+function KW_Tab(tab)
+  tab = TabFromWord(tab)
+  if not tab or tab == cur_tab then return end
+  cur_tab = tab
+  ShowKeyWindow(false)
+end
+
+-- [remove] click: take this key off the keyring by its object id (from the
+-- last keyring data), then drop it from the window's copy so the row turns
+-- red without another keyring query.
+function KW_Unring(tab, i)
+  tab, i = TabFromWord(tab), tonumber(i)
+  if not (tab and i and last_have) then return end
+  for _, r in ipairs((BuildRows(tab, last_have))) do
+    if r.idx == i then
+      if not (r.ring and r.ring.id) then return end
+      local id = r.ring.id
+      SendNoEcho("keyring get " .. id)
+      local list = last_have[r.key.name:lower()] or {}
+      for j = #list, 1, -1 do
+        if list[j].id == id then table.remove(list, j) end
+      end
+      KeyNote("Took " .. r.key.name .. " off your keyring.")
+      RedrawIfOpen()
+      return
+    end
+  end
+end
+
+-- [delete] click: first click arms [sure?] for 5 seconds, second deletes
+-- the key from the list and the data file. No undo.
+function KW_Delete(tab, i)
+  tab, i = TabFromWord(tab), tonumber(i)
+  local k = tab and i and keys[tab][i]
+  if not k then return end
+  if not (pending_delete and pending_delete.key == k) then
+    delete_gen = delete_gen + 1
+    pending_delete = { key = k, gen = delete_gen }
+    DoAfterSpecial(5, "KW_DeleteExpire(" .. delete_gen .. ")", sendto.script)
+    RedrawIfOpen()
+    return
+  end
+  pending_delete = nil
+  table.remove(keys[tab], i)
+  Save()
+  KeyNote("Deleted " .. k.name .. " (" .. (k.from or "?") .. ") from Keycheck's " .. tab .. " list.")
+  RedrawIfOpen()
+end
+
+function KW_DeleteExpire(gen)
+  if pending_delete and pending_delete.gen == tonumber(gen) then
+    pending_delete = nil
+    RedrawIfOpen()
+  end
+end
+
+-- [go] link / key name click: walk to that key's room. Window stays open.
+function KW_Goto(tab, i)
+  tab, i = TabFromWord(tab), tonumber(i)
+  local k = tab and i and keys[tab][i]
+  if not k then return end
+  local uid = RoomFor(k)
+  if not uid then return end
+  KeyNote("Walking to " .. k.name .. " (" .. (k.from or "?") .. ", room " .. uid .. ")")
+  Execute("mapper goto " .. uid)
+end
+
+-- Every watched key, in list order: { tab, i, k }.
+local function Watched()
+  local out = {}
+  for _, tab in ipairs(TABS) do
+    for i, k in ipairs(keys[tab]) do
+      if k.warn then out[#out + 1] = { tab = tab, i = i, k = k } end
+    end
+  end
+  return out
+end
+
+-- Check the watched keys against a keyring capture: sets warn_melt_at to
+-- the soonest melt and saves if it moved. Only a key that is on the keyring
+-- with a running timer counts ("live"): an expired or not-yet-gathered key
+-- (someone on a long redo) never warns until it is back on the ring. Returns { k, secs, live, due } per watched key.
+local function UpdateMelt(have)
+  local now, soonest, status = os.time(), nil, {}
+  for _, e in ipairs(Watched()) do
+    local r = have[e.k.name:lower()] and have[e.k.name:lower()][1]
+    local live = r ~= nil and r.secs ~= nil and r.secs > 0
+    local secs = live and r.secs or 0
+    status[#status + 1] = { k = e.k, secs = secs, live = live, due = live and secs < MELT_HOURS * 3600 }
+    if live and (not soonest or secs < soonest) then soonest = secs end
+  end
+  local melt_at = soonest and (now + soonest) or nil
+  if melt_at ~= warn_melt_at then
+    warn_melt_at = melt_at
+    Save()
+  end
+  return status
+end
+
+local function GatherTag()
+  ColourTell(CLR_TAG,  "black", "[")
+  ColourTell(CLR_NAME, "black", "Gather Keys")
+  ColourTell(CLR_TAG,  "black", "] ")
+end
+
+-- warnkey [<#>|off]: <#> (the key's number in keycheck / keyroom) starts or
+-- stops watching that key; off stops watching every key; bare lists them.
+function WarnKeyCmd(name, line, wildcards)
+  local arg = (wildcards[1] or ""):lower()
+  if arg == "" then
+    local w = Watched()
+    GatherTag()
+    if #w == 0 then
+      ColourTell(CLR_TAG,  "black", "No key watched. ")
+      ColourTell(CLR_NAME, "black", "warnkey <#>")
+      ColourNote(CLR_TAG,  "black", " watches one (numbers from keycheck or keyroom).")
+    else
+      ColourNote(CLR_TAG, "black", "Watching (warns under " .. MELT_HOURS .. "h left):")
+      for _, e in ipairs(w) do
+        ColourTell(CLR_NAME, "black", string.format("  %3d  ", KeyNum(e.tab, e.i)))
+        ColourNote(CLR_TAG,  "black", e.k.name)
+      end
+    end
+    return
+  end
+  local k
+  if arg == "off" then
+    local w = Watched()
+    for _, e in ipairs(w) do e.k.warn = nil end
+    GatherTag()
+    ColourNote(CLR_TAG, "black", #w > 0 and ("Stopped watching " .. #w .. " key(s).") or "No key was watched.")
+  else
+    local tab, i = FromNum(arg)
+    k = tab and keys[tab][i]
+    if not k then
+      KeyNote("No key number '" .. arg .. "'. The numbers are in keycheck and keyroom (Sub keys start at 101).", CLR_WARN)
+      return
+    end
+    k.warn = (not k.warn) or nil
+    GatherTag()
+    if k.warn then
+      ColourTell(CLR_TAG,  "black", "Watching ")
+      ColourTell(CLR_NAME, "black", k.name)
+      ColourTell(CLR_TAG,  "black", ": under ")
+      ColourTell(CLR_NAME, "black", MELT_HOURS .. "h")
+      ColourNote(CLR_TAG,  "black", " left you get a [Gather Keys] warning, every 2 hours until it is replaced.")
+    else
+      ColourTell(CLR_TAG,  "black", "Stopped watching ")
+      ColourNote(CLR_NAME, "black", k.name .. ".")
+    end
+  end
+  -- refresh the melt time from the last keycheck, if there was one
+  if last_have then
+    UpdateMelt(last_have)
+  else
+    if #Watched() == 0 then warn_melt_at = nil end
+    Save()
+    if k and k.warn then
+      GatherTag()
+      ColourTell(CLR_TAG,  "black", "Type ")
+      ColourTell(CLR_NAME, "black", "keycheck")
+      ColourNote(CLR_TAG,  "black", " once so it knows when it melts.")
+    end
+  end
+  RedrawIfOpen()
+end
+
+function OnPluginInstall()
+  ColourTell(CLR_TAG, "black", "[")
+  ColourTell(CLR_NAME, "black", "Keycheck")
+  ColourTell(CLR_TAG, "black", "] ")
+  ColourTell(CLR_MSG, "black", "v" .. VERSION .. " loaded, your all-around key manager. ")
+  ColourTell(CLR_HI, "black", "keycheck help")
+  ColourNote(CLR_MSG, "black", " lists everything.")
+end
+
+-- keycheck help. Sorted by command at load, so a new entry can't end up
+-- out of order.
+local HELP = {
+  { "keycheck",                  "Open the Keyring window: every key on your list, missing ones",
+                                 "first in red, with time left. Opens the 201 tab at level 201, Sub below." },
+  { "keycheck help",             "This list." },
+  { "keycheck reload",           "Reload the plugin (also re-reads the data file)." },
+  { "keyrecord",                 "Stand where a key comes from and type it, then get the key: looted",
+                                 "from a corpse or container, picked up, stolen, bought, or handed to",
+                                 "you by a mob. Passes count too: anything the keyring accepts is",
+                                 "recorded with this room (two at once = both). New ones join the tab",
+                                 "for your level and go on the keyring on every later pickup; one",
+                                 "already listed just gets this room. Gives up after 10 minutes." },
+  { "keyrecord sub / 201",       "Same, but into that tab whatever your level." },
+  { "keyrecord stop",            "Stop watching." },
+  { "keyroom",                   "List every key with its number and walk-to room. Numbers stay the",
+                                 "same at any level: 201 keys are 1-100, Sub keys 101-200." },
+  { "keyroom <#>",               "Set key <#>'s room to the room you are standing in." },
+  { "keyroom <#> <room>",        "Set key <#>'s room to a mapper room number." },
+  { "keyroom <#> clear",         "Forget key <#>'s room." },
+  { "krk",                       "Put the key in your inventory on your keyring (keyring replace key)." },
+  { "warnkey",                   "List the keys you are watching." },
+  { "warnkey <#>",               "Watch key <#> (again to stop): under " .. MELT_HOURS .. "h left you get a",
+                                 "[Gather Keys] warning, repeated every 2 hours until it is replaced.",
+                                 "A watched key that has expired off your keyring stays quiet until",
+                                 "you have it again. Watch as many as you like." },
+  { "warnkey off",               "Stop watching every key." },
+}
+table.sort(HELP, function(a, b) return a[1] < b[1] end)
+
+function KeyCheckHelp(name, line, wildcards)
+  ColourTell(CLR_TAG, "black", "[")
+  ColourTell(CLR_NAME, "black", "Keycheck")
+  ColourTell(CLR_TAG, "black", "] ")
+  ColourNote(CLR_MSG, "black", "v" .. VERSION .. " - all-around key manager")
+  Note("")
+  for _, h in ipairs(HELP) do
+    ColourTell(CLR_HI, "black", "  " .. pad(h[1], 22))
+    ColourNote(CLR_MSG, "black", h[2])
+    for i = 3, #h do
+      ColourNote(CLR_MSG, "black", string.rep(" ", 24) .. h[i])
+    end
+  end
+  Note("")
+  ColourNote(CLR_NAME, "black", "  The Keyring window")
+  local window = {
+    { "[ 201 ]  [ Sub ]", "Tabs: keys for level 201, and keys you gather below 201." },
+    { "",                 "Click a tab to switch." },
+    { "[go]",             "Walk there with the mapper (the key name works too)." },
+    { "[remove]",         "Take that key off your keyring (it goes to your inventory)." },
+    { "[delete]",         "Delete the key from Keycheck for good. Click once, it turns into" },
+    { "",                 "[sure?]; click that within 5 seconds to delete. No undo." },
+    { "red",              "Missing from your keyring. \"1 of 2?\" = you hold one of a pair." },
+    { "pink",             "On your keyring but melts within " .. MELT_HOURS .. " hours." },
+    { "*",                "The room is only the area entrance; keyroom it on the right spot." },
+    { "#",                "The key's number for keyroom and warnkey; cyan = watched by warnkey." },
+    { "time",             "How long until the key melts." },
+  }
+  for _, w in ipairs(window) do
+    ColourTell(CLR_HI, "black", "  " .. pad(w[1], 22))
+    ColourNote(CLR_MSG, "black", w[2])
+  end
+  Note("")
+  ColourNote(CLR_NAME, "black", "  On its own")
+  local auto = {
+    "Getting any key on your list runs its pickup command (krk unless the list",
+    "says otherwise), so keys go straight onto your keyring, and the keyring's",
+    "reply shows as a green Key Added.",
+    "Keys you watch with warnkey get a [Gather Keys] warning (only to you) once",
+    "they are under " .. MELT_HOURS .. " hours: on keycheck, and on its own every 2 hours",
+    "until the key is replaced. One that has already expired off your keyring",
+    "stays quiet until you get it again.",
+    "Your key list and settings live in Keycheck_data.lua in your MUSHclient",
+    "folder, so reinstalls and updates keep them. A new install starts with one",
+    "example key per tab (the Fury tower key on 201, the thin dragonscale key",
+    "on Sub); keyrecord adds the rest, [delete] drops the examples.",
+  }
+  for _, a in ipairs(auto) do ColourNote(CLR_MSG, "black", "  " .. a) end
+end
+
+-- keycheck reload. ReloadPlugin from our own script space dies with it, so
+-- bounce it through the world's script space (SnD's sndReload pattern).
+function KeyCheckReload(name, line, wildcards)
+  KeyNote("Reloading...")
+  Execute(GetAlphaOption("script_prefix") ..
+          'DoAfterSpecial(1, "ReloadPlugin(\'' .. GetPluginID() .. '\')", sendto.script)')
+end
+
+-- Current room from GMCP: uid, zone, name. nil if it cannot be read.
+local function HereRoom()
+  local info = gmcp("room.info")
+  local uid = type(info) == "table" and tonumber(info.num)
+  if not uid or uid < 0 then return nil end
+  return uid, tostring(info.zone or ""), tostring(info.name or "")
+end
+
+-- keyroom [<#> [here|<roomid>|clear]]  (numbers: 1-100 = 201 tab, 101-200 = Sub)
+function KeyRoomCmd(name, line, wildcards)
+  local arg = (wildcards[1] or ""):gsub("^%s+", ""):gsub("%s+$", "")
+
+  if arg == "" then
+    KeyNote("Key rooms (keyroom <#> to set one to where you stand):")
+    for _, tab in ipairs(TABS) do
+      ColourNote(CLR_NAME, "black", "  " .. tab)
+      if #keys[tab] == 0 then ColourNote(CLR_TAG, "black", "    none yet; keyrecord adds them.") end
+      for i, k in ipairs(keys[tab]) do
+        local uid, area = RoomFor(k)
+        ColourTell(k.warn and CLR_NAME or CLR_TAG, "black", string.format("  %3d  ", KeyNum(tab, i)))
+        ColourTell(CLR_MSG, "black", pad(k.name, 32))
+        if uid then
+          ColourTell(CLR_NAME, "black", pad(area or "", 11) .. " ")
+          Hyperlink("mapper goto " .. uid, tostring(uid), "Walk to room " .. uid, CLR_HI, "black", false)
+        else
+          ColourTell(CLR_WARN, "black", "no room yet")
+        end
+        Note("")
+      end
+    end
+    return
+  end
+
+  local n, rest = arg:match("^(%d+)%s*(.*)$")
+  local tab, i = FromNum(n)
+  local k = tab and keys[tab][i]
+  if not k then
+    KeyNote("No key number '" .. arg .. "'. Type keyroom to see the numbers.", CLR_WARN)
+    return
+  end
+  rest = rest:lower()
+
+  if rest == "clear" then
+    k.room, k.rough = nil, nil
+    Save()
+    KeyNote(k.name .. " has no room now.")
+  elseif rest:match("^%d+$") then
+    k.room, k.rough = tonumber(rest), nil
+    Save()
+    KeyNote(k.name .. " now walks to room " .. rest .. ".", CLR_HI)
+  elseif rest == "" or rest == "here" then
+    local uid, zone, rname = HereRoom()
+    if not uid then
+      KeyNote("Can't read your room number from GMCP here. Try keyroom " .. n .. " <roomid>.", CLR_WARN)
+      return
+    end
+    k.room, k.rough = uid, nil
+    if zone ~= "" then k.area = NiceArea(zone) end
+    Save()
+    KeyNote(k.name .. " now walks to room " .. uid .. " (" .. rname .. ").", CLR_HI)
+  else
+    KeyNote("Usage: keyroom <#>, keyroom <#> <roomid>, keyroom <#> clear", CLR_WARN)
+    return
+  end
+
+  RedrawIfOpen()
+end
+
+-- ---------------- captures ----------------
+-- keyring data and invdata both come wrapped in tags; KeyringLine (match *)
+-- is only enabled between a start tag and its end tag and appends to
+-- whichever buffer the start tag picked.
+local keyring_lines = {}
+local inv_lines = {}
+local collect = nil            -- buffer KeyringLine appends to, or nil
+local capture_mode = nil       -- "check" (keycheck) or "record"
+
+-- invdata requests answer in the order sent; each {/invdata} pops the
+-- oldest purpose, so overlapping requests never take each other's reply.
+local inv_queue = {}
+local record_inv = {}          -- inventory lines for keyrecord's check
+
+local function RequestInv(purpose)
+  inv_queue[#inv_queue + 1] = purpose
+  EnableTrigger("InvStart", true)
+  EnableTrigger("InvEnd", true)
+  SendNoEcho("invdata")
+end
+
+local function StartKeyringCapture(mode)
+  keyring_lines = {}
+  collect = nil
+  capture_mode = mode
+  EnableTrigger("KeyringStart", true)
+  EnableTrigger("KeyringEnd", true)
+  -- KeyringLine stays disabled until a start tag fires
+  EnableTrigger("KeyringLine", false)
+  SendNoEcho("keyring data")
+end
+
+-- ---------------- pickups and keyrecord ----------------
+-- keyrecord notes the room you stand in, then watches get / receive / steal /
+-- gives-you / buy lines. A moment after the last one it asks for invdata and
+-- keyring data. Anything it saw you get that is already on the keyring is a
+-- key; anything still loose in inventory is offered to the keyring with
+-- "keyring put <id>", and the keyring is read again: whatever it took is a
+-- key or pass. The game decides, so passes and odd item types work.
+local REC_SETTLE   = 1.5    -- seconds after the last loot line before checking
+local REC_RECHECK  = 1.0    -- seconds after the keyring put before re-reading
+local REC_TIMEOUT  = 600    -- keyrecord gives up after 10 minutes
+
+local rec = nil             -- { tab, uid, area, rname, loot = {}, settle, gen, offered }
+local rec_gen = 0
+
+local function StopRecording()
+  rec = nil
+  rec_gen = rec_gen + 1
+end
+
+-- The pickup command for a key name on either tab ("krk" unless the entry
+-- has its own cmd), or nil when the name is not on the list.
+local function PickupCmd(n)
+  for _, tab in ipairs(TABS) do
+    for _, k in ipairs(keys[tab]) do
+      if k.name:lower() == n then return k.cmd or "krk" end
+    end
+  end
+  return nil
+end
+
+-- keyrecord [201|sub|stop]
+function KeyRecordCmd(name, line, wildcards)
+  local arg = (wildcards[1] or ""):lower()
+  if arg == "stop" or arg == "off" then
+    if rec then
+      StopRecording()
+      KeyNote("keyrecord stopped.")
+    else
+      KeyNote("keyrecord was not running.")
+    end
+    return
+  end
+  local tab = TabFromWord(arg)
+  if arg ~= "" and not tab then
+    KeyNote("Usage: keyrecord, keyrecord sub, keyrecord 201, keyrecord stop", CLR_WARN)
+    return
+  end
+  tab = tab or TabForLevel()
+  local uid, zone, rname = HereRoom()
+  if not uid then
+    KeyNote("Can't read your room number from GMCP here, so keyrecord can't start.", CLR_WARN)
+    return
+  end
+  StopRecording()
+  rec_gen = rec_gen + 1
+  rec = { tab = tab, uid = uid, area = NiceArea(zone), rname = rname, loot = {}, settle = 0, gen = rec_gen }
+  DoAfterSpecial(REC_TIMEOUT, "KR_Timeout(" .. rec_gen .. ")", sendto.script)
+  ColourTell(CLR_TAG, "black", "[")
+  ColourTell(CLR_NAME, "black", "Keycheck")
+  ColourTell(CLR_TAG, "black", "] ")
+  ColourTell(CLR_MSG, "black", "Recording keys for the ")
+  ColourTell(CLR_HI, "black", tab)
+  ColourTell(CLR_MSG, "black", " tab in " .. rname .. " (" .. uid .. "). Get the key now; ")
+  ColourTell(CLR_HI, "black", "keyrecord stop")
+  ColourNote(CLR_MSG, "black", " cancels.")
+end
+
+function KR_Timeout(gen)
+  if rec and rec.gen == tonumber(gen) then
+    StopRecording()
+    KeyNote("keyrecord gave up after 10 minutes with no key.", CLR_WARN)
+  end
+end
+
+-- Loot lines (KeyLoot group, always on). Two jobs: run the pickup command
+-- for any key on the list, and feed keyrecord while it runs.
+--   KR_Get        You get <item> from <container / the corpse of mob>
+--   KR_GetFloor   You get <item>.                     (no "from")
+--   KR_Receive    You receive <item> from <mob>
+--   KR_ReceiveBare You receive <item>.                (no "from": the Dark Key)
+--   KR_Steal      You deftly steal <item> from <mob>
+--   KR_Gives      <mob> gives you <item>
+--   KR_GivesTo    <mob> gives <item> to you
+--   KR_Buy        You buy <item> from <shopkeeper> for <price>.
+function KR_Loot(name, line, wildcards)
+  local item, from
+  if name == "KR_Gives" or name == "KR_GivesTo" then
+    from, item = wildcards[1], wildcards[2]
+  else
+    item, from = wildcards[1], wildcards[2]
+  end
+  item = item or ""
+  local count = tonumber(item:match("^%(%s*(%d+)%)")) or 1
+  item = item:gsub("^%(%s*%d+%)%s*", ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if item == "" then return end
+  -- the "from"-less triggers also match the full lines; leave those to the others
+  if (name == "KR_GetFloor" or name == "KR_ReceiveBare") and item:find(" from ", 1, true) then return end
+  if item:lower():find("gold coin", 1, true) then return end
+  -- taking a key off the keyring ([remove] / keyring get) is not a pickup
+  if (from or ""):lower():find("keyring", 1, true) then return end
+  local cmd = PickupCmd(CleanName(item))
+  if cmd then
+    for _ = 1, math.min(count, 5) do Execute(cmd) end
+  end
+  if not rec then return end
+  from = (from or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  from = from:gsub("^the .-corpse of ", ""):gsub("^corpse of ", "")
+  if name == "KR_Steal" then from = from .. " (steal)" end
+  if from == "" then from = rec.rname end
+  table.insert(rec.loot, { item = item, from = from })
+  rec.offered = nil           -- new loot: start the check over
+  rec.settle = rec.settle + 1
+  DoAfterSpecial(REC_SETTLE, "KR_Verify(" .. rec.gen .. "," .. rec.settle .. ")", sendto.script)
+end
+
+-- The loot has settled: look at inventory and the keyring.
+function KR_Verify(gen, settle)
+  if not rec or rec.gen ~= tonumber(gen) or rec.settle ~= tonumber(settle) then return end
+  record_inv = {}
+  RequestInv("record")
+  StartKeyringCapture("record")
+end
+
+-- After offering loose items to the keyring: read the keyring again.
+function KR_Recheck(gen)
+  if not rec or rec.gen ~= tonumber(gen) or not rec.offered then return end
+  StartKeyringCapture("record")
+end
+
+-- Pickup command for a newly recorded name: krk ("keyring replace key")
+-- only finds items called "key", so anything else (a pass, an orb) gets
+-- "keyring replace <last word>". Editable in the data file.
+local function DefaultCmd(name)
+  local lname = name:lower()
+  if lname:find("%f[%a]key%f[%A]") or lname:match("key$") then return nil end
+  local last = lname:match("(%a+)%s*$")
+  return last and ("keyring replace " .. last) or nil
+end
+
+-- Add or update one looted key on rec.tab. A name already on the tab gets
+-- its room set (preferring the entry with the same source); a new name is
+-- added at the end of that tab.
+local function RecordKey(item, from)
+  local list = keys[rec.tab]
+  local want = CleanName(item)
+  local hit = nil
+  for i, k in ipairs(list) do
+    if k.name:lower() == want then
+      if not hit then hit = i end
+      if CleanName(k.from) == CleanName(from) then hit = i break end
+    end
+  end
+  if hit then
+    local k = list[hit]
+    k.room, k.rough = rec.uid, nil
+    if rec.area ~= "" then k.area = rec.area end
+    return hit, false
+  end
+  list[#list + 1] = { name = item, from = from, area = rec.area, room = rec.uid, cmd = DefaultCmd(item) }
+  return #list, true
+end
+
+local function FinishRecord()
+  local on_ring = {}
+  for _, entry in ipairs(keyring_lines) do
+    local f = SplitFields(entry)
+    if f[3] then on_ring[CleanName(f[3])] = true end
+  end
+
+  -- First look: offer every loose looted item to the keyring by object id,
+  -- then come back (KR_Recheck) and read the keyring again.
+  if not rec.offered then
+    local inv_id = {}
+    for _, entry in ipairs(record_inv) do
+      local f = SplitFields(entry)
+      local n, id = f[3] and CleanName(f[3]), tonumber(f[1])
+      if n and id and not inv_id[n] then inv_id[n] = id end
+    end
+    local offered, any = {}, false
+    for _, L in ipairs(rec.loot) do
+      local n = CleanName(L.item)
+      if not on_ring[n] and inv_id[n] and not offered[n] then
+        offered[n] = true
+        any = true
+        SendNoEcho("keyring put " .. inv_id[n])
+      end
+    end
+    if debug then
+      KeyNote("keyrecord: " .. #record_inv .. " inventory lines, " .. #keyring_lines ..
+              " keyring lines, offered " .. tostring(any))
+    end
+    if any then
+      rec.offered = offered
+      DoAfterSpecial(REC_RECHECK, "KR_Recheck(" .. rec.gen .. ")", sendto.script)
+      return
+    end
+  end
+
+  -- Decide: on the keyring now = a key (an offered item it refused is not).
+  local done, got, notkey = {}, {}, {}
+  for _, L in ipairs(rec.loot) do
+    local n = CleanName(L.item)
+    if not done[n] then
+      done[n] = true
+      if on_ring[n] then
+        local idx, new = RecordKey(L.item, L.from)
+        got[#got + 1] = { item = L.item, from = L.from, idx = idx, new = new }
+      else
+        notkey[#notkey + 1] = L.item
+      end
+    end
+  end
+  rec.offered = nil
+
+  if #got == 0 then
+    rec.loot = {}
+    KeyNote("Not a key: " .. table.concat(notkey, ", ") ..
+            ". Still watching; get the key, or keyrecord stop.", CLR_WARN)
+    return
+  end
+
+  Save()
+  local tab, uid, rname = rec.tab, rec.uid, rec.rname
+  StopRecording()
+  for _, g in ipairs(got) do
+    ColourTell(CLR_TAG, "black", "[")
+    ColourTell(CLR_NAME, "black", "Keycheck")
+    ColourTell(CLR_TAG, "black", "] ")
+    ColourTell(CLR_MSG, "black", "Recorded ")
+    ColourTell(CLR_HI, "black", g.item)
+    ColourTell(CLR_MSG, "black", " (" .. g.from .. ") at " .. rname .. " (" .. uid .. ") into keycheck, ")
+    ColourTell(CLR_HI, "black", tab)
+    ColourNote(CLR_MSG, "black", " tab #" .. g.idx .. (g.new and ", new key." or ", room updated."))
+  end
+  RedrawIfOpen()
+end
+
+-- Manual keycheck alias: open the tab for your level.
+function ManualKeyCheck(name, line, wildcards)
+  cur_tab = TabForLevel()
+  manual_check = true
+  last_warn = os.time()        -- keycheck shows the warning itself
+  StartKeyringCapture("check")
+end
+
+-- WarnKeyTick timer (every 30s): while a watched key is inside MELT_HOURS
+-- (as of the last keyring read), read the keyring quietly every 2 hours
+-- and print just the [Gather Keys] lines (capture mode "warn", no window).
+-- Each read refreshes the melt time, so a replaced key ends the reminders.
+function WarnKeyTick()
+  if not warn_melt_at or capture_mode then return end
+  local now = os.time()
+  if warn_melt_at - now >= MELT_HOURS * 3600 then return end
+  if now - last_warn < WARN_EVERY_SECS then return end
+  last_warn = now
+  StartKeyringCapture("warn")
+end
+
+-- One [Gather Keys] line for a watched key under MELT_HOURS (x099 / x045).
+local function GatherLine(e)
+  local s = e.secs
+  local left = string.format("%dd %dh %dm", math.floor(s / 86400),
+                             math.floor((s % 86400) / 3600), math.floor((s % 3600) / 60))
+  GatherTag()
+  ColourTell(CLR_NAME, "black", e.k.name)
+  ColourTell(CLR_TAG,  "black", " has ")
+  ColourTell(CLR_NAME, "black", left)
+  ColourTell(CLR_TAG,  "black", " left, under ")
+  ColourTell(CLR_NAME, "black", MELT_HOURS .. "h")
+  ColourNote(CLR_TAG,  "black", ". Time to gather the keys again.")
+end
+
+-- {invdata} seen: collect inventory lines
+function InvStart(name, line, wildcards)
+  inv_lines = {}
+  collect = inv_lines
+  EnableTrigger("KeyringLine", true)
+end
+
+-- krk alias: "keyring replace key" swaps the key in your inventory onto the
+-- keyring (or puts it there if you had none). Sent without echo; the reply
+-- is swapped for "Key Added" by KeyAdded below.
+function KrkCmd(name, line, wildcards)
+  SendNoEcho("keyring replace key")
+end
+
+-- "You replace <key> on your keyring." / "You put <key> on your keyring."
+-- are gagged (omit_from_output) and shown as a green "Key Added".
+-- "<key> will expire before the one already on your keyring." is gagged
+-- with no note: the newer copy stays on the ring, nothing was added.
+function KeyAdded(name, line, wildcards)
+  ColourNote(CLR_HI, "black", "Key Added")
+end
+
+-- {/invdata} seen: stop collecting and hand the lines to whoever asked
+function InvEnd(name, line, wildcards)
+  collect = nil
+  EnableTrigger("KeyringLine", false)
+  local purpose = table.remove(inv_queue, 1)
+  if #inv_queue == 0 then
+    EnableTrigger("InvStart", false)
+    EnableTrigger("InvEnd", false)
+  end
+  if purpose == "record" then
+    record_inv = inv_lines
+  end
+end
+
+-- {keyring} seen: collect keyring lines
+function KeyringStart(name, line, wildcards)
+  keyring_lines = {}
+  collect = keyring_lines
+  EnableTrigger("KeyringLine", true)
+end
+
+-- Each data line between tags
+function KeyringLine(name, line, wildcards)
+  if collect then
+    table.insert(collect, line)
+  end
+end
+
+-- {/keyring} seen: stop collecting, then record or report
+function KeyringEnd(name, line, wildcards)
+  collect = nil
+  EnableTrigger("KeyringLine", false)
+  EnableTrigger("KeyringStart", false)
+  EnableTrigger("KeyringEnd", false)
+
+  if capture_mode == "record" then
+    capture_mode = nil
+    if rec then FinishRecord() end
+    return
+  end
+  local mode = capture_mode
+  capture_mode = nil
+  if mode ~= "warn" then
+    if not manual_check then return end
+    manual_check = false
+  end
+
+  -- Keyring data format: itemid,flags,name,level,type,f6,f7,timer_seconds
+  -- Field 1 = object id ([remove] uses it), field 3 = the key name,
+  -- field 8 = seconds until the key melts (-1 = no timer).
+  local have = {}
+  for _, entry in ipairs(keyring_lines) do
+    local fields = SplitFields(entry)
+    local nm = fields[3]
+    if nm then
+      nm = CleanName(nm)
+      have[nm] = have[nm] or {}
+      table.insert(have[nm], { id = tonumber(fields[1]), secs = tonumber(fields[8]) or -1 })
+    end
+    if debug then
+      KeyNote("name='" .. tostring(fields[3]) .. "' -> '" .. CleanName(fields[3] or "") .. "'")
+    end
+  end
+  -- the 2-hour warnkey reminder: [Gather Keys] lines only, no window
+  if mode == "warn" then
+    for _, e in ipairs(UpdateMelt(have)) do
+      if e.due then GatherLine(e) end
+    end
+    return
+  end
+  last_have = have
+
+  local rows, short = BuildRows(cur_tab, have)
+  if #rows == 0 then
+    KeyNote("The " .. cur_tab .. " tab has no keys yet; keyrecord adds them.")
+  elseif short == 0 then
+    KeyNote(string.format("All %d %s keys present on your keyring.", #rows, cur_tab), CLR_HI)
+  else
+    KeyNote(string.format("MISSING %d %s key(s) -- see the Keyring window.", short, cur_tab), CLR_MISS)
+  end
+  ShowKeyWindow(false)
+
+  -- warnkey: a watched key under MELT_HOURS gets a [Gather Keys] line in
+  -- x099 / x045; a live one above that shows its time left; an expired or
+  -- missing one says nothing (it shows red in the window anyway).
+  for _, e in ipairs(UpdateMelt(have)) do
+    local s = e.secs
+    local left = string.format("%dd %dh %dm", math.floor(s / 86400),
+                               math.floor((s % 86400) / 3600), math.floor((s % 3600) / 60))
+    if not e.live then
+      -- expired / not gathered yet: stays quiet
+    elseif e.due then
+      GatherLine(e)
+    else
+      ColourTell(CLR_TAG,  "black", "[")
+      ColourTell(CLR_NAME, "black", "Keycheck")
+      ColourTell(CLR_TAG,  "black", "] ")
+      ColourTell(CLR_MSG,  "black", e.k.name .. ": ")
+      ColourTell(CLR_HI,   "black", left)
+      ColourNote(CLR_MSG,  "black", " remaining.")
+    end
+  end
+end
+
+
+]]>
+</script>
+
+</muclient>
