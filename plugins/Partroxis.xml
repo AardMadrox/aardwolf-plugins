@@ -10,7 +10,7 @@
    date_written="2026-11-14"
    save_state="y"
    requires="4.00"
-   version="1.0"
+   version="1.1"
    >
 <description trim="y">
 <![CDATA[
@@ -23,7 +23,9 @@ Partroxis - a Partroxis maze walker.
 
 Click a room and it walks the maze to it, one step at a time, with a
 0.3 second pause in every room so it can never run past the one you picked.
-A wrong exit is learned and doubled back from. An attack stops the walk;
+A wrong exit is learned and doubled back from. The exits it learned are
+kept when you leave, so a trip back in walks straight there; the first
+known exit that turns out wrong means the maze changed, and it relearns. An attack stops the walk;
 once the fight is over type psxgo and it goes invis / hidden / sneak again
 and carries on.
 
@@ -50,6 +52,17 @@ Based on Galaban's Partroxis plugin (room and mob data, exit matching).
     the fight is over, and that walk reads saff and casts first. A room
     clicked mid fight is remembered and refused until psxgo. fight_stop is
     the flag that makes the psxgo walk cast even with precast off.
+  - The learned map survives leaving the area: the maze is assumed to be
+    the same one on the way back in. Entry (first room in the area, or
+    back at the start room 5862, not walking) marks every room ok=false
+    and drops rooms that only hold wrong-exit marks. known_path (the
+    fast multi-step run) only uses rooms with ok=true, so an unproven
+    stretch is walked one step at a time; a step that lands right sets
+    ok. The first known exit that lands wrong wipes the whole map in
+    learn(), the same as the repop message does. MAP_LIFE (15 min) is
+    counted from map_start, the first trip in on a fresh map (or the
+    moment it was wiped); a trip in after that wipes it quietly. (A sense life check
+    was tried and dropped: the extra cast was lag for no gain.)
   - Keep local VERSION in step with version=. The load banner prints it.
 -->
 
@@ -183,7 +196,7 @@ require "aardwolf_colors"
 pcall (require, "themed_miniwindows")
 
 local GMCP_ID = "3e7dedbe37e44942dd46d264"
-local VERSION = "1.0"
+local VERSION = "1.1"
 
 -- Colour scheme (same as MazeMobber)
 local CLR_TAG  = "#875FFF"   -- brackets / dim accents
@@ -202,6 +215,7 @@ local AFF_SETTLE    = 0.3    -- no new line this long after the affects list: it
 local AFF_TIMEOUT   = 4.0    -- the first affects check: no list by now, so cast everything
 local MIN_LEFT      = 120    -- seconds left on an effect for it to count as up
 local EXITS_TIMEOUT = 6.0    -- no exits list at all
+local MAP_LIFE      = 900    -- a map older than this (from the first trip in) is a new maze
 
 -- ===========================================================
 --  Notes: everything is held back 0.2s so a line printed on arrival
@@ -351,7 +365,8 @@ local state          = 3       -- char.status state: 3 active, 8 fighting, 12 ru
 local walking        = false
 local target         = nil     -- room id clicked
 local pending        = nil     -- { from, dir, approach, retries } a move sent, no new room yet
-local rooms          = {}      -- learned: rooms[id] = { dir, next, wrong = { [dir]=true } }
+local rooms          = {}      -- learned: rooms[id] = { dir, next, ok, wrong = { [dir]=true } }
+local map_start      = nil     -- os.time () of the first trip in on this map
 local need_invis     = false
 local fight_stop     = false   -- a fight stopped the walk: psxgo carries on, and casts first
 local step_gen       = 0
@@ -540,7 +555,7 @@ local function known_path ()
   local dirs, ids, r = {}, {}, cur
   while r ~= target and #dirs < 60 do
     local rr = rooms[r]
-    if APPROACH[r] or not (rr and rr.dir and rr.next) then break end
+    if APPROACH[r] or not (rr and rr.dir and rr.next and rr.ok) then break end
     dirs[#dirs + 1] = rr.dir
     ids[#ids + 1] = rr.next
     r = rr.next
@@ -857,14 +872,14 @@ local function learn (p, num)
   local r = rooms[p.from]
   if not r then r = { wrong = {} } rooms[p.from] = r end
   if num == exp then
-    r.dir, r.next = p.dir, num
+    r.dir, r.next, r.ok = p.dir, num, true
     dnote ("room " .. p.from .. ": " .. p.dir .. " is right")
     return
   end
   if r.dir == p.dir then
     -- a way that worked before has failed: the maze was reshuffled
-    rooms = {}
-    warn ("The map I had no longer matches - forgetting it.")
+    rooms, map_start = {}, os.time ()
+    warn ("The maze has changed since I learned it - forgetting the map and relearning.")
   else
     r.wrong[p.dir] = true
   end
@@ -881,7 +896,23 @@ function PSX_WinAreaCheck () end
 local function on_room (num)
   local prev = cur
   cur = num
-  if num == 5862 and prev ~= 5862 then rooms = {} end   -- a fresh trip in
+  -- a trip back in: assume the same maze, but trust none of the map
+  -- until a step proves it (the first wrong one wipes it in learn)
+  if not walking and in_area (num) and (not in_area (prev) or (num == 5862 and prev ~= 5862)) then
+    local now = os.time ()
+    if not map_start or now - map_start >= MAP_LIFE then
+      rooms, map_start = {}, now                         -- too old: a new maze, quietly
+      exits_ready = false
+    end
+    local n = 0
+    for id, r in pairs (rooms) do
+      if r.dir then r.ok = false n = n + 1 else rooms[id] = nil end
+    end
+    if n > 0 then
+      note ("Using the @x048" .. n .. "@w exit" .. (n == 1 and "" or "s") ..
+            " I learned last time - if one is wrong, the maze changed and I relearn.")
+    end
+  end
   PSX_WinAreaCheck (num)
   if num == 5763 and prev ~= 5763 and auto_list and not walking then
     PSX_After (0.5, "PSX_Menu ()")
@@ -901,7 +932,7 @@ local function on_room (num)
         end
         pending = nil                                   -- the run is finished
       else
-        pending, rooms = nil, {}
+        pending, rooms, map_start = nil, {}, os.time ()
         warn ("The run did not land where the map said - forgetting the map.")
       end
     else
@@ -1001,7 +1032,7 @@ function psx_go_command ()
 end
 
 function psx_area_reset ()
-  rooms = {}
+  rooms, map_start = {}, os.time ()
   exits_ready = false
   if walking then
     -- Drop whatever was in flight (it was aimed at the old maze) and carry
@@ -1240,7 +1271,8 @@ local function show_help ()
     "@x048psx affcmd <cmd>@w  the command that lists your affects (now: @x048" .. aff_cmd .. "@w)",
     "@x048psx invisdelay <s>@w  wait after the hide message, before moving (now: @x048" .. invis_delay .. "s@w)",
     "@x048psx invis <cmds>@w  what to send after a fight (now: @x048" .. invis_cmds .. "@w)",
-    "@x048psx reset@w        forget the learned directions",
+    "@x048psx reset@w        forget the learned directions (they are kept when you leave the area;",
+    "                 the first wrong one on the way back in clears them by itself)",
     "@x048psx font@w         pick the list window's font (or @x048psx font <name>@w)",
     "@x048psx fontsize <n>@w  the list window's font size",
     "@x048psx winheight <px>@w  how tall the list window may get (now @x048" .. win_max_h .. "@w) - taller shows more rooms without scrolling",
