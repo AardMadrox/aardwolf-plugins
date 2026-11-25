@@ -9,7 +9,7 @@
    language="Lua"
    purpose="All-around key manager: keyring window, walk-to key rooms, keyrecord, krk, warnkey"
    date_written="2026-06-18"
-   version="3.7"
+   version="3.8"
    save_state="y"
 >
 </plugin>
@@ -48,6 +48,8 @@ DATA FILE: GetInfo(66) .. "Keycheck_data.lua" (the MUSHclient folder)
   file exists, so the
   published copy carries no one's personal key list. A data file that
   will not load is never overwritten (data_ok); fix it and reload.
+  A file edited while the plugin runs is read in before the next save
+  (Sync / disk_text, v3.8), so hand edits are safe at any time.
   Written to a .tmp file, then os.remove + os.rename (Windows rename
   will not replace).
 
@@ -111,6 +113,15 @@ HISTORY
   v1.x KeyWarning: Crynn 24h spouse warning + missing-key list.
   v1.9-2.7 (2026-11-25): window, keyroom, tabs, keyrecord, own krk, Key
   Added, [remove]/[delete], warnkey, renamed Keycheck (same plugin id).
+  v3.8 (2026-11-25): hand edits to the data file are never saved over.
+  disk_text holds the file as last read or written; Sync() (at the start
+  of keycheck, keyrecord, keyroom, warnkey, [go], [delete] and every
+  keyring read) re-reads a file that differs, and Save() refuses to write
+  over one that changed, loading it instead. Found when a keycheck saved
+  the in-memory list over an edit made just before a reload. A file that
+  will not load leaves the keys in use untouched (ParseData builds fresh
+  tables first). Also fixed: "warnkey <#>" only saved when the melt time
+  moved, so watching a key that was off the keyring was not saved.
   v3.7 (2026-11-25): wandering mobs. keyrecord asks SnD's mobs table how
   many rooms it has seen the mob in (this area); 2+ = it wanders, so the
   key gets the area's first room (SnD area.startRoom) and rough = true.
@@ -364,7 +375,7 @@ HISTORY
 require "gmcphelper"
 
 -- Keep in step with version= above; shown on load so a reload is visible.
-local VERSION = "3.7"
+local VERSION = "3.8"
 
 -- Standard colour theme
 local CLR_TAG  = "#875FFF"   -- x099 brackets
@@ -488,9 +499,23 @@ local function CopyKey(k)
            warn = (k.warn == true) or nil }
 end
 
+-- disk_text = the file's contents as this plugin last read or wrote them.
+-- If the file on disk is different, it was changed outside the plugin (by
+-- hand, or by another tool): Sync() reads that version in before a command
+-- changes anything, and Save() never writes over it.
+local disk_text = nil
+
+local function ReadDataFile()
+  local f = io.open(DATA_FILE, "rb")
+  if not f then return nil end
+  local s = f:read("*a")
+  f:close()
+  return s
+end
+
 local function SaveData()
-  local out = { "-- Keycheck data: your key list and settings. Safe to edit with the\n",
-                "-- client closed or the plugin removed; keycheck reload picks up edits.\n",
+  local out = { "-- Keycheck data: your key list and settings. Safe to edit any time:\n",
+                "-- the plugin reads your changes in before it next saves.\n",
                 "return {\n  keys = {\n" }
   for _, tab in ipairs(TABS) do
     out[#out + 1] = string.format("    [%q] = {\n", tab)
@@ -506,61 +531,47 @@ local function SaveData()
   end
   out[#out + 1] = string.format("  },\n  warn = { melt_at = %s },\n}\n",
     warn_melt_at and string.format("%d", warn_melt_at) or "nil")
+  local text = table.concat(out)
   local tmp = DATA_FILE .. ".tmp"
   local f = io.open(tmp, "wb")
   if not f then
     KeyNote("Could not write " .. DATA_FILE, CLR_WARN)
     return
   end
-  f:write(table.concat(out))
+  f:write(text)
   f:close()
   os.remove(DATA_FILE)          -- os.rename will not replace a file on Windows
   if not os.rename(tmp, DATA_FILE) then
     KeyNote("Could not save " .. DATA_FILE, CLR_WARN)
+    return
   end
+  disk_text = text
 end
 
--- Load the data file. No file (first run) -> start from DEFAULT_KEYS and
--- write it. A file that will not load is left alone, never overwritten.
-local data_ok = true
-local function LoadData()
-  keys = { ["201"] = {}, ["Sub"] = {} }
-  warn_melt_at = nil
-  local f = io.open(DATA_FILE, "rb")
-  if not f then
-    for _, tab in ipairs(TABS) do
-      for _, k in ipairs(DEFAULT_KEYS[tab]) do keys[tab][#keys[tab] + 1] = CopyKey(k) end
-    end
-    SaveData()
-    return
-  end
-  local text = f:read("*a")
-  f:close()
+-- Data-file text -> fresh key tables and melt time, or nil if it will not
+-- load. Nothing in use is touched until it has loaded cleanly.
+local function ParseData(text)
   local fn = loadstring(text or "")
-  local ok, t = false, nil
-  if fn then
-    setfenv(fn, {})
-    ok, t = pcall(fn)
-  end
-  if not ok or type(t) ~= "table" or type(t.keys) ~= "table" then
-    data_ok = false
-    KeyNote("Could not read " .. DATA_FILE .. "; nothing will be saved until it is fixed.", CLR_WARN)
-    return
-  end
+  if not fn then return nil end
+  setfenv(fn, {})
+  local ok, t = pcall(fn)
+  if not ok or type(t) ~= "table" or type(t.keys) ~= "table" then return nil end
+  local nk = { ["201"] = {}, ["Sub"] = {} }
   for _, tab in ipairs(TABS) do
     for _, k in ipairs(type(t.keys[tab]) == "table" and t.keys[tab] or {}) do
       local c = CopyKey(k)
-      if c then keys[tab][#keys[tab] + 1] = c end
+      if c then nk[tab][#nk[tab] + 1] = c end
     end
   end
+  local melt = nil
   if type(t.warn) == "table" then
-    warn_melt_at = tonumber(t.warn.melt_at)
+    melt = tonumber(t.warn.melt_at)
     -- v3.3 and older: warnkey was one on/off switch for Crynn's Key. Carry
     -- an "on" over as a watch on Crynn's Key when nothing is watched yet.
     if t.warn.on == true then
       local any, crynn = false, nil
       for _, tab in ipairs(TABS) do
-        for _, k in ipairs(keys[tab]) do
+        for _, k in ipairs(nk[tab]) do
           if k.warn then any = true end
           if not crynn and k.name:lower() == "crynn's key" then crynn = k end
         end
@@ -568,11 +579,57 @@ local function LoadData()
       if not any and crynn then crynn.warn = true end
     end
   end
+  return nk, melt
 end
 
--- Every change goes through here, so a broken file is never overwritten.
+-- Load the data file. No file (first run) -> start from DEFAULT_KEYS and
+-- write it. A file that will not load is left alone, never overwritten,
+-- and the keys already in use stay as they are. Returns true if loaded.
+local data_ok = true
+local function LoadData()
+  local text = ReadDataFile()
+  if not text then
+    keys = { ["201"] = {}, ["Sub"] = {} }
+    for _, tab in ipairs(TABS) do
+      for _, k in ipairs(DEFAULT_KEYS[tab]) do keys[tab][#keys[tab] + 1] = CopyKey(k) end
+    end
+    warn_melt_at, data_ok = nil, true
+    SaveData()
+    return true
+  end
+  local nk, melt = ParseData(text)
+  if not nk then
+    data_ok, disk_text = false, text
+    KeyNote("Could not read " .. DATA_FILE .. "; nothing will be saved until it is fixed.", CLR_WARN)
+    return false
+  end
+  keys, warn_melt_at, data_ok, disk_text = nk, melt, true, text
+  return true
+end
+
+-- Read the file in if it was changed outside the plugin. Every command that
+-- changes or uses the list calls this first. True = it was changed.
+local function Sync()
+  local text = ReadDataFile()
+  if text == nil or text == disk_text then return false end
+  if LoadData() then
+    KeyNote("Picked up changes made to Keycheck_data.lua outside the plugin.")
+  end
+  return true
+end
+
+-- Every change goes through here. A broken file, or one changed outside the
+-- plugin since it was last read, is never written over.
 local function Save()
-  if data_ok then SaveData() end
+  if not data_ok then return end
+  local text = ReadDataFile()
+  if text ~= nil and disk_text ~= nil and text ~= disk_text then
+    LoadData()
+    KeyNote("Keycheck_data.lua was changed outside the plugin, so that version was loaded " ..
+            "and your last change was not saved. Do it again if you still want it.", CLR_WARN)
+    return
+  end
+  SaveData()
 end
 
 LoadData()
@@ -950,6 +1007,8 @@ end
 -- [delete] click: first click arms [sure?] for 5 seconds, second deletes
 -- the key from the list and the data file. No undo.
 function KW_Delete(tab, i)
+  -- edited outside: the numbers on screen may be stale, so just redraw
+  if Sync() then RedrawIfOpen() return end
   tab, i = TabFromWord(tab), tonumber(i)
   local k = tab and i and keys[tab][i]
   if not k then return end
@@ -976,6 +1035,7 @@ end
 
 -- [go] link / key name click: walk to that key's room. Window stays open.
 function KW_Goto(tab, i)
+  if Sync() then RedrawIfOpen() return end
   tab, i = TabFromWord(tab), tonumber(i)
   local k = tab and i and keys[tab][i]
   if not k then return end
@@ -1026,6 +1086,7 @@ end
 -- warnkey [<#>|off]: <#> (the key's number in keycheck / keyroom) starts or
 -- stops watching that key; off stops watching every key; bare lists them.
 function WarnKeyCmd(name, line, wildcards)
+  Sync()
   local arg = (wildcards[1] or ""):lower()
   if arg == "" then
     local w = Watched()
@@ -1069,12 +1130,16 @@ function WarnKeyCmd(name, line, wildcards)
       ColourNote(CLR_NAME, "black", k.name .. ".")
     end
   end
-  -- refresh the melt time from the last keycheck, if there was one
+  -- refresh the melt time from the last keycheck, if there was one, then
+  -- always save: UpdateMelt only saves when the melt time moved, which
+  -- left a watch on a key that is off the keyring unsaved before v3.8
   if last_have then
     UpdateMelt(last_have)
-  else
-    if #Watched() == 0 then warn_melt_at = nil end
-    Save()
+  elseif #Watched() == 0 then
+    warn_melt_at = nil
+  end
+  Save()
+  if not last_have then
     if k and k.warn then
       GatherTag()
       ColourTell(CLR_TAG,  "black", "Type ")
@@ -1171,7 +1236,8 @@ function KeyCheckHelp(name, line, wildcards)
     "until the key is replaced. One that has already expired off your keyring",
     "stays quiet until you get it again.",
     "Your key list and settings live in Keycheck_data.lua in your MUSHclient",
-    "folder, so reinstalls and updates keep them. A new install starts with one",
+    "folder, so reinstalls and updates keep them. You can edit it by hand any",
+    "time; the plugin reads your changes in before it next saves. A new install starts with one",
     "example key per tab (the Fury tower key on 201, the thin dragonscale key",
     "on Sub); keyrecord adds the rest, [delete] drops the examples.",
   }
@@ -1260,6 +1326,7 @@ end
 
 -- keyroom [<#> [here|<roomid>|clear]]  (numbers: 1-100 = 201 tab, 101-200 = Sub)
 function KeyRoomCmd(name, line, wildcards)
+  Sync()
   local arg = (wildcards[1] or ""):gsub("^%s+", ""):gsub("%s+$", "")
 
   if arg == "" then
@@ -1401,6 +1468,7 @@ end
 
 -- keyrecord [201|sub|stop]
 function KeyRecordCmd(name, line, wildcards)
+  Sync()
   local arg = (wildcards[1] or ""):lower()
   if arg == "stop" or arg == "off" then
     if rec then
@@ -1634,6 +1702,7 @@ end
 
 -- Manual keycheck alias: open the tab for your level.
 function ManualKeyCheck(name, line, wildcards)
+  Sync()
   cur_tab = TabForLevel()
   manual_check = true
   last_warn = os.time()        -- keycheck shows the warning itself
@@ -1723,6 +1792,7 @@ function KeyringEnd(name, line, wildcards)
   EnableTrigger("KeyringLine", false)
   EnableTrigger("KeyringStart", false)
   EnableTrigger("KeyringEnd", false)
+  Sync()   -- keycheck, keyrecord and the warnkey reminder all save after this
 
   if capture_mode == "record" then
     capture_mode = nil
