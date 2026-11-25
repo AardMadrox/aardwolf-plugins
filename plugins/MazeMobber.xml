@@ -10,7 +10,7 @@
    date_written="2026-09-08"
    save_state="n"
    requires="4.00"
-   version="7.9"
+   version="8.0"
    >
 </plugin>
 
@@ -112,6 +112,11 @@ COMMANDS
   global calls only (mm_out, OnPluginBroadcast, mm_command) because of the
   upvalue ceiling.  UNTESTED LIVE: whether "exits" answers mid fight was
   not verified.
+
+  8.0: WITH THE WINDOW ON, mm ALWAYS BRINGS IT UP.  Typed mm in a maze,
+  the list after mm walks you in, mm prosper sea when already there, and
+  mm outside every area (the area list) all go to the window in window
+  mode now.  They used to print in the main window whatever the setting.
 
   7.4: MMOUT WANDERS INSTEAD OF FORGETTING THE MAP.  mmo out of the
   Nenukon's Pit of Monuhi walked the same five-move circuit thirteen times.
@@ -387,11 +392,13 @@ ONE MODE, AND HOW A RUN STOPS
   from outside targets the entrance - often outside the maze - so it could
   outlive its walk and eat the next pick's "Arrived:" line.
 
-  THE LIST CAN LIVE IN A MINIWINDOW (4.6). Since 4.8 only the list that
-  puts itself up on arrival uses it: menu () opens the window in window mode
-  (`win`, saved, on by default since 4.7; mm window switches it). Typed mm,
-  and the list shown after mm walks you in, always print in the main window
-  via menu_chat (). mm win opens the window whatever the setting.
+  THE LIST CAN LIVE IN A MINIWINDOW (4.6). menu () opens the window in
+  window mode (`win`, saved, on by default since 4.7; mm window switches
+  it) and falls back to menu_chat () without it. 4.8 to 7.9 kept typed mm
+  and the list after mm walks you in in the main window; SINCE 8.0 THEY GO
+  THROUGH menu () TOO, so with the window on, mm always brings it up -
+  including the area list typed outside every area. mm win opens the
+  window whatever the setting; mm areas still prints in the main window.
   list_rows () builds the entries once for both. A click drops the window
   and sends what the chat link would. The window scrolls (mouse wheel or
   the scrollbar) and is never taller than WIN_MAX_H, so Nenukon's long list
@@ -3032,7 +3039,7 @@ local OPPOSITE = { n = "s", s = "n", e = "w", w = "e", u = "d", d = "u" }
 
 -- Kept in step with the version= attribute at the top of this file.
 -- If you change one, change the other.
-local VERSION  = "7.9"
+local VERSION  = "8.0"
 
 local CLR_TAG  = "#875FFF"
 local CLR_NAME = "#00D7FF"
@@ -4389,7 +4396,7 @@ function advance ()
       if menu_on_arrival then
         menu_on_arrival = false
         stop ()
-        menu_chat ()
+        menu ()
         return
       end
       stop ("Arrived: @x048" .. (NAME[cur] or cur) .. "@w  (@x048" .. cur .. "@w)")
@@ -7110,8 +7117,10 @@ function menu_chat (rows)
   -- the same thing and says it once.
 end
 
--- The list that puts itself up on arrival.  Typed mm always prints in the
--- main window (menu_chat); mm win opens the window by hand.
+-- The list: in the window when window mode is on (mm window), else in the
+-- main window.  Since 8.0 this covers typed mm too, not just the list
+-- that puts itself up on arrival; mm win opens the window whatever the
+-- setting.
 function menu ()
   if win_mode and win_open () then return end
   menu_chat ()
@@ -7227,7 +7236,7 @@ local function show_help ()
     "mm list          stop this area putting its list up on arrival",
     "mm areas         every area, click one to switch it off or on",
     "mm off / mm on   switch this area off or back on (mm off gaunt too)",
-    "mm window        window off: the list prints here instead (again: back on)",
+    "mm window        window off: mm and the list print here instead (again: back on)",
     "mm win           open the list window",
     "mm font          pick the list window's font (or mm font <name>)",
     "mm fontsize <n>  the list window's font size",
@@ -7422,7 +7431,7 @@ function mm_command (name, line, wildcards)
     end
     if not area and (arg == "" or arg == "win") then
       -- Outside every area: list the areas, clickable, to go to one.
-      if arg == "win" and win_open (area_rows ()) then return end
+      if (arg == "win" or win_mode) and win_open (area_rows ()) then return end
       menu_chat (area_rows ())
       return
     end
@@ -7474,7 +7483,7 @@ function mm_command (name, line, wildcards)
   -- A second way in, named by its word: "prosper sea".
   for _, w in ipairs (A.ways_in or {}) do
     if w.arg and w.arg == arg then
-      if NAME[cur] and A.sections[cur] == w.section then menu_chat () return end
+      if NAME[cur] and A.sections[cur] == w.section then menu () return end
       if NAME[cur] then
         note ("You are in the other part of " .. A.label .. " - get out with " ..
               "@x048mmout@w first, then @x048" .. "mm " .. A.cmd .. " " .. w.arg .. "@w.")
@@ -7489,7 +7498,7 @@ function mm_command (name, line, wildcards)
   end
 
   if arg == "" then
-    if NAME[cur] then menu_chat () return end
+    if NAME[cur] then menu () return end
     -- Outside the maze itself: go to the way in, then show the list.
     menu_on_arrival = true
     note ("Not in " .. A.label .. " yet - taking you to @x048" ..
