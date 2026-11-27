@@ -9,7 +9,7 @@
    language="Lua"
    purpose="All-around key manager: keyring window, walk-to key rooms, keyrecord, krk, warnkey"
    date_written="2026-06-18"
-   version="4.0"
+   version="4.1"
    save_state="y"
 >
 </plugin>
@@ -65,7 +65,8 @@ THE WINDOW
   keys on the ring), [delete] (two clicks: [sure?] for 5s, then gone
   from the data file; no undo). [ Remove All ] in the tab bar: two
   clicks, keyring get for every ring key of the open tab, then a
-  refresh. Deliberately no delete-all. Missing = bright red, on the ring but
+  refresh. Deliberately no delete-all. [move] (KW_Move) moves the entry
+  whole to the end of the other tab; refused if that tab has 100. Missing = bright red, on the ring but
   melting within MELT_HOURS (20) = x200 pink. "1 of 2?" = a doubled
   name where you hold one; the keyring cannot say which.
 
@@ -115,6 +116,8 @@ HISTORY
   v1.x KeyWarning: Crynn 24h spouse warning + missing-key list.
   v1.9-2.7 (2026-11-25): window, keyroom, tabs, keyrecord, own krk, Key
   Added, [remove]/[delete], warnkey, renamed Keycheck (same plugin id).
+  v4.1 (2026-11-27): [move] on every row: moves the key to the other tab
+  (201 <-> Sub), so Sub keys gathered at 201 can live on the 201 tab.
   v4.0 (2026-11-27): [ Remove All ] after [ Refresh ]: two clicks, takes
   every key on the open tab off the keyring, then re-reads it. No delete
   all, on purpose.
@@ -383,7 +386,7 @@ HISTORY
 require "gmcphelper"
 
 -- Keep in step with version= above; shown on load so a reload is visible.
-local VERSION = "4.0"
+local VERSION = "4.1"
 
 -- Standard colour theme
 local CLR_TAG  = "#875FFF"   -- x099 brackets
@@ -840,6 +843,9 @@ local function RowSegs(r)
             tip = "Take " .. r.key.name .. " off your keyring" }
       or  { text = "        " },
     { text = " " },
+    { text = "[move]", colour = CLR_TAG, code = "KW_Move(" .. ref .. ")",
+      tip = "Move " .. r.key.name .. " to the " .. (r.tab == "201" and "Sub" or "201") .. " tab" },
+    { text = " " },
     arming
       and { text = "[sure?]", colour = CLR_MISS, code = "KW_Delete(" .. ref .. ")",
             tip = "Click again to delete " .. r.key.name .. " from Keycheck for good" }
@@ -967,6 +973,11 @@ local function ShowKeyWindow(keep_scroll)
   }, false, {})
   gWin:add_text(winLine {
     { text = " ", colour = CLR_TAG },
+    { text = "[move]", colour = CLR_TAG },
+    { text = " moves a key to the other tab (201 <-> Sub).", colour = CLR_TAG },
+  }, false, {})
+  gWin:add_text(winLine {
+    { text = " ", colour = CLR_TAG },
     { text = "keyrecord", colour = CLR_HI },
     { text = " in the room a key comes from, then get it, adds it here.", colour = CLR_TAG },
   }, false, {})
@@ -1049,6 +1060,27 @@ function KW_Delete(tab, i)
   table.remove(keys[tab], i)
   Save()
   KeyNote("Deleted " .. k.name .. " (" .. (k.from or "?") .. ") from Keycheck's " .. tab .. " list.")
+  RedrawIfOpen()
+end
+
+-- [move] click: move the key to the other tab (201 <-> Sub), to the end
+-- of that list. The entry moves whole (room, cmd, warn), so a watched key
+-- stays watched. Numbers after it on the old tab shift up by one.
+function KW_Move(tab, i)
+  if Sync() then RedrawIfOpen() return end
+  tab, i = TabFromWord(tab), tonumber(i)
+  local k = tab and i and keys[tab][i]
+  if not k then return end
+  local other = (tab == "201") and "Sub" or "201"
+  if #keys[other] >= SUB_BASE then
+    KeyNote("The " .. other .. " tab is full (" .. SUB_BASE .. " keys).", CLR_MISS)
+    return
+  end
+  if pending_delete and pending_delete.key == k then pending_delete = nil end
+  table.remove(keys[tab], i)
+  table.insert(keys[other], k)
+  Save()
+  KeyNote("Moved " .. k.name .. " to the " .. other .. " tab as #" .. KeyNum(other, #keys[other]) .. ".")
   RedrawIfOpen()
 end
 
@@ -1241,6 +1273,7 @@ function KeyCheckHelp(name, line, wildcards)
     { "[ Remove All ]",   "Take every key on the open tab off your keyring. Click twice; the list stays." },
     { "[go]",             "Walk there with the mapper (the key name works too)." },
     { "[remove]",         "Take that key off your keyring (it goes to your inventory)." },
+    { "[move]",           "Move the key to the other tab (201 <-> Sub), e.g. a Sub key you get at 201." },
     { "[delete]",         "Delete the key from Keycheck for good. Click once, it turns into" },
     { "",                 "[sure?]; click that within 5 seconds to delete. No undo." },
     { "red",              "Missing from your keyring. \"1 of 2?\" = you hold one of a pair." },
