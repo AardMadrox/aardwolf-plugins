@@ -19,6 +19,7 @@
        marketw lc on|off              last chance when an item has minutes left
        marketw auc debug              DEBUG: echo every Auction:/Market: line
        marketw probe <num>            DEBUG: dump the raw 'lbid <num>' box
+       marketw win [on|off]           the watch-list window (edit / bids / mode)
 
      Design notes:
        * 'market list' truncates the item description to 28 characters, and a
@@ -42,7 +43,8 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="5.2"
+   version="5.3"
+   save_state="y"
 >
 </plugin>
 
@@ -245,6 +247,25 @@ MARKET BID LINES - BOTH WORDINGS (v5.2)
     * an outbid by a proxy gets the headline "PASSED BY A PROXY BID".
   The bidder is captured lazily, "(.+?) has (proxy )?bid", for the pretitle.
 
+WATCH-LIST WINDOW (v5.3)
+  MGR_ID "MarketWatch_list", a ThemedTextWindow built by mgrRefresh.  One row
+  pair per watch entry: [ Edit ] (rename the pattern), [ Del ] (asks), then
+  the tiers with [ Set Bids ] (one input box, "1b 1.2b 1.5b") and the mode
+  buttons Both / Market / Auction (lit = current).  Footer: + Add item, Scan
+  market, and the auction / market channel switches.  Input uses
+  utils.inputbox with a validate function (bad input keeps the box open).
+  * every link calls MW_MgrClick, which DEFERS to MW_MgrDo by 0.2s: links fire
+    on mouse-down inside the window's own callback, where rebuilding the
+    window (teardown trap) or opening a modal box is unsafe.
+  * rows are tied to the entry object (gMgrRows), checked against gWatch at
+    click time, so a list changed by a typed command cannot misdirect a click.
+  * every command that changes gWatch or the channel switches calls
+    mgrRefresh (true) after saveData - add new ones the same way.
+  * gCfg.win: the title-bar [x] turns it off (do_on_delete), marketw win
+    brings it back.  OnPluginClose calls mgrClose FIRST so the library's own
+    delete-all does not look like a click on [x].
+  * save_state="y" was added so the dragged position survives a restart.
+
 WHEN EDITING
   * keep_evaluating is essential on the channel triggers. MUSHclient stops
     the trigger chain on the first match, and the soundpack and channel
@@ -407,6 +428,7 @@ WHEN EDITING
   <alias match="^(?:marketw|marketwatch) mode (.+) (\S+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Mode" sequence="85"></alias>
   <alias match="^(?:marketw|marketwatch) set (\S+) (.+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Set" sequence="85"></alias>
   <alias match="^(?:marketw|marketwatch) max([23]) (.+) (\S+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Max" sequence="85"></alias>
+  <alias match="^(?:marketw|marketwatch) (?:win|window)(?: (.*))?$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Win" sequence="85"></alias>
   <alias match="^(?:marketw|marketwatch) popup ?(.*)$"  enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Popup"  sequence="85"></alias>
   <alias match="^(?:marketw|marketwatch) withdrawroom(?: (.*))?$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_WithdrawRoom" sequence="86"></alias>
   <alias match="^(?:marketw|marketwatch) withdraw(?: (.*))?$"     enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Withdraw"     sequence="85"></alias>
@@ -621,6 +643,7 @@ gCfg = {
   mkt         = true,                        -- watch the market channel too
   aucdebug    = false,
   popup        = true,    -- pop a window up for act-now opportunities
+  win          = true,    -- the watch-list window is open (v5.3)
   withdraw     = false,   -- pull gold from the bank when a bid falls short
   withdrawroom = 0,       -- only ever do that in this room (0 = unset)
   deep        = false,    -- probe EVERY truncated row, not just likely ones
@@ -2729,6 +2752,377 @@ function MW_Cmd_WithdrawRoom (name, line, wildcards)
   echoHi ("withdrawals will only be done in room ", tostring (num), ".")
 end
 
+-- =====================================================================
+-- Watch-list window (v5.3)
+-- =====================================================================
+-- A standing window listing every watch entry, with buttons to change it:
+--   [ Edit ]       rename what the entry matches on
+--   [ Del ]        stop watching it (asks first)
+--   [ Set Bids ]   max1 max2 max3 in one box, lowest first
+--   [ Both ] [ Market ] [ Auction ]   the entry's watch mode; lit = current
+-- and along the bottom [ + Add item ], [ Scan market ], and the two live
+-- channel switches (the same as marketw auc on|off / mkt on|off).
+--
+-- It is the same ThemedTextWindow recipe as the pop-up, so the same rules:
+--   * a link's text is Lua, run by text_rect's browseUrl on MOUSE-DOWN, inside
+--     this window's own hotspot callback.  Rebuilding or deleting the window
+--     from there is the teardown trap, and a modal input box opened there
+--     takes over the mouse mid-click.  So every link only calls MW_MgrClick,
+--     which schedules MW_MgrDo 0.2s later (timers will not go below ~0.1s).
+--   * links are tied to the ENTRY OBJECT drawn on that row (gMgrRows), not
+--     its number, and MW_MgrDo checks it is still in gWatch - a command typed
+--     between the draw and the click cannot make a button hit the wrong item.
+--   * the list scrolls, so the scroll position is kept on a redraw and set
+--     explicitly before drawing (a text window otherwise follows its last
+--     line, and rows above the viewport have no hotspots).
+-- gCfg.win remembers whether it is open.  The title-bar [x] turns it off;
+-- "marketw win" brings it back.
+local MGR_ID   = "MarketWatch_list"
+local MGR_MAXH = 520
+local gMgr     = nil
+local gMgrRows = {}       -- row number -> the watch entry drawn on it
+
+-- 1000000000 -> "1b", 1200000000 -> "1.2b", 25000 -> "25k".  Anything that
+-- does not shorten EXACTLY (1,234,567) is shown in full, so the window never
+-- rounds a figure you typed.
+local function shortAmt (n)
+  n = math.floor (tonumber (n) or 0)
+  for _, u in ipairs { { 1000000000, "b" }, { 1000000, "m" }, { 1000, "k" } } do
+    local d, suf = u [1], u [2]
+    if n >= d then
+      for places = 0, 2 do
+        local s = string.format ("%." .. places .. "f", n / d)
+        if math.floor (tonumber (s) * d + 0.5) == n then
+          if places > 0 then s = s:gsub ("0+$", ""):gsub ("%.$", "") end
+          return s .. suf
+        end
+      end
+      break
+    end
+  end
+  return commafy (n)
+end
+
+local function shortTiers (w, sep)
+  local parts = {}
+  for _, amt in ipairs (tierList (w)) do parts [#parts + 1] = shortAmt (amt) end
+  return table.concat (parts, sep or " / ")
+end
+
+-- Same rules as 'market add'.  Returns the pieces, or nil and why not.
+-- self = the entry being renamed, so it does not count as its own duplicate.
+local function checkPattern (body, self)
+  body = trim (body)
+  local pieces = splitGlob (body)
+  if #pieces == 0 then return nil, "That has no actual text to match on." end
+  local total = 0
+  for _, p in ipairs (pieces) do total = total + #p end
+  if total < 4 then
+    return nil, "That is too short (" .. total .. " letters) - it would match almost anything."
+  end
+  for _, w in ipairs (gWatch) do
+    if w ~= self and norm (w.raw) == norm (body) then
+      return nil, "You are already watching \"" .. w.raw .. "\"."
+    end
+  end
+  return pieces
+end
+
+-- "1b 1.2b 1.5b"  ->  { 1000000000, 1200000000, 1500000000 }, or nil and why
+local function parseTiers (s)
+  local tiers = {}
+  for tok in trim (s):gmatch ("[^%s/]+") do
+    local v = parseAmount (tok)
+    if not v then return nil, "Could not read \"" .. tok .. "\" as an amount." end
+    tiers [#tiers + 1] = v
+  end
+  if #tiers == 0 then return nil, "Enter at least one amount." end
+  if #tiers > 3 then return nil, "At most three amounts: max1 max2 max3." end
+  for i = 2, #tiers do
+    if tiers [i] <= tiers [i - 1] then
+      return nil, "Each max must be higher than the one before it (max1 < max2 < max3)."
+    end
+  end
+  return tiers
+end
+
+-- One-line input box.  check(s) returns truthy, or nil and a reason; a bad
+-- answer shows the reason and leaves the box open (the package mapper's
+-- validate pattern).  Returns the text, or nil when cancelled.
+local function askText (msg, title, default, check)
+  local ok, r = pcall (utils.inputbox, msg, title, default or "", nil, nil, {
+    validate = function (s)
+      local good, why = check (s or "")
+      if not good then
+        utils.msgbox (why or "That did not work.", "MarketWatch", "ok", "!", 1)
+        return false
+      end
+      return true
+    end,
+  })
+  if not ok then warn ("could not open the input box: " .. tostring (r)) return nil end
+  return r
+end
+
+local BIDS_PROMPT = "Up to three max bids, lowest first, e.g.   1b 1.2b 1.5b\n" ..
+                    "(500m, 25k and 1,200,000 also work.  Leave one off to clear it.)"
+
+local function watchIndex (w)
+  if not w then return nil end
+  for i, e in ipairs (gWatch) do if e == w then return i end end
+  return nil
+end
+
+local mgrRefresh
+
+local function mgrEditName (w)
+  local r = askText ("What to watch for.  Case and punctuation do not matter, part of the\n" ..
+                     "name is enough, and * stands for a gap.",
+                     "MarketWatch - edit item", w.raw,
+                     function (s) return checkPattern (s, w) end)
+  if not r then return end
+  r = trim (r)
+  if r == w.raw then return end
+  local old = w.raw
+  w.raw, w.pieces = r, splitGlob (r)
+  saveData ()
+  echoHi ("now watching for ", r, "  (was " .. old .. ")")
+end
+
+local function mgrEditBids (w)
+  local r = askText (BIDS_PROMPT, "MarketWatch - bids for " .. w.raw,
+                     shortTiers (w, " "), parseTiers)
+  if not r then return end
+  local tiers = parseTiers (r)
+  w.max, w.max2, w.max3 = tiers [1], tiers [2], tiers [3]
+  saveData ()
+  echoHi (string.format ("%q", w.raw) .. " bids: ", tierText (w), " gold")
+end
+
+local function mgrDelete (w)
+  local ok, r = pcall (utils.msgbox, "Stop watching \"" .. w.raw .. "\"?",
+                       "MarketWatch", "yesno", "?", 2)
+  if not ok or r ~= "yes" then return end
+  local i = watchIndex (w)
+  if not i then return end
+  table.remove (gWatch, i)
+  saveData ()
+  echo ("removed " .. string.format ("%q", w.raw) .. ".")
+end
+
+local function mgrAdd ()
+  local name = askText ("What to watch for.  Part of the name is enough; * stands for a gap.",
+                        "MarketWatch - add item", "",
+                        function (s) return checkPattern (s, nil) end)
+  if not name then return end
+  name = trim (name)
+  local r = askText (BIDS_PROMPT, "MarketWatch - bids for " .. name, "", parseTiers)
+  if not r then echo ("not added - no bids were given.") return end
+  local tiers = parseTiers (r)
+  gWatch [#gWatch + 1] = { raw = name, max = tiers [1], max2 = tiers [2], max3 = tiers [3],
+                           added = os.time (), pieces = splitGlob (name), mode = "both" }
+  saveData ()
+  echoHi ("watching " .. string.format ("%q", name) .. " up to ", tierText (gWatch [#gWatch]),
+          " gold  (both).")
+end
+
+-- Every link in the window calls this.  See the block comment above for why
+-- the real work is pushed onto a timer.
+function MW_MgrClick (what, i)
+  DoAfterSpecial (0.2, string.format ("MW_MgrDo (%q, %d)", tostring (what), tonumber (i) or 0),
+                  sendto.script)
+end
+
+function MW_MgrDo (what, i)
+  local w = nil
+  if i and i > 0 then
+    w = gMgrRows [i]
+    if not watchIndex (w) then
+      -- the list changed since this row was drawn: just redraw it
+      if mgrRefresh then mgrRefresh (true) end
+      return
+    end
+  end
+
+  if what == "edit" then mgrEditName (w)
+  elseif what == "bids" then mgrEditBids (w)
+  elseif what == "del"  then mgrDelete (w)
+  elseif what:sub (1, 5) == "mode:" then
+    local m = parseMode (what:sub (6))
+    if m and (w.mode or "both") ~= m then
+      w.mode = m
+      saveData ()
+      echoHi ("watching " .. string.format ("%q", w.raw) .. ": ", MODE_LABEL [m], ".")
+    end
+  elseif what == "add"  then mgrAdd ()
+  elseif what == "scan" then MW_Cmd_Scan ()
+  elseif what == "auc"  then MW_Cmd_Auc (nil, nil, { gCfg.auc and "off" or "on" })
+  elseif what == "mkt"  then MW_Cmd_Mkt (nil, nil, { gCfg.mkt and "off" or "on" })
+  end
+  if mgrRefresh then mgrRefresh (true) end
+end
+
+local MODE_BTN = { { "both", "Both" }, { "mark", "Market" }, { "auc", "Auction" } }
+
+local function mgrBtn (label, colour, what, i, tip)
+  return { text = "[ " .. label .. " ]", colour = colour,
+           code = string.format ("MW_MgrClick(%q,%d)", what, i or 0), tip = tip }
+end
+
+local function mgrClose ()
+  local w = gMgr
+  gMgr = nil
+  if w then pcall (function () w:delete () end) end
+  pcall (WindowDelete, MGR_ID)
+  pcall (Repaint)
+end
+
+-- Draw (or redraw) the window.  keep_scroll keeps where you had scrolled to.
+mgrRefresh = function (keep_scroll)
+  if not gCfg.win or not gHaveWin then return end
+
+  -- never reuse an object the library no longer knows about (zombie guard)
+  if gMgr and not (ThemedWindowClass and ThemedWindowClass.window_map
+                   and ThemedWindowClass.window_map [MGR_ID]) then
+    gMgr = nil
+    pcall (WindowDelete, MGR_ID)
+  end
+
+  if not gMgr then
+    local ok, w = pcall (ThemedTextWindow,
+      MGR_ID,
+      640, 160,        -- default left, top (first run only; it remembers a drag)
+      600, 300,        -- default size (fit_contents resizes it)
+      "MarketWatch - watch list",
+      "center",
+      true,            -- [x] in the title bar: closes it (marketw win reopens)
+      false,           -- resizeable
+      true,            -- text scrolls: the list can outgrow the window
+      false, false, false,
+      true,            -- autowrap
+      POPUP_FONT, POPUP_FONT_SIZE,
+      POPUP_FONT, POPUP_FONT_SIZE,
+      400,             -- max lines
+      nil,
+      true,            -- defer showing until drawn
+      false, nil,
+      "Close the watch list (marketw win brings it back)")
+    if not ok or not w then
+      dbg ("watch-list window unavailable: " .. tostring (w))
+      return
+    end
+    gMgr = w
+    if gMgr.textrect and gMgr.textrect.font_bold then
+      gMgr.textrect.font = gMgr.textrect.font_bold
+    end
+    local prior = gMgr.do_on_delete
+    gMgr.do_on_delete = function (self)
+      if prior then prior (self) end
+      -- our own teardown clears gMgr first, so only the [x] lands here
+      if gMgr ~= self then return end
+      gMgr = nil
+      gCfg.win = false
+      saveData ()
+      echoHi ("watch-list window closed.  Type ", "marketw win", " to bring it back.")
+    end
+    keep_scroll = false
+  end
+
+  local keep = nil
+  if keep_scroll and gMgr.textrect then keep = tonumber (gMgr.textrect.display_start_line) end
+
+  gMgr:clear (false)
+  gMgrRows = {}
+
+  local function line (segs)
+    local s, l = promptLine (segs)
+    if #s == 0 then s = { { text = " ", textcolour = col (CLR_MSG) } } end
+    gMgr:add_text (s, false, l)
+  end
+
+  if #gWatch == 0 then
+    line { { text = " Nothing on the watch list yet.", colour = CLR_DIM } }
+  end
+
+  -- pad names and amounts so the buttons line up (Consolas is monospaced)
+  local namew, amtw = 10, 8
+  for _, w in ipairs (gWatch) do
+    namew = math.max (namew, math.min (#w.raw, 40))
+    amtw  = math.max (amtw,  math.min (#shortTiers (w), 30))
+  end
+
+  for i, w in ipairs (gWatch) do
+    gMgrRows [i] = w
+    local mode = w.mode or "both"
+    line {
+      { text = string.format (" %2d. ", i), colour = CLR_HI },
+      { text = w.raw, colour = CLR_MSG },
+      { text = string.rep (" ", math.max (2, namew - #w.raw + 2)) },
+      mgrBtn ("Edit", CLR_HI, "edit", i, "Change what this entry watches for"),
+      { text = " " },
+      mgrBtn ("Del", CLR_NAME, "del", i, "Stop watching this (asks first)"),
+    }
+    local amts = shortTiers (w)
+    local segs = {
+      { text = "     max " },
+      { text = amts, colour = CLR_HI },
+      { text = string.rep (" ", math.max (2, amtw - #amts + 2)) },
+      mgrBtn ("Set Bids", CLR_HI, "bids", i, "Set max1 max2 max3 for this item"),
+      { text = "   " },
+    }
+    for k, mb in ipairs (MODE_BTN) do
+      if k > 1 then segs [#segs + 1] = { text = " " } end
+      local on = (mode == mb [1])
+      segs [#segs + 1] = mgrBtn (mb [2], on and CLR_HI or CLR_TAG, "mode:" .. mb [1], i,
+        on and ("Watching " .. MODE_LABEL [mb [1]])
+            or ("Watch this on " .. (mb [1] == "both" and "both the market and the auction channel"
+                                     or (mb [1] == "auc" and "the live auction channel only"
+                                         or "the marketplace only"))))
+    end
+    line (segs)
+    line { { text = " " } }
+  end
+
+  line {
+    { text = " " },
+    mgrBtn ("+ Add item", CLR_HI, "add", 0, "Watch a new item"),
+    { text = "   " },
+    mgrBtn ("Scan market", CLR_HI, "scan", 0, "Read 'market list' now for your items"),
+  }
+  line {
+    { text = " live channels:  " },
+    mgrBtn ("auction " .. (gCfg.auc and "ON" or "OFF"), gCfg.auc and CLR_HI or CLR_TAG, "auc", 0,
+            "Turn watching the live auction channel " .. (gCfg.auc and "off" or "on")),
+    { text = " " },
+    mgrBtn ("market " .. (gCfg.mkt and "ON" or "OFF"), gCfg.mkt and CLR_HI or CLR_TAG, "mkt", 0,
+            "Turn watching the market channel " .. (gCfg.mkt and "off" or "on")),
+  }
+
+  pcall (function () gMgr:fit_contents (1000, MGR_MAXH) end)
+  pcall (function () gMgr:set_scroll (keep or 1) end)
+  gMgr:draw ()
+  gMgr:show ()
+  pcall (Repaint)
+end
+
+-- marketw win [on|off]   (no argument toggles)
+function MW_Cmd_Win (name, line, wildcards)
+  local arg = trim (wildcards and wildcards [1] or ""):lower ()
+  if not gHaveWin then
+    warn ("themed_miniwindows did not load - no window is possible.")
+    return
+  end
+  local want
+  if arg == "on" then want = true
+  elseif arg == "off" then want = false
+  elseif arg == "" then want = not (gCfg.win and gMgr ~= nil)
+  else warn ("usage: marketw win [on|off]") return end
+  gCfg.win = want
+  saveData ()
+  if want then mgrRefresh (false) else mgrClose () end
+  echoHi ("watch-list window is ", want and "ON" or "OFF", "")
+end
+
 function MW_Cmd_Popup (name, line, wildcards)
   local arg = trim (wildcards [1]):lower ()
   if arg == "on"  then gCfg.popup = true
@@ -2762,6 +3156,7 @@ function MW_Cmd_Mkt (name, line, wildcards)
     return
   end
   saveData ()
+  mgrRefresh (true)
   echoHi ("market channel watching is ", gCfg.mkt and "ON" or "OFF", "")
 end
 
@@ -2823,6 +3218,7 @@ function MW_Cmd_Auc (name, line, wildcards)
     gCfg.aucdebug = not gCfg.aucdebug
     EnableTrigger ("mw_auc_debug", gCfg.aucdebug)
     saveData ()
+    mgrRefresh (true)
     echoHi ("auction diagnostics are ", gCfg.aucdebug and "ON" or "OFF",
             gCfg.aucdebug and " - every 'Auction:' line will be echoed dimmed." or "")
     return
@@ -2839,6 +3235,7 @@ function MW_Cmd_Auc (name, line, wildcards)
     return
   end
   saveData ()
+  mgrRefresh (true)
   echoHi ("auction channel watching is ", gCfg.auc and "ON" or "OFF", "")
 end
 
@@ -2938,6 +3335,7 @@ function MW_Cmd_Add (name, line, wildcards)
       w.max, w.max2, w.max3 = max, max2, max3    -- the amounts given replace all tiers
       if mode then w.mode = mode end     -- no mode word given: keep what it had
       saveData ()
+      mgrRefresh (true)
       echoHi ("updated max for " .. string.format ("%q", w.raw) .. ": " ..
               old .. " -> ", tierText (w),
               "  (" .. MODE_LABEL [w.mode or "both"] .. ")")
@@ -2948,6 +3346,7 @@ function MW_Cmd_Add (name, line, wildcards)
   gWatch [#gWatch + 1] = { raw = body, max = max, max2 = max2, max3 = max3,
                            added = os.time (), pieces = pieces, mode = mode }
   saveData ()
+  mgrRefresh (true)
   echoHi ("watching " .. string.format ("%q", body) .. " up to ", tierText (gWatch [#gWatch]),
           " gold  (" .. MODE_LABEL [mode] .. ").")
 end
@@ -2958,6 +3357,7 @@ function MW_Cmd_Del (name, line, wildcards)
   if idx and gWatch [idx] then
     local w = table.remove (gWatch, idx)
     saveData ()
+    mgrRefresh (true)
     echo ("removed " .. string.format ("%q", w.raw) .. ".")
     return
   end
@@ -2966,6 +3366,7 @@ function MW_Cmd_Del (name, line, wildcards)
     if target ~= "" and norm (w.raw):find (target, 1, true) then
       table.remove (gWatch, i)
       saveData ()
+      mgrRefresh (true)
       echo ("removed " .. string.format ("%q", w.raw) .. ".")
       return
     end
@@ -2999,6 +3400,7 @@ end
 function MW_Cmd_Clear ()
   gWatch = {}
   saveData ()
+  mgrRefresh (true)
   echo ("watch list cleared.")
 end
 
@@ -3057,6 +3459,7 @@ function MW_Cmd_Mode (name, line, wildcards)
   end
   w.mode = mode
   saveData ()
+  mgrRefresh (true)
   echoHi ("watching " .. string.format ("%q", w.raw) .. ": ", MODE_LABEL [mode], ".")
 end
 
@@ -3107,6 +3510,7 @@ function MW_Cmd_Set (name, line, wildcards)
   end
   if mode then w.mode = mode end
   saveData ()
+  mgrRefresh (true)
   echoHi ("item " .. tostring (tonumber (target) or "") .. " " ..
           string.format ("%q", w.raw) .. ": ", tierText (w),
           " gold  (" .. MODE_LABEL [w.mode or "both"] .. ")")
@@ -3148,6 +3552,7 @@ function MW_Cmd_Max (name, line, wildcards)
     if tier == 2 then w.max2 = v else w.max3 = v end
   end
   saveData ()
+  mgrRefresh (true)
   echoHi ("watching " .. string.format ("%q", w.raw) .. " up to ", tierText (w), " gold.")
 end
 
@@ -3229,6 +3634,7 @@ function MW_Cmd_Help ()
   helpLine ("marketw lc on|off",            "last chance when an item has minutes left, any mode")
   helpLine ("marketw lc <mins>",            "how large a closing warning still counts")
   helpLine ("marketw popup on|off",         "live listings pop up in a window, not the output")
+  helpLine ("marketw win [on|off]",         "the watch-list window: edit items, bids and mode")
   helpLine ("(market bids)",                "a bid line for a watched item pops up the lowest max that beats it; outbid -> next max")
   helpLine ("marketw mode <n|text> <m>",    "per item: both (default), auc = auction only, mark = market only")
   helpLine ("marketw set <n> <m1> [m2 [m3]] [mode]", "redo an item's amounts / mode by its list number")
@@ -3459,6 +3865,7 @@ end
 function OnPluginInstall ()
   loadData ()
   pcall (WindowDelete, "MarketWatch_prompt")   -- clear anything left behind
+  pcall (WindowDelete, MGR_ID)
   EnableTrigger ("mw_auc_debug", gCfg.aucdebug and true or false)
   EnableTrigger ("mw_lc_debug",  gCfg.lcdebug  and true or false)
   if not gHaveCapture then
@@ -3470,6 +3877,7 @@ function OnPluginInstall ()
   ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
               CLR_MSG, "", "v" .. GetPluginInfo (GetPluginID (), 19) .. " loaded. Type ",
               CLR_HI, "", "marketw help", CLR_MSG, "", " for help.")
+  if gCfg.win then mgrRefresh (false) end
 end
 
 function OnPluginSaveState ()
@@ -3479,6 +3887,7 @@ end
 function OnPluginClose ()
   saveData ()
   popupClose ()
+  mgrClose ()   -- before the library deletes it, or the [x] path would switch gCfg.win off
 end
 
 ]]>
