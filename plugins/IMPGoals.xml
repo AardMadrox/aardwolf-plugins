@@ -10,7 +10,7 @@
    purpose="Set Instinct / Mastery / Potential goals and see what it costs to reach them"
    date_written="2026-11-18"
    requires="4.73"
-   version="1.3"
+   version="1.4"
    save_state="y"
 >
 </plugin>
@@ -19,10 +19,12 @@
 IMPGoals - author Eric
 ====================================================================
 WHAT IT DOES
-  imp config        silently runs instinct, mastery and potential (none of
-                    their output shows), then opens a scrolling window with
-                    every current level and a [goal] box next to each one.
-                    Click a box to type a goal; leave it blank to clear it.
+  impgoals config   (or imp config) silently runs instinct, mastery and potential (none of
+                    their output shows), then opens a small window with 3
+                    Instinct slots, 3 Mastery slots and 1 Potential line.
+                    Click a slot's name to pick the skill / mastery type
+                    from a list, click the number box to set the goal, x
+                    to empty the slot.
   impgoals          re-reads your levels silently and echoes what it costs
                     to reach every goal you set.
   impgoals <chan>   the same, as ONE line to say / reply / spo / gt / ft / clan.
@@ -59,9 +61,17 @@ MAINTAINER NOTES
   - v1.2: everything shows Instinct, Mastery, Potential in that order (Eric's
     request); channel line, echo and window footer give each section's own
     cost, then the total last.
+  - v1.4: the window is slots, not the full list: 3 Instinct, 3 Mastery,
+    1 Potential (Eric's request). Goals are still the same per-character
+    "kind|lowername" map in the data file; a kind's slots are its goal keys
+    sorted alphabetically, so no data change was needed. The picker is
+    utils.listbox (maxed and already-slotted entries left out); picking
+    then asks the goal, and cancelling either box leaves the slot alone.
+    Goal data with more than 3 of a kind (from 1.3) still shows - all of
+    them - just with no empty slot to add more.
   - Window: themed_miniwindows ThemedTextWindow, MarketWatch/Partroxshit
-    pattern. Goal-box links run Lua; the input box is opened from a timer,
-    not from inside the click. Scroll is pinned to the top on first open
+    pattern. Links run Lua; input box, picker and x are all run from a
+    timer, not from inside the click. Scroll is pinned to the top on first open
     (links near the top die otherwise) and kept on redraws. Raised to
     z-order 99999 so the layout's invisible drag bar cannot eat clicks.
 -->
@@ -82,7 +92,7 @@ dofile (GetInfo (60) .. "aardwolf_colors.lua")
 local gHaveCapture = pcall (require, "wrapped_captures")
 local gHaveWin     = pcall (require, "themed_miniwindows")
 
-local VERSION   = "1.3"
+local VERSION   = "1.4"
 local DIR       = GetPluginInfo (GetPluginID (), 20)
 local DATA_FILE = DIR .. "IMPGoals_data.lua"
 
@@ -377,6 +387,28 @@ local function cost_segs (kind, c)
   return segs
 end
 
+-- v1.4 slot window: 3 Instinct slots, 3 Mastery slots, 1 Potential
+local SLOTS       = 3
+local SLOT_NAME_W = 18
+
+local function find_row (d, kind, name)
+  local want = string.lower (name)
+  for _, r in ipairs (d.levels or {}) do
+    if r.kind == kind and string.lower (r.name) == want then return r end
+  end
+  return nil
+end
+
+-- goal keys of one kind, in a steady (alphabetical) order
+local function slot_keys (d, kind)
+  local out = {}
+  for k in pairs (d.goals or {}) do
+    if k:sub (1, #kind + 1) == kind .. "|" then out [#out + 1] = k end
+  end
+  table.sort (out)
+  return out
+end
+
 function IMPGoals_WinOpen (keep_scroll)
   if not gHaveWin or type (ThemedTextWindow) ~= "function" then
     tag ("@x099themed_miniwindows did not load@W - no window possible. Use @x048impgoals@W instead.")
@@ -445,45 +477,52 @@ function IMPGoals_WinOpen (keep_scroll)
     { text = "]", colour = CLR_TAG, code = "IMPGoals_Echo()", tip = "Echo the costs to the output window" },
     { text = "   levels read " .. ((d.when or 0) > 0 and os.date ("%H:%M", d.when) or "never"), colour = CLR_NAME },
   }
-  add { { text = "Click a [goal] box to set it. Leave it blank to clear it." } }
-
-  local wname = 4
-  for _, r in ipairs (d.levels) do wname = math.max (wname, #r.name) end
-  wname = wname + 2
+  add { { text = "Click a name to pick what to goal for, the number box to set the goal." } }
 
   local res = IMPGoals_Compute (d)
   local by_key = {}
   for _, it in ipairs (res.items) do by_key [goal_key (it.row.kind, it.row.name)] = it end
 
+  -- one link segment wrapped in purple [ ]
+  local function boxed (segs, text, colour, code, tip)
+    segs [#segs + 1] = { text = "[", colour = CLR_TAG, code = code, tip = tip }
+    segs [#segs + 1] = { text = text, colour = colour, code = code, tip = tip }
+    segs [#segs + 1] = { text = "]", colour = CLR_TAG, code = code, tip = tip }
+  end
+
+  local function pad (s, w)
+    if #s > w then return s:sub (1, w) end
+    return s .. string.rep (" ", w - #s)
+  end
+
+  local WNAME = SLOT_NAME_W
   for _, kind in ipairs (KIND_ORDER) do
-    local first = true
-    for _, r in ipairs (d.levels) do
-      if r.kind == kind then
-        if first then
-          add { { text = "" } }
-          add {
-            { text = KIND_TITLE [kind], colour = CLR_TAG },
-            { text = string.rep (" ", math.max (1, wname + 2 - #KIND_TITLE [kind])) .. " Now   Goal     Cost to goal", colour = CLR_NAME },
-          }
-          first = false
-        end
-        local k    = goal_key (r.kind, r.name)
+    add { { text = "" } }
+    add {
+      { text = KIND_TITLE [kind], colour = CLR_TAG },
+      { text = string.rep (" ", WNAME + 7 - #KIND_TITLE [kind]) .. " Now   Goal   Cost to goal", colour = CLR_NAME },
+    }
+    local top = IMPCosts.max (kind) or 0
+
+    if kind == "potential" then
+      local r = find_row (d, kind, "Potential")
+      local segs = { { text = "     " }, { text = pad ("Potential", WNAME + 2) } }
+      if not r then
+        segs [#segs + 1] = { text = "   ?   not read yet - click Refresh", colour = CLR_NAME }
+      else
+        local k    = goal_key (kind, r.name)
         local goal = d.goals [k]
-        local top  = IMPCosts.max (r.kind) or 0
-        local segs = {
-          { text = "  " },
-          { text = r.name .. string.rep (" ", wname - #r.name) },
-          { text = string.format ("%4d", r.level), colour = CLR_NAME },
-          { text = "   " },
-        }
+        segs [#segs + 1] = { text = string.format ("%4d", r.level), colour = CLR_NAME }
+        segs [#segs + 1] = { text = "  " }
         if r.level >= top then
           segs [#segs + 1] = { text = "[  max]", colour = CLR_TAG }
         else
-          local code = string.format ("IMPGoals_Edit(%q)", k)
-          local tip  = string.format ("Set a goal for %s (max %d)", r.name, top)
-          segs [#segs + 1] = { text = "[", colour = CLR_TAG, code = code, tip = tip }
-          segs [#segs + 1] = { text = goal and string.format ("%5d", goal) or "  set", colour = goal and CLR_HI or CLR_MSG, code = code, tip = tip }
-          segs [#segs + 1] = { text = "]", colour = CLR_TAG, code = code, tip = tip }
+          boxed (segs, goal and string.format ("%5d", goal) or "  set", goal and CLR_HI or CLR_MSG,
+                 string.format ("IMPGoals_Edit(%q)", k), string.format ("Set a Potential goal (max %d)", top))
+          if goal then
+            segs [#segs + 1] = { text = " " }
+            segs [#segs + 1] = { text = "x", colour = CLR_TAG, code = string.format ("IMPGoals_Clear(%q)", k), tip = "Clear this goal" }
+          end
         end
         segs [#segs + 1] = { text = "  " }
         local it = by_key [k]
@@ -491,6 +530,42 @@ function IMPGoals_WinOpen (keep_scroll)
           for _, s in ipairs (cost_segs (kind, it.cost)) do segs [#segs + 1] = s end
         elseif goal then
           segs [#segs + 1] = { text = "reached", colour = CLR_HI }
+        end
+      end
+      add (segs)
+
+    else
+      local slots = slot_keys (d, kind)
+      local n = math.max (SLOTS, #slots)
+      for i = 1, n do
+        local k = slots [i]
+        local segs = { { text = string.format ("  %d  ", i), colour = CLR_NAME } }
+        if not k then
+          local what = kind == "instinct" and "+ pick a skill" or "+ pick a type"
+          boxed (segs, pad (what, WNAME), CLR_MSG, string.format ("IMPGoals_Pick(%q,%q)", kind, ""),
+                 "Choose a " .. (kind == "instinct" and "skill" or "mastery type") .. " to goal for")
+        else
+          local name = k:match ("^[^|]+|(.*)$") or k
+          local r    = find_row (d, kind, name)
+          local goal = d.goals [k]
+          local shown = r and r.name or name
+          boxed (segs, pad (shown, WNAME), CLR_MSG, string.format ("IMPGoals_Pick(%q,%q)", kind, k),
+                 "Swap this slot to a different " .. (kind == "instinct" and "skill" or "type"))
+          segs [#segs + 1] = { text = r and string.format ("%4d", r.level) or "   ?", colour = CLR_NAME }
+          segs [#segs + 1] = { text = "  " }
+          boxed (segs, string.format ("%5d", goal), CLR_HI, string.format ("IMPGoals_Edit(%q)", k),
+                 string.format ("Change the goal for %s (max %d)", shown, top))
+          segs [#segs + 1] = { text = " " }
+          segs [#segs + 1] = { text = "x", colour = CLR_TAG, code = string.format ("IMPGoals_Clear(%q)", k), tip = "Empty this slot" }
+          segs [#segs + 1] = { text = "  " }
+          local it = by_key [k]
+          if it then
+            for _, s in ipairs (cost_segs (kind, it.cost)) do segs [#segs + 1] = s end
+          elseif not r then
+            segs [#segs + 1] = { text = "not in your list", colour = CLR_NAME }
+          else
+            segs [#segs + 1] = { text = "reached", colour = CLR_HI }
+          end
         end
         add (segs)
       end
@@ -536,6 +611,28 @@ function IMPGoals_Edit (k)
   DoAfterSpecial (0.1, "IMPGoals_EditNow(" .. string.format ("%q", tostring (k)) .. ")", sendto.script)
 end
 
+-- Ask for a goal number. Returns a number, "clear" (blank), or nil (cancelled
+-- or not a whole number).
+local function ask_goal (row, cur)
+  local top = IMPCosts.max (row.kind) or 0
+  local label = row.kind == "potential" and "Potential" or (row.name .. " " .. string.lower (KIND_TITLE [row.kind]))
+  local s = utils.inputbox (string.format ("Goal for %s - now %d, max %d. Leave blank to clear.",
+                            label, row.level, top), "IMPGoals", cur and tostring (cur) or "")
+  if s == nil then return nil end        -- cancelled
+  s = trim (s):gsub (",", "")
+  if s == "" then return "clear" end
+  local n = tonumber (s)
+  if not n or n < 0 or n ~= math.floor (n) then
+    tag ("@x099'" .. s .. "'@W is not a whole number - goal not changed.")
+    return nil
+  end
+  if n > top then
+    tag (label .. " only goes to @x048" .. top .. "@W - goal set to " .. top .. ".")
+    n = top
+  end
+  return n
+end
+
 function IMPGoals_EditNow (k)
   local d = me ()
   local row
@@ -543,27 +640,62 @@ function IMPGoals_EditNow (k)
     if goal_key (r.kind, r.name) == k then row = r break end
   end
   if not row then return end
-  local top = IMPCosts.max (row.kind) or 0
-  local cur = d.goals [k]
-  local label = row.kind == "potential" and "Potential" or (row.name .. " " .. string.lower (KIND_TITLE [row.kind]))
-  local s = utils.inputbox (string.format ("Goal for %s - now %d, max %d. Leave blank to clear.",
-                            label, row.level, top), "IMPGoals", cur and tostring (cur) or "")
-  if s == nil then return end            -- cancelled
-  s = trim (s):gsub (",", "")
-  if s == "" then
-    d.goals [k] = nil
-  else
-    local n = tonumber (s)
-    if not n or n < 0 or n ~= math.floor (n) then
-      tag ("@x099'" .. s .. "'@W is not a whole number - goal not changed.")
-      return
-    end
-    if n > top then
-      tag (label .. " only goes to @x048" .. top .. "@W - goal set to " .. top .. ".")
-      n = top
-    end
-    d.goals [k] = n
+  local n = ask_goal (row, d.goals [k])
+  if n == nil then return end
+  if n == "clear" then d.goals [k] = nil else d.goals [k] = n end
+  save_db ()
+  if gWin then IMPGoals_WinOpen (true) end
+end
+
+-- [name] box: pick (or swap to) a skill / mastery type, then ask its goal.
+-- old_k is the slot's current goal key, "" for an empty slot.
+function IMPGoals_Pick (kind, old_k)
+  DoAfterSpecial (0.1, string.format ("IMPGoals_PickNow(%q,%q)", tostring (kind), tostring (old_k or "")), sendto.script)
+end
+
+function IMPGoals_PickNow (kind, old_k)
+  local d = me ()
+  local top = IMPCosts.max (kind) or 0
+  local taken = {}
+  for _, k in ipairs (slot_keys (d, kind)) do
+    if k ~= old_k then taken [k] = true end
   end
+  if old_k == "" and #slot_keys (d, kind) >= SLOTS then
+    tag ("All " .. SLOTS .. " " .. KIND_TITLE [kind] .. " slots are full - empty one with its @x099x@W first.")
+    return
+  end
+  local choices, rows = {}, {}
+  for _, r in ipairs (d.levels) do
+    local k = goal_key (r.kind, r.name)
+    if r.kind == kind and r.level < top and not taken [k] then
+      choices [k] = string.format ("%s  (now %d)", r.name, r.level)
+      rows [k] = r
+    end
+  end
+  if next (choices) == nil then
+    tag ("Nothing left to pick for " .. KIND_TITLE [kind] .. " - click @x048Refresh@W if your levels are stale.")
+    return
+  end
+  local what = kind == "instinct" and "skill" or "mastery type"
+  local k = utils.listbox ("Pick the " .. what .. " to goal for:", "IMPGoals - " .. KIND_TITLE [kind],
+                           choices, old_k ~= "" and choices [old_k] and old_k or nil)
+  if not k or not rows [k] then return end    -- cancelled
+  local n = ask_goal (rows [k], k == old_k and d.goals [old_k] or nil)
+  if n == nil or n == "clear" then return end -- nothing chosen: slot left as it was
+  if old_k ~= "" then d.goals [old_k] = nil end
+  d.goals [k] = n
+  save_db ()
+  if gWin then IMPGoals_WinOpen (true) end
+end
+
+-- x next to a slot: empty it
+function IMPGoals_Clear (k)
+  DoAfterSpecial (0.1, string.format ("IMPGoals_ClearNow(%q)", tostring (k)), sendto.script)
+end
+
+function IMPGoals_ClearNow (k)
+  local d = me ()
+  d.goals [tostring (k)] = nil
   save_db ()
   if gWin then IMPGoals_WinOpen (true) end
 end
@@ -579,12 +711,12 @@ end
 local function echo_totals ()
   local d = me ()
   if #d.levels == 0 then
-    tag ("No levels read yet - type @x048imp config@W first.")
+    tag ("No levels read yet - type @x048impgoals config@W first.")
     return
   end
   local res = IMPGoals_Compute (d)
   if #res.items == 0 then
-    tag ("No goals left to reach. Set some with @x048imp config@W.")
+    tag ("No goals left to reach. Set some with @x048impgoals config@W.")
     return
   end
   tag ("Cost to reach your goals @W(from your current levels; banked QP / gold / trains not taken off):")
@@ -673,7 +805,7 @@ end
 function impgoals_window (name, line, wc)
   if not core_ready () then return end
   if #me ().levels == 0 then
-    tag ("No levels read yet - type @x048imp config@W first.")
+    tag ("No levels read yet - type @x048impgoals config@W first.")
     return
   end
   IMPGoals_WinOpen (false)
@@ -694,7 +826,7 @@ function impgoals_channel (name, line, wc)
   read_all (function (ok, err)
     if not ok then tag ("@x099" .. err .. "@W - using the levels read last time.") end
     if #me ().levels == 0 then
-      tag ("No levels read yet - type @x048imp config@W first.")
+      tag ("No levels read yet - type @x048impgoals config@W first.")
       return
     end
     local msg = channel_line ()
@@ -729,7 +861,7 @@ function impgoals_reload (name, line, wc)
 end
 
 local HELP = {
-  { "imp config",         "read your levels silently and open the goals window" },
+  { "impgoals config",    "read your levels silently and open the goals window (imp config works too)" },
   { "impgoals",           "echo what it costs to reach your goals" },
   { "impgoals <channel>", "report it in one line: say reply spo gt ft clan" },
   { "impgoals clear",     "remove all your goals" },
@@ -745,14 +877,15 @@ function impgoals_help (name, line, wc)
     cnote (string.format ("  @x048%-20s@W %s", h [1], h [2]))
   end
   cnote ("  @x099Costs@W run from your current level to the goal. Banked QP / gold / trains are not taken off.")
-  cnote ("  @x099Window@W: click a @x099[@x048goal@x099]@W box to type a goal; leave it blank to clear it.")
+  cnote ("  @x099Window@W: 3 Instinct + 3 Mastery slots and Potential. Click a slot's @x099[@Wname@x099]@W to pick what to")
+  cnote ("          goal for, the @x099[@x048number@x099]@W box to set the goal, @x099x@W to empty the slot.")
 end
 
 load_db ()
 
 function OnPluginInstall ()
   if core_ready () then
-    tag ("@x048v" .. VERSION .. "@W loaded. Type @x048imp config@W to set goals, @x048impgoals help@W for help.")
+    tag ("@x048v" .. VERSION .. "@W loaded. Type @x048impgoals config@W to set goals, @x048impgoals help@W for help.")
   end
 end
 
