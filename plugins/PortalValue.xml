@@ -34,8 +34,21 @@
         norecall say so instead of recommending a portal you cannot place.
         Type pvworth after buying or selling portals to rebuild the model.
 
+     4. PORTAL USAGE (portaluse - v5.0, was the PortalUse plugin):
+        Counts every use of a worn portal and shows them in a window, in each
+        portal's own colours, with sort buttons, [ignore] / [restore] per
+        portal, and the destination area keyword + landing room from the
+        catalog above. portalusetop <channel> posts your top 5.
+
+     5. PORTAL MAPPER (portalmapper - v5.0, was the PortalMapper plugin):
+        Walks a bag of handheld portals and records each one as a mapper
+        portal exit. "portalmapper config" opens a settings window: mode,
+        bags, gear and your custom mapping command.
+
      Data: the catalog lives in its own file PortalDex_data.lua (in the world
      folder); pv history lives in plugin state. Kept separate on purpose.
+     Usage counts are in PortalUse.dat and the mapper's settings + mapped list
+     in PortalMapper_data.txt - the same files the old plugins used.
 
      Movement rule: portal hop = 1; each cardinal step = 1; each cexit = 1;
      open/close = 0 (they never appear in mapper paths).
@@ -52,10 +65,11 @@
    author="Eric"
    id="e9f3a7c2b1d84605fa9c7e21"
    language="Lua"
-   purpose="Find the closest saved portal + speedwalk to your room, and catalog your portals by type."
+   purpose="One stop for portals: nearest-portal pathing, portal catalog, usage tracker, bag mapper."
    date_written="2026-06-27"
    requires="4.73"
-   version="4.0"
+   version="5.0"
+   save_state="y"
 >
 </plugin>
 
@@ -66,8 +80,9 @@ NOTE: there is already a summary comment at the very top of this file,
   above the muclient tag. These notes go deeper into the code.
 
 WHAT IT DOES
-  Two tools that were merged into one plugin at v3.0 (PortalDex was folded
-  into PortalValue).
+  Four tools in one plugin. PortalDex was folded in at v3.0, PortalUse
+  ("portal usage", PART 4 notes) and PortalMapper ("portal mapper",
+  PART 5 notes) at v5.0. Read THE 5.0 MERGE below before touching those.
 
   1. PORTAL PATHING (pv). Stand in a room, type pv, and it finds the
      saved mapper portal with the shortest walk to where you are, across
@@ -82,6 +97,57 @@ WHAT IT DOES
   MOVEMENT RULE, used consistently: a portal hop is 1, each cardinal step
   is 1, each cexit is 1, and open or close is 0 because those never appear
   in mapper paths.
+
+THE 5.0 MERGE  (PortalUse 2.5 and PortalMapper 1.6 folded in, 2026-11-27)
+  Eric asked for one stop for all portal stuff. Both plugins' code is pasted
+  in nearly unchanged, each inside its own do ... end block AFTER the
+  PortalValue code, so their top level locals stay private to them and the
+  main chunk stays far under Lua's 200 active locals limit. Anything reached
+  from an alias, trigger, timer, DoAfterSpecial or a window link is GLOBAL,
+  exactly as it was. Both blocks can still see PortalValue's own top level
+  locals (VERSION, C, get_db_path ...) because they come later in the chunk.
+
+  Renamed in the move, nothing else:
+    each part's OnPluginInstall -> pv_on_install, pu_on_install and
+      pm_on_install. One OnPluginInstall at the very end runs all three and
+      prints ONE load line (Eric does not want load spam).
+    PortalUse's triggers scan_start / scan_item / scan_end -> pu_scan_*, and
+      all four of its triggers now keep_evaluating, so the id box triggers
+      and the mapper's invdata triggers still see every line.
+    start_scan / scan_timeout -> pu_start_scan / pu_scan_timeout. The scan
+      timeout used to CallPlugin its own old plugin id; it is a plain
+      DoAfterSpecial script call now.
+    usage window id PortalUse_list -> PortalValue_usage. Window ids are
+      client wide and the old name would clash while the old plugin was
+      still loaded. Its dragged position starts over once.
+    the usage area lookup reads the in-memory catalog table instead of
+      re-reading PortalDex_data.lua from disk.
+    PortalMapper's own VERSION local is gone; its help shows PortalValue's.
+    PortalMapper's OnPluginEnable now calls pm_on_install, not
+      OnPluginInstall, so enabling does not reprint the load line.
+
+  DATA DID NOT MOVE. Usage stays in PortalUse.dat (a bare filename, so the
+  MUSHclient working folder). The mapper's settings and mapped list stay in
+  PortalMapper_data.txt beside this .xml: dataPath trims GetPluginInfo 6,
+  which now names THIS file, in the same plugins folder. Nothing migrates.
+
+  THE MAPPER'S WALK-TIME ALIASES ARE LOAD-BEARING: dualweapon, wearportal
+  and "<verb> <n> portalbag" are written inside every portal exit the
+  mapper walks. Their patterns must never change.
+
+  OLD COPIES: pv_retire_old runs 1 second after install. If the old
+  PortalUse (3fa92c7bd184e55a9c02b6da) or PortalMapper
+  (c47a1f9b6e2d80513af7c264) plugin is still loaded it UnloadPlugin()s it
+  and says so: both copies at once would count every portal use twice and
+  answer every dualweapon / portalbag alias twice. UnloadPlugin is the call
+  mpm's remove uses; MUSHclient's help only forbids a plugin unloading
+  ITSELF. The include line goes when the world is next saved; until then
+  it is simply unloaded again on each start. The old files stay on disk.
+
+  CONFIG WINDOW (new in 5.0): portalmapper config / pmconfig. See the
+  comment above cfgShow in the mapper block.
+
+  The two former plugins' maintainer notes follow this block, as they were.
 
 HOW THE "WORTH IT" LINE WORKS  (added 2026-09-11; reworked in v3.6)
   Built entirely from the player's own files, so there are no hardcoded step
@@ -226,8 +292,8 @@ HOW THE PATHING WORKS
 DATA AND STATE
   Deliberately split in two:
     the CATALOG lives in its own file, PortalDex_data.lua, in the world
-      folder (GetInfo(66)). Other plugins read it: AreaWalks uses it to
-      classify portals, and PortalUse uses it for destination areas.
+      folder (GetInfo(66)). AreaWalks reads that file to classify portals;
+      the usage window (5.0) reads the in-memory catalog table.
     the pv HISTORY lives in plugin state.
   Keeping them separate is intentional, so a state reset does not lose the
   catalog.
@@ -244,18 +310,464 @@ WHEN EDITING
     plugins.
   * pd_parse only records when pd_auto is on or a scan is active, so
     idding a portal with auto off does nothing. That is deliberate.
-  * If you change the catalog record shape, remember AreaWalks and
-    PortalUse both read PortalDex_data.lua and expect catalog entries with
-    name, ptype, level, leads and room.
+  * If you change the catalog record shape, remember AreaWalks (from
+    PortalDex_data.lua) and the usage window (from the table) both expect
+    catalog entries with name, ptype, level, leads and room.
   * "pvcheck" is the diagnostic: it reports whether the mapper, the
     database and sqlite3 were all found.
+-->
+
+<!--
+PART 4 - PORTAL USAGE (was the PortalUse plugin): MAINTAINER NOTES
+(from the old plugin, added 2026-09-09. Read THE 5.0 MERGE above for
+what was renamed; "this plugin" below means this part.)
+====================================================================
+WHAT IT DOES
+  Counts how often you use each worn portal, remembering each portal's own
+  screen COLOURS so the list reads like the game does. Optionally shows
+  each portal's destination area and landing room, read from
+  PortalValue / PortalDex's catalog.
+
+COMMANDS
+  portaluse [mode]         open the usage window. Modes: high (default),
+                           low, alpha, ralpha
+  portalusetop <channel>   send the top 5 to a channel, in colour
+  portalscan               re read the bag to refresh colours and add
+                           untracked portals at 0 uses
+  portalsetbag <keyword>   set the bag keyword portalscan examines
+  portalarea on|off        show destination area and landing room
+  portalignore <portal>    toggle ignoring a portal
+  portalignore list        show ignored portals
+  portalclean              drop every portal with 0 uses
+  portalreset all          reset all usage
+  portalreset <portal>     reset one portal
+  portalhelp               help
+
+HOW IT WORKS
+  COUNTING is one trigger: "You stop using <name> as a portal" increments
+  usage[name] and saves.
+
+  THE COLOUR CAPTURE is the interesting part. MUSHclient hands a trigger
+  callback a styles table describing the coloured runs that made up the
+  line. extract_name_styles walks those runs, finds the portion that
+  overlaps the portal NAME, and clips each run to that range, producing a
+  list of spans. Each span records the text, an RGB hex value for local
+  ColourNote output, and an xterm index for channel output.
+
+  rgb_to_hex and rgb_to_xterm do the conversion. rgb_to_xterm handles the
+  greyscale ramp (232 to 255) and the 6 by 6 by 6 colour cube separately,
+  the standard xterm 256 mapping.
+
+  spans_to_aard turns the spans into an Aardwolf at code string, which is
+  how portalusetop sends a coloured line to a channel.
+
+  THE SCAN is a trigger sandwich around "exa <bag>", and all three scan
+  triggers ship enabled="n":
+    scan_start  "<something> contains:"
+    scan_item   an item line with a (K) marker, captures the name
+    scan_end    "You have N", "There are no items" or "The X is empty"
+  expecting_header stops a stray container line arming the scan.
+  A DoAfterSpecial 3 second scan_timeout is the fail safe if scan_end
+  never matches, so the catch all item trigger cannot stay armed.
+
+  THE AREA DISPLAY reads PortalDex_data.lua from the world folder, written
+  by PortalValue 3.3 or higher after a "portaldex scan". Several catalog
+  entries can share a name (plain chaos portals), so when building the
+  name to area map it PREFERS an entry that has a landing room over one
+  that only has an area.
+
+  The catalog stores the LONG area name ("Leads to"). Since 2.2 the
+  display shows the area KEYWORD instead, looked up read-only in the
+  mapper's sqlite db (area_keywords): first the landing room's own area
+  (rooms.area), then the long name matched against areas.name (case
+  insensitive). If the mapper or its db is missing, or neither lookup
+  hits, it falls back to the long name, so nothing ever goes blank.
+
+DATA AND STATE
+  Everything is in PortalUse.dat: the usage counts, the ignore list, the
+  bag keyword, the area display flag, and the captured colours. The file
+  is sectioned with USAGE, IGNORE, BAG, AREA and COLORS marker lines.
+
+  Portal names and their span texts are HEX ENCODED in the COLORS section.
+  That is deliberate: those strings contain arbitrary punctuation and the
+  format uses pipes, colons and commas as separators, so encoding is what
+  keeps the file parseable.
+
+  save_state="y" (since 2.3) is ONLY there so the usage window remembers
+  where it was dragged (movewindow uses SetVariable). The data itself
+  never uses plugin variables.
+
+THE USAGE WINDOW (2.3)
+  portaluse opens a themed_miniwindows ThemedTextWindow, same recipe as
+  PupPaths / Keycheck / MarketWatch: link text is Lua run in this plugin
+  (text_rect.lua browseUrl -> loadstring), so the PU_* click handlers are
+  GLOBAL. set_scroll runs AFTER fit_contents or the top rows lose their
+  hotspots, and WindowSetZOrder 99999 keeps the layout's invisible drag
+  bar (z 154) from eating clicks. Max lines is 1000 because the list is
+  already 340+ portals.
+  Top line: sort words (high/low/alpha/ralpha), the Area ON/OFF toggle
+  and [ Show ignored ]. Each row has [ignore] (one click, no confirm,
+  because the ignored section's [restore] undoes it). Portal names keep
+  their captured colours.
+  save_data() calls RedrawIfOpen, so a portal use, scan or command
+  updates the window live, keeping the scroll position.
+  area_cache holds the area map for the window: building it reads the
+  280KB PortalDex file plus the whole mapper rooms table, too slow to do
+  on every portal use. It is rebuilt when portaluse is typed or the area
+  display is toggled, and reused by live redraws.
+  Falls back to the old output-window list (print_usage) if
+  themed_miniwindows fails to load.
+
+WHEN EDITING
+  * data_file is the bare string "PortalUse.dat" with NO directory, so it
+    is written relative to MUSHclient's current working directory rather
+    than to the plugin folder or the world folder. That is different from
+    every other plugin in this collection, which build an absolute path
+    from GetInfo(66) or GetPluginInfo(id, 20). If the file ever seems to
+    go missing or reset, this is why.
+  * clean_name strips ANSI escapes and angle bracket tags before a name is
+    used as a table key, so the key always matches between the scan path
+    and the usage path.
+  * An EMPTY portal name is never counted or loaded (2.4). Eric's data
+    file had a "|311" usage line, a blank name with the same count as
+    "a ring of pale mushrooms"; how it got there is unknown. load_data
+    drops such lines, so the next save cleans an old file.
+  * The portaluse alias regexp uses negative lookaheads so that
+    "portalusetop" and "portaluse help" are not swallowed by the general
+    "portaluse..." form.
+  * The ignore list is honoured at DISPLAY time as well as at counting
+    time, so ignoring a portal hides existing counts without deleting
+    them.
+-->
+
+<!--
+PART 5 - PORTAL MAPPER (was the PortalMapper plugin): MAINTAINER NOTES
+(from the old plugin, added 2026-09-17. Read THE 5.0 MERGE above for
+what was renamed; "this plugin" below means this part.)
+====================================================================
+WHAT IT DOES
+  Takes a bag full of handheld portals and teaches the Aardwolf mapper
+  every one of them, one at a time, unattended.
+
+  For each portal in the bag it sends:
+
+      get <portal> portalbag
+      wear <portal>
+      enter
+
+  waits for GMCP room.info to report a DIFFERENT room number, and then
+  records the round trip with the mapper's own command:
+
+      mapper fullportal {get <p> portalbag;;wear <p>;;enter;;remove <p>;;dualweapon;;put <p> portalbag} {<room>} <level>
+
+  ...then actually performs the remove/restore/put itself and moves on to
+  the next portal.
+
+TWO MODES
+  No wish (default)      restore step is the word  dualweapon
+  Wish  (portalwish on)  restore step is the word  wearportal
+
+  That is the ONLY difference between the two modes. Everything else -
+  scanning, entering, recording, resuming - is shared.
+
+THE RESTORE STEP IS AN ALIAS WORD, NOT AN ITEM NUMBER  (v1.3 - important)
+  What goes into the mapper is the literal word "dualweapon" or
+  "wearportal".  This plugin defines an alias of each name; they expand to
+  "dual <current id>" / "wear <current id>" at the moment the portal is
+  walked.  Eric asked for this explicitly: map a portal at level 50 wearing
+  one item, re-gear at 201 with another, and the stored exit still works
+  with nothing to rewrite.
+
+  THIS RESTS ON ONE FACT ABOUT THE MAPPER, VERIFIED, NOT ASSUMED:
+  a portal exit's stored command is walked via
+      aardmapper.lua start_speedwalk -> ExecuteWithWaits(...)
+      aard_GMCP_mapper.xml ExecuteWithWaits -> Execute(...)
+  and Execute applies alias processing (Send does not).  Aardwolf sets
+  speedwalk_prefix to "run", so the fast path that calls ExecuteWithWaits
+  is always the one taken.
+
+  IF A FUTURE PACKAGE UPDATE CHANGES THAT TO Send(), every portal breaks at
+  once - the words go to the mud raw.  Re-check it after package updates;
+  it is the single load-bearing assumption in this plugin.
+
+  The live run deliberately does Execute(restoreToken()) rather than
+  sending the real command, so every run exercises the same alias path the
+  mapper will use.  A broken alias shows up immediately.
+
+  restoreToken()  -> what is stored:  "dualweapon" / "wearportal"
+  restoreLive()   -> the real thing:  "dual 12345" / "wear 12345"
+  Keep those two straight.  Storing restoreLive() would undo the whole point.
+
+  THE BAG IS A TOKEN TOO (asked for right after): the stored command says
+  "get <serial> portalbag" and "put <serial> portalbag", matched by aliases
+  of that shape.  Move every portal into a new bag, retype
+  "portalmapper bag <id>", and every portal ever mapped follows.
+
+  STILL BAKED IN, and only this: the portal's own serial (unique per
+  portal, so it must be) and the portal's level.  Plus which of the two
+  restore WORDS was used - which is all "portalmapper rewrite" is for now.
+
+SETTINGS (v1.6: load prints ONE line - version + pmhelp - nothing else;
+          missing setup is reported by 'portalmapper' and 'portalmapper go')
+  portalwish on|off|<bare toggle>     only if you have the portal wish
+  portalmapper bag <id>               the bag the portals live in
+  portalmapper dualweapon <id>        no-wish mode restore
+  portalmapper wearportal <id>        wish mode restore
+
+  All four can be retyped at any time to point at new gear - they just
+  overwrite the setting and save.  v1.1 reworded the help screen from
+  "SETUP - do this first" to make that obvious, and every alias the plugin
+  defines is now listed there.  Keep it that way: if you add an alias, add
+  a helpLine for it.
+
+CHANGING GEAR AFTER PORTALS ARE ALREADY MAPPED  (v1.2, narrowed in v1.3)
+  Since v1.3 a new dual weapon, a new wear-portal item, or a new BAG all
+  need nothing at all - the alias words cover them.  The only thing left
+  that invalidates stored commands is flipping WISH MODE, because that
+  changes which restore word was written in.  For that:
+
+  * each record stores the bag and restore step IN FORCE WHEN IT WAS MADE
+  * staleList() is anything whose stored pair no longer matches settings
+  * every settings change, and "portalmapper" status, says how many are stale
+  * "portalmapper rewrite" fixes them with
+        mapper change portal {old command} {new command}
+    which UPDATEs the exit's dir in place and keeps its destination and
+    level (aard_GMCP_mapper.xml, map_portal_edit).  No walking, no re-entry.
+
+  Because both command strings are rebuilt from (serial, bag, restore) at
+  call time, they always use the current separator - which is why the raw
+  string is NOT what gets stored.  Do not "optimise" this by saving the
+  literal command; it would break the moment command stacking is toggled.
+
+  v1.0 records have no bag/restore and are left alone by rewrite, with a
+  message saying they have to be re-walked.  Nothing Eric has run predates
+  v1.3, so this is belt and braces.
+
+  Records written by v1.2 store a numeric bag and a "dual 777" style
+  restore step; both come out stale against the v1.3 tokens and rewrite
+  converts them cleanly in one pass.
+
+WHY THE PORTAL NEVER LEAVES THE BAG
+  Eric's first description was "get everything out of the bag, then work
+  through them".  This does NOT dump the bag.  The bag is enumerated with
+  "invdata <bagid>", which lists a container's contents directly (confirmed
+  on the wiki and used the same way in LevelChanges.xml), so each portal is
+  pulled out only when its own turn comes and goes straight back in after.
+
+  The payoff: the sequence run live is EXACTLY the command string being
+  recorded.  If the live run works, the recorded exit works.  And a failure
+  or a disconnect mid-run never leaves a pile of loose portals in inventory.
+
+INVDATA LINE FORMAT
+  objectid,flags,itemname,level,type,unique,wearloc,timer
+  Item type 20 is Portal, 11 is Container (aardwolf.com/wiki Help/Invdata).
+  Only type 20 is queued, so junk in the bag is ignored rather than worn.
+
+CHAOS PORTALS
+  Every chaos portal shares one name but each ITEM is a separate portal to
+  a separate room.  Everything here is keyed on the object serial, never on
+  the name, so ten identical-looking chaos portals become ten separate
+  mapper exits.  This is also why the recorded command uses serials rather
+  than keywords: a keyword-based portal exit would overwrite itself.
+
+INCREMENTAL BY DESIGN
+  "portalmapper go" rescans the bag every time and skips any serial already
+  in the mapped list.  Drop new portals in the bag, type go, and only the
+  new ones are walked.  "portalmapper resume" is the same thing - it is a
+  separate word only because that is what the failure message tells you to
+  type.  There is no saved queue position to go stale.
+
+THE ;; SEPARATOR IS COMPUTED, NOT HARDCODED
+  The recorded command has to reach the mapper's alias with SINGLE
+  semicolons, because the mapper later does gsub(";", stack_char) when it
+  builds a speedwalk (aardmapper.lua, build_speedwalk).
+
+  Execute() emulates typing, so command stacking is applied to it.  With
+  stacking on and ";" as the stack character, a doubled ";;" is converted
+  to one literal ";" (MUSHclient help, Commands preferences page).  So:
+
+    stacking on  AND stack char is ";"   ->  send ";;"
+    anything else                        ->  send ";"
+
+  separator() works that out at call time.  Do not hardcode ";;" back in.
+
+FAILURE HANDLING
+  If room.info does not report a new room within ENTER_TIMEOUT seconds, the
+  portal is NOT recorded, the gear is put back, the run halts, and it says
+  "Make sure you can enter portal here before typing portalmapper resume".
+  That is the noportal-room case, and it is why the run is resumable.
+
+  Arriving somewhere unmappable (room.info num = -1, e.g. a clan room) is
+  not recordable either, but it IS a successful move, so that portal is
+  skipped with a note and the run carries on.
+
+  THE ONE CASE THIS CANNOT TELL APART: a portal whose destination is the
+  room you are already standing in.  Arrival is detected purely as "the
+  room number changed", so such a portal looks exactly like a portal that
+  did not fire.  It reports as a failure.  If gSawSame is set (the mud
+  re-sent the same room while we waited) the failure message says so, so
+  at least the situation is visible rather than mysterious.  Moving one
+  room and resuming maps it normally.
+
+RECORDING IS VERIFIED (v1.4)
+  The portal is recorded the instant you arrive, as before.  But both this
+  plugin and the mapper react to the same room.info packet, and if ours runs
+  first the mapper has not stored that room yet, so "mapper fullportal"
+  print()s "PORTAL [...] FAILED: Room N is unknown." and stores nothing.
+  Up to v1.3 the plugin never looked, said "mapped", and saved the portal as
+  done.
+
+  Now a portal is only counted as mapped if its exit is really in the
+  mapper's database.  0.5s after each fullportal (DoAfterSpecial, generation
+  counter) pmRecCheck opens the mapper's .db read-only and runs the same
+  join "mapper portals" uses (exit from '*' to that room, room known).
+    found      -> recorded
+    not found  -> fullportal is sent again, up to REC_RETRIES, then the run
+                  halts and the portal is NOT recorded
+    db unreadable -> falls back to the mapper's own "Storing ... as a portal"
+                  line (seen via OnPluginScreendraw); with neither, it is a
+                  failure, never a success
+  The match is on "wear <serial>;enter" inside the stored command, so it
+  works for any bag/restore wording.  fullportal is INSERT OR REPLACE, so
+  retries are harmless.  The same check runs on every scan: a serial the
+  plugin remembers but the mapper no longer has is dropped from the list and
+  re-mapped.  "portalmapper list" flags such rows.  "quiet" is no longer sent
+  so the mapper's confirmation line is visible.
+
+DATA
+  PortalMapper_data.txt next to the plugin - settings AND the mapped list.
+  Map records are pipe delimited since v1.2:
+      map <serial>|<room>|<level>|<bag>|<restore step>|<name>
+  The old space delimited v1.0 form still loads (bag/restore come back nil).
+  Plain text, one record per line, hand editable.  Not SetVariable: plugin
+  variables are only flushed on a clean save and a manual reinstall loses
+  them.  GetPluginInfo(id, 6) returns the plugin's .xml FILE, not its
+  folder, so the path is trimmed to the last separator first.
+
+  Published on GitHub (aardwolf-plugins).  The data file holds a player's
+  own item serials; the plugin itself holds none - keep it that way.
+
+CUSTOM MODE  (v1.5 - third mode, Eric asked for it)
+  "portalmapper custom <template>" - the user writes the whole command, so
+  the plugin can produce strings IDENTICAL to portals they mapped by hand
+  (fullportal is INSERT OR REPLACE on dir, so an identical string replaces
+  instead of duplicating).  In the template the WHOLE WORD "port" becomes
+  the serial and "bag" becomes "portalbag"; everything else is literal.
+  Eric's example "take port bag;wear port;ent port;r port;put port bag;
+  aliastorewear" -> "take 3828209 portalbag;wear 3828209;ent 3828209;...".
+  (His message wrote "portalb" for the first bag and "ent por" - read as
+  typos for portalbag / port.  Only "port" is substituted.)
+
+  The enter step is the first step whose first word abbreviates "enter"
+  (>= 2 letters).  Steps up to it run, then we wait for room.info; the rest
+  run on arrival.  stepsFor() returns (steps, enterIndex) for all three
+  modes, so the run is one code path; built-in modes are the fixed 6 steps
+  with enter at 3.  Every step is Execute()d (v1.4 sent wear/enter/remove
+  with SendNoEcho) - same path the mapper walks.
+
+  Mode is stored per record the same way as before: the restore field is
+  "custom=<template>", so staleList / rewrite need no special case.  The
+  template may not contain | { } (data file / mapper alias regex).
+
+  TYPING IT: command stacking splits the typed line at ";" BEFORE aliases.
+  OnPluginCommandEntered sees the whole line first (verified in MUSHclient
+  source, sendvw.cpp: SendToAllPluginCallbacksRtn(ON_PLUGIN_COMMAND_ENTERED)
+  then SendCommand), handles "portalmapper custom ..." there and returns
+  "\t" = discard.  The alias of the same shape is only a fallback.
+
+  The bag alias is now generic: "^(\S+) (\d+) portalbag$" (any verb), so
+  "take <n> portalbag" works.  It replaced the get/put pair.
+
+  exitInMapper no longer matches "wear <n>;enter" (a custom command need
+  not say that); it LIKEs the serial and then checks it as a whole number
+  with %f frontiers.
+
+START BAG / END BAG  (v1.5)
+  "endbag" is the same setting as "bag" - where mapped portals live and
+  what portalbag expands to.  "startbag" is optional: if set, go/scan read
+  it instead.  Live run only: toStartBag() swaps portalbag for the start
+  bag serial in the steps before enter (take it from the start bag) and,
+  on a failure / unmappable room, in the steps after (put it back).  On
+  success the post steps run untouched, so it lands in the end bag.  If the
+  mapper refuses the record after the portal already went to the end bag,
+  recordFailed moves it back with raw get/put.  Already-mapped portals found
+  in the start bag are moved across without walking.  In custom mode a
+  start bag needs "bag" both before and after the enter step (missingConfig
+  says so).
+
+  Help opens with a warning that every portal is ENTERED (Eric asked for
+  it) - careful with high level portals.
 -->
 
 <!-- ============ TRIGGERS: capture 'id' boxes for the catalog ============ -->
 <triggers>
   <trigger enabled="y" regexp="y" keep_evaluating="y" match="^\+\-+\+\s*$"     script="pd_border" sequence="100"></trigger>
   <trigger enabled="y" regexp="y" keep_evaluating="y" match="^\|(.*)\|\s*$"    script="pd_line"   sequence="100"></trigger>
+
+  <!-- portal usage (was PortalUse) -->
+    <trigger
+       keep_evaluating="y"
+       enabled="y"
+       regexp="y"
+       match="You stop using (.+) as a portal"
+       script="OnPortalEnter"
+    />
+    <trigger
+       keep_evaluating="y"
+       name="pu_scan_start"
+       enabled="n"
+       regexp="y"
+       match="^.+ contains:$"
+       script="OnScanStart"
+    />
+    <trigger
+       keep_evaluating="y"
+       name="pu_scan_item"
+       enabled="n"
+       regexp="y"
+       match="^\s*(?:\(\s*\d+\)\s+)?\(K\)\s+(.+?)\s+\(\d+\)\s*$"
+       script="OnScanItem"
+    />
+    <trigger
+       keep_evaluating="y"
+       name="pu_scan_end"
+       enabled="n"
+       regexp="y"
+       match="^(You have \d+|There are no items|The \w+ is empty)"
+       script="OnScanEnd"
+    />
+
+  <!-- portal mapper (was PortalMapper): invdata capture. The container form
+       answers with "{invdata <containerid>}", one comma separated line per
+       item, then "{/invdata}". Body and footer are only live between the two,
+       so the very loose body pattern cannot match ordinary MUD output. -->
+
+  <trigger name="pm_inv_header"
+     match="^\{invdata (\d+)\}$"
+     enabled="n" regexp="y" omit_from_output="y" keep_evaluating="y" sequence="100"
+     script="pmInvHeader"></trigger>
+
+  <trigger name="pm_inv_item" group="pm_inv_body"
+     match="^(\d+),([A-Za-z]*),(.+),(\d+),(\d+),([01]),(-?\d+),(-?\d+)$"
+     enabled="n" regexp="y" omit_from_output="y" keep_evaluating="y" sequence="100"
+     script="pmInvItem"></trigger>
+
+  <trigger name="pm_inv_footer" group="pm_inv_body"
+     match="^\{/invdata\}$"
+     enabled="n" regexp="y" omit_from_output="y" keep_evaluating="y" sequence="100"
+     script="pmInvFooter"></trigger>
 </triggers>
+
+<!-- portal mapper: one second watchdog, only enabled while waiting to see
+     whether an "enter" actually moved us. -->
+<timers>
+
+  <!-- One second watchdog.  Only enabled while we are waiting to see
+       whether an "enter" actually moved us. -->
+  <timer name="pm_tick" second="1" enabled="n" send_to="12">
+  <send>pmTick ()</send>
+  </timer>
+</timers>
 
 <!-- ============ ALIASES ============ -->
 <aliases>
@@ -285,6 +797,68 @@ WHEN EDITING
   <alias match="^portaldex cmd ?(.*)$"   enabled="y" regexp="y" ignore_case="y" script="pd_cmd_cmd"   sequence="85"></alias>
   <alias match="^portaldex auto ?(.*)$"  enabled="y" regexp="y" ignore_case="y" script="pd_auto_cmd"  sequence="85"></alias>
   <alias match="^portaldex scan ?(.*)$"  enabled="y" regexp="y" ignore_case="y" script="pd_scan"      sequence="80"></alias>
+  <alias match="^portalvalue$"       enabled="y" regexp="y" ignore_case="y" script="pv_help_all"      sequence="100"></alias>
+
+  <!-- ===== portal usage (was PortalUse) ===== -->
+    <alias match="portalusetop *"     enabled="y" ignore_case="y" regexp="n" script="OnPortalUseTop" />
+    <alias match="^portaluse(?!top)(?! help)(.*)$"  enabled="y" ignore_case="y" regexp="y" script="OnPortalUsage" />
+    <alias match="portalusage*"       enabled="y" ignore_case="y" script="OnPortalUsage" />
+    <alias match="portalignore *"     enabled="y" ignore_case="y" script="OnPortalIgnore" />
+    <alias match="portalreset*"       enabled="y" ignore_case="y" script="OnPortalReset" />
+    <alias match="portalclean"        enabled="y" ignore_case="y" script="OnPortalClean" />
+    <alias match="portalhelp"         enabled="y" ignore_case="y" script="OnPortalHelp" />
+    <alias match="portaluse help"     enabled="y" ignore_case="y" script="OnPortalHelp" />
+    <alias match="portalscan"         enabled="y" ignore_case="y" script="OnPortalScan" />
+    <alias match="portalsetbag *"     enabled="y" ignore_case="y" script="OnPortalSetBag" />
+    <alias match="portalsetbag"       enabled="y" ignore_case="y" script="OnPortalSetBag" />
+    <alias match="portalarea *"       enabled="y" ignore_case="y" script="OnPortalArea" />
+    <alias match="portalarea"         enabled="y" ignore_case="y" script="OnPortalArea" />
+
+  <!-- ===== portal mapper (was PortalMapper) ===== -->
+  <alias script="pmAliasConfig" match="^(?:portalmapper config|pmconfig)$" enabled="y" regexp="y" sequence="80"></alias>
+
+  <alias script="pmAliasHelp"   match="^(?:portalmapper help|pmhelp)$" enabled="y" regexp="y" sequence="80"></alias>
+
+  <alias script="pmAliasGo"     match="^portalmapper (?:go|start)$" enabled="y" regexp="y" sequence="80"></alias>
+  <alias script="pmAliasGo"     match="^portalmapper resume$"       enabled="y" regexp="y" sequence="80"></alias>
+  <alias script="pmAliasStop"   match="^portalmapper stop$"         enabled="y" regexp="y" sequence="80"></alias>
+
+  <alias script="pmAliasList"   match="^portalmapper list$"         enabled="y" regexp="y" sequence="80"></alias>
+  <alias script="pmAliasScan"   match="^portalmapper scan$"         enabled="y" regexp="y" sequence="80"></alias>
+  <alias script="pmAliasDebug"  match="^portalmapper debug$"        enabled="y" regexp="y" sequence="80"></alias>
+  <alias script="pmAliasRewrite" match="^portalmapper rewrite$"     enabled="y" regexp="y" sequence="80"></alias>
+
+  <alias script="pmAliasForgetAll" match="^portalmapper forget all$"      enabled="y" regexp="y" sequence="70"></alias>
+  <alias script="pmAliasForget"    match="^portalmapper forget (\d+)$"    enabled="y" regexp="y" sequence="80"></alias>
+
+  <alias script="pmAliasBag"    match="^portalmapper bag (\d+)$"        enabled="y" regexp="y" sequence="80"></alias>
+  <alias script="pmAliasDual"   match="^portalmapper dualweapon (\d+)$" enabled="y" regexp="y" sequence="80"></alias>
+  <alias script="pmAliasWear"   match="^portalmapper wearportal (\d+)$" enabled="y" regexp="y" sequence="80"></alias>
+
+  <alias script="pmAliasEndbag"   match="^portalmapper endbag (\d+)$"        enabled="y" regexp="y" sequence="80"></alias>
+  <alias script="pmAliasStartbag" match="^portalmapper startbag (\d+|off)$"  enabled="y" regexp="y" sequence="80"></alias>
+
+  <!-- Typed by hand this is caught earlier, in OnPluginCommandEntered, because
+       the template has semicolons in it and command stacking would split
+       the line before any alias saw it.  This alias is the fallback for the
+       forms with no semicolon and for Execute() from other scripts. -->
+  <alias script="pmAliasCustom" match="^portalmapper custom(?:\s+(.+))?$"  enabled="y" regexp="y" sequence="80"></alias>
+
+  <alias script="pmAliasWish"   match="^portalwish(?:\s+(on|off))?$"     enabled="y" regexp="y" sequence="80"></alias>
+
+  <!-- THE TWO EXPANSION ALIASES.  These are the words that get baked into
+       the command stored in the mapper, instead of an item number.  When
+       the mapper walks a portal it runs the stored command through
+       Execute, so these fire and turn into whatever gear is configured
+       right now.  That is what makes a portal mapped at level 50 still
+       work at 201 with completely different equipment. -->
+  <alias script="pmAliasDoDual" match="^dualweapon$" enabled="y" regexp="y" sequence="80"></alias>
+  <alias script="pmAliasDoWear" match="^wearportal$" enabled="y" regexp="y" sequence="80"></alias>
+  <!-- Any verb: get / take / put / ... <n> portalbag.  (v1.5 - was get and
+       put only; a custom command may say "take port bag".) -->
+  <alias script="pmAliasDoBag"  match="^(\S+) (\d+) portalbag$" enabled="y" regexp="y" sequence="80"></alias>
+
+  <alias script="pmAliasStatus" match="^portalmapper$"                   enabled="y" regexp="y" sequence="100"></alias>
 </aliases>
 
 <!-- ============ SCRIPT ============ -->
@@ -368,7 +942,7 @@ local MAPPER_ID = "b6eae87ccedd84f510b74714"
 local GMCP_ID   = "3e7dedbe37e44942dd46d264"
 
 -- theme colours
-local VERSION = "4.0"   -- keep in step with the version= attribute above
+local VERSION = "5.0"   -- keep in step with the version= attribute above
 
 local C = { hdr="@x099", val="@x045", num="@W", ok="@x048", bad="@R" }
 
@@ -1711,7 +2285,8 @@ end
 -- combined help (both "portalvalue help" and "portaldex help" land here)
 function pv_help_all()
    pv_echo(C.hdr .. "=================== " .. C.num .. "PortalValue " .. C.val .. VERSION .. C.hdr .. " ===================")
-   pv_echo(C.val .. "Find the nearest portal to walk from, and catalog your portals by type.")
+   pv_echo(C.val .. "One stop for portals: pathing, catalog, usage tracking and mapping.")
+   pv_echo(C.val .. "PortalUse and PortalMapper are part of PortalValue now - same commands, same data.")
    pv_echo(C.hdr .. "-- pathing --")
    pv_echo(C.hdr .. "  pv                 " .. C.val .. "- nearest portal + speedwalk to your room")
    pv_echo(C.hdr .. "  pv <channel>       " .. C.val .. "- post a one-line summary to a channel (e.g. pv spo)")
@@ -1720,7 +2295,7 @@ function pv_help_all()
    pv_echo(C.hdr .. "  pvcheck            " .. C.val .. "- verify mapper / database setup")
    pv_echo(C.hdr .. "  pvreload           " .. C.val .. "- reload the plugin after an edit")
    pv_echo(C.hdr .. "  pvworth            " .. C.val .. "- rebuild the \"worth it\" model (after buying/selling portals)")
-   pv_echo(C.hdr .. "-- catalog --")
+   pv_echo(C.hdr .. "-- catalog (portaldex) --")
    pv_echo(C.hdr .. "  portaldex          " .. C.val .. "- catalog summary (counts by type)")
    pv_echo(C.hdr .. "  portaldex list [t] " .. C.val .. "- list catalogued portals (optional filter)")
    pv_echo(C.hdr .. "  portaldex scan     " .. C.val .. "- id saved portals (also: scan stop/restart/missing)")
@@ -1735,11 +2310,23 @@ function pv_help_all()
    pv_echo(C.hdr .. "Portals also catalog automatically whenever you " .. C.ok .. "id" .. C.hdr .. " one.")
    pv_echo(C.hdr .. "Restrung a portal? Run " .. C.ok .. "portaldex scan missing" .. C.hdr .. " (or " .. C.ok .. "id" .. C.hdr .. " it) so the catalog picks up its new name.")
    pv_echo(C.bad .. "Scan uses the LAST item id/keyword in each mapper portal command (take/get, or your custom command).")
+   pv_echo(C.hdr .. "-- usage (was PortalUse) --")
+   pv_echo(C.hdr .. "  portaluse [mode]   " .. C.val .. "- usage window: counts, sort, [ignore]/[restore], area + room")
+   pv_echo(C.hdr .. "  portalusetop <ch>  " .. C.val .. "- send your top 5 portals to a channel")
+   pv_echo(C.hdr .. "  portalarea on|off  " .. C.val .. "- show each portal's destination area keyword + landing room")
+   pv_echo(C.hdr .. "  portalscan         " .. C.val .. "- re-read your bag for portal colours (portalsetbag <kw> first)")
+   pv_echo(C.hdr .. "  portalhelp         " .. C.val .. "- every usage command")
+   pv_echo(C.hdr .. "-- mapping (was PortalMapper) --")
+   pv_echo(C.hdr .. "  portalmapper config " .. C.val .. "- settings window: mode, bags, gear, custom mapping command")
+   pv_echo(C.hdr .. "  portalmapper       " .. C.val .. "- status")
+   pv_echo(C.hdr .. "  portalmapper scan  " .. C.val .. "- look in the bag, map nothing")
+   pv_echo(C.hdr .. "  portalmapper go    " .. C.val .. "- map every unmapped portal in the bag " .. C.bad .. "(it ENTERS each one)")
+   pv_echo(C.hdr .. "  pmhelp             " .. C.val .. "- every mapper command")
 end
 
 -- ===== lifecycle (does both halves) =====
 
-function OnPluginInstall()
+function pv_on_install()
    -- catalog (own file) + one-time migration from the old PortalDex plugin variable
    pd_load()
    if next(catalog) == nil then
@@ -1757,12 +2344,6 @@ function OnPluginInstall()
    else
       pv_history = {}
    end
-   local _, total = count_types()
-   pv_echo(C.hdr .. "[PortalValue] Loaded v" .. VERSION .. ". " .. C.num .. #pv_history .. C.hdr .. " result(s), "
-           .. C.num .. total .. C.hdr .. " portal(s) cataloged ("
-           .. (pd_auto and (C.ok .. "auto ON") or (C.bad .. "auto OFF")) .. C.hdr .. "). Type "
-           .. C.ok .. "portalvalue help" .. C.hdr .. ".")
-   DoAfterSpecial(2, "pv_check()", 12)
 end
 
 function OnPluginSaveState()
@@ -1770,6 +2351,2790 @@ function OnPluginSaveState()
    save_history()
 end
 
+-- =========================================================================
+-- ===========  PORTAL USAGE  (formerly the PortalUse plugin)  =============
+-- =========================================================================
+do
+---------------------------------------------------------
+-- PORTAL USAGE - was the PortalUse plugin 2.5 (formerly Portal Usage
+-- Tracker v8.0); folded into PortalValue 5.0. Runs inside its own
+-- do ... end block, so its locals are private to it.
+---------------------------------------------------------
+
+local usage      = {}
+local ignore     = {}
+local colors     = {}
+local data_file  = "PortalUse.dat"
+local bag_keyword = ""
+local scan_active = false
+local show_area   = false   -- show destination area (from PortalValue 3.0's catalog)
+local RedrawIfOpen          -- set by the usage window code further down
+
+-- theme colours (RGB hex of @x099 / @x045 / @W / @x048) for our own output;
+-- portal NAME rendering keeps its own captured colours and is never changed.
+local TC = { hdr = "#875fff", val = "#00d7ff", num = "#ffffff", ok = "#00ff87" }
+
+-- Area keyword lookup from the GMCP mapper's sqlite db (read only).
+-- Returns room_area[uid] = keyword and name_kw[lowercased long name] = keyword,
+-- or two empty tables if the mapper / db / sqlite3 isn't available.
+local MAPPER_ID = "b6eae87ccedd84f510b74714"
+local function area_keywords ()
+  local room_area, name_kw = {}, {}
+  if not IsPluginInstalled(MAPPER_ID) then return room_area, name_kw end
+  local db_name = GetPluginVariable(MAPPER_ID, "db_name")
+  if not db_name or db_name == "" then
+    db_name = (WorldName() or ""):gsub("[^%w%s()_-]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+  end
+  if db_name == "" then return room_area, name_kw end
+  local path = GetInfo(66) .. db_name .. ".db"
+  local fh = io.open(path, "rb")
+  if not fh then return room_area, name_kw end
+  fh:close()
+  local ok_sql, sqlite3 = pcall(require, "sqlite3")
+  if not ok_sql then return room_area, name_kw end
+  local db = sqlite3.open(path)
+  if not db then return room_area, name_kw end
+  pcall(function ()
+    for row in db:nrows("SELECT uid, name FROM areas") do
+      if row.uid and row.name then name_kw[row.name:lower()] = row.uid end
+    end
+    for row in db:nrows("SELECT uid, area FROM rooms") do
+      if row.uid and row.area then room_area[tostring(row.uid)] = row.area end
+    end
+  end)
+  db:close()
+  return room_area, name_kw
+end
+
+-- Map of lowercased portal name -> { area, room } from the portal catalog.
+-- 5.0: the catalog is this plugin's own in-memory table (the global
+-- "catalog", kept by the portaldex code above), so there is no
+-- PortalDex_data.lua to re-read any more. {} until something is catalogued.
+local function load_portaldex_areas ()
+  local map = {}
+  for _, e in pairs(catalog or {}) do
+    local area = (e.leads and e.leads ~= "?") and e.leads or nil
+    if e.name and (area or e.room) then
+      local key = e.name:lower()
+      local cur = map[key]
+      -- several catalog entries can share a name (plain chaos portals);
+      -- prefer one that has a landing room over one that only has an area
+      if (not cur) or (e.room and not cur.room) then
+        map[key] = { area = area, room = e.room }
+      end
+    end
+  end
+  -- swap the long area name for the area keyword where the mapper knows it
+  if next(map) ~= nil then
+    local room_area, name_kw = area_keywords()
+    for _, v in pairs(map) do
+      local kw = (v.room and room_area[tostring(v.room)])
+              or (v.area and name_kw[v.area:lower()])
+      if kw then v.area = kw end
+    end
+  end
+  return map
+end
+
+---------------------------------------------------------
+-- Utility
+---------------------------------------------------------
+
+local function clean_name (s)
+  s = s:gsub("\27%[[0-9;]*m", "")
+  s = s:gsub("<[^>]+>", "")
+  s = s:match("^%s*(.-)%s*$")
+  return s
+end
+
+local function rgb_to_hex (n)
+  if not n then return "#ffffff" end
+  local r = n % 256
+  local g = math.floor(n / 256) % 256
+  local b = math.floor(n / 65536) % 256
+  return string.format("#%02x%02x%02x", r, g, b)
+end
+
+local function rgb_to_xterm (n)
+  if not n then return 7 end
+  local r = n % 256
+  local g = math.floor(n / 256) % 256
+  local b = math.floor(n / 65536) % 256
+  if r == g and g == b then
+    if r < 8   then return 16 end
+    if r > 238 then return 231 end
+    return math.floor((r - 8) / 10) + 232
+  end
+  local function to6 (v)
+    if v < 48  then return 0
+    elseif v < 115 then return 1
+    elseif v < 155 then return 2
+    elseif v < 195 then return 3
+    elseif v < 235 then return 4
+    else return 5 end
+  end
+  return 16 + 36 * to6(r) + 6 * to6(g) + to6(b)
+end
+
+local function extract_name_styles (styles, plain_name)
+  if not styles or #styles == 0 then return nil end
+  local full_text = ""
+  for _, sp in ipairs(styles) do
+    full_text = full_text .. (sp.text or "")
+  end
+  local s, e = full_text:find(plain_name, 1, true)
+  if not s then return nil end
+  local result = {}
+  local pos = 1
+  for _, sp in ipairs(styles) do
+    local sp_text = sp.text or ""
+    local sp_end  = pos + #sp_text - 1
+    if sp_end >= s and pos <= e then
+      local clip_s = math.max(pos, s)
+      local clip_e = math.min(sp_end, e)
+      local clipped = sp_text:sub(clip_s - pos + 1, clip_e - pos + 1)
+      if clipped ~= "" then
+        table.insert(result, {
+          text  = clipped,
+          fore  = rgb_to_hex(sp.textcolour),
+          xterm = rgb_to_xterm(sp.textcolour),
+        })
+      end
+    end
+    pos = pos + #sp_text
+  end
+  return #result > 0 and result or nil
+end
+
+-- Build an Aardwolf @xNNN colour-coded string from spans (for channel output)
+local function spans_to_aard (spans)
+  if not spans then return nil end
+  local t = {}
+  for _, sp in ipairs(spans) do
+    table.insert(t, string.format("@x%03d", sp.xterm) .. sp.text)
+  end
+  return table.concat(t) .. "@w"
+end
+
+---------------------------------------------------------
+-- File save / load
+---------------------------------------------------------
+
+local function hex_enc (s)
+  return (s:gsub(".", function(c) return string.format("%02X", string.byte(c)) end))
+end
+
+local function hex_dec (s)
+  return (s:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end))
+end
+
+local function save_data ()
+  local f = io.open(data_file, "w")
+  if not f then
+    ColourNote("white","red","[PortalUse] Cannot write: " .. data_file)
+    return
+  end
+  f:write("USAGE\n")
+  for portal, count in pairs(usage) do
+    f:write(portal .. "|" .. tostring(count) .. "\n")
+  end
+  f:write("IGNORE\n")
+  for portal in pairs(ignore) do
+    f:write(portal .. "\n")
+  end
+  f:write("BAG\n")
+  f:write(bag_keyword .. "\n")
+  f:write("AREA\n")
+  f:write((show_area and "1" or "0") .. "\n")
+  f:write("COLORS\n")
+  for portal, spans in pairs(colors) do
+    local parts = {}
+    for _, sp in ipairs(spans) do
+      table.insert(parts, hex_enc(sp.text) .. ":" .. sp.fore .. ":" .. tostring(sp.xterm))
+    end
+    f:write(hex_enc(portal) .. "|" .. table.concat(parts, ",") .. "\n")
+  end
+  f:close()
+  if RedrawIfOpen then RedrawIfOpen() end
+end
+
+local function load_data ()
+  local f = io.open(data_file, "r")
+  if not f then return end
+  usage  = {}
+  ignore = {}
+  colors = {}
+  local section = "usage"
+  for line in f:lines() do
+    if     line == "USAGE"  then section = "usage"
+    elseif line == "IGNORE" then section = "ignore"
+    elseif line == "BAG"    then section = "bag"
+    elseif line == "AREA"   then section = "area"
+    elseif line == "COLORS" then section = "colors"
+    elseif section == "usage" then
+      local name, count = line:match("^(.*)|(%d+)$")
+      if name and count and name ~= "" then usage[name] = tonumber(count) end
+    elseif section == "ignore" and line ~= "" then
+      ignore[line] = true
+    elseif section == "bag" and line ~= "" then
+      bag_keyword = line
+    elseif section == "area" and line ~= "" then
+      show_area = (line == "1")
+    elseif section == "colors" and line ~= "" then
+      local enc_portal, spans_str = line:match("^([^|]+)|(.+)$")
+      if enc_portal and spans_str then
+        local portal = hex_dec(enc_portal)
+        local spans = {}
+        for part in spans_str:gmatch("[^,]+") do
+          local enc_text, fore, xterm = part:match("^([^:]+):(#%x+):(%d+)$")
+          if enc_text and fore and xterm then
+            table.insert(spans, { text = hex_dec(enc_text), fore = fore, xterm = tonumber(xterm) })
+          end
+        end
+        if #spans > 0 then colors[portal] = spans end
+      end
+    end
+  end
+  f:close()
+end
+
+---------------------------------------------------------
+-- Plugin lifecycle
+---------------------------------------------------------
+
+function pu_on_install ()
+  load_data()
+end
+
+-- portals with a count, for the load line
+function pu_tracked_count ()
+  local n = 0
+  for portal in pairs(usage) do
+    if portal ~= "" and not ignore[portal] then n = n + 1 end
+  end
+  return n
+end
+
+---------------------------------------------------------
+-- Scan
+---------------------------------------------------------
+
+local expecting_header = false
+
+function pu_start_scan ()
+  if bag_keyword == "" then
+    ColourNote("white","red","[PortalUse] No bag set. Use: portalsetbag <keyword>")
+    return
+  end
+  scan_active      = false
+  expecting_header = true
+  EnableTrigger("pu_scan_start", true)
+  EnableTrigger("pu_scan_item",  false)
+  EnableTrigger("pu_scan_end",   false)
+  ColourNote(TC.val,"","[PortalUse] Scanning " .. bag_keyword .. " for colours...")
+  SendNoEcho("exa " .. bag_keyword)
+  -- Safety timeout in case scan_end trigger never fires
+  DoAfterSpecial(3, "pu_scan_timeout()", sendto.script)
+end
+
+function OnScanStart (name, line, wildcards, styles)
+  if not expecting_header then return end
+  expecting_header = false
+  EnableTrigger("pu_scan_start", false)
+  scan_active = true
+  EnableTrigger("pu_scan_item", true)
+  EnableTrigger("pu_scan_end",  true)
+end
+
+function OnScanItem (name, line, wildcards, styles)
+  if not scan_active then return end
+  local plain_name = clean_name(wildcards[1])
+  if plain_name == "" then return end
+  if ignore[plain_name] then return end
+  if not usage[plain_name] then
+    usage[plain_name] = 0
+  end
+  local spans = extract_name_styles(styles, plain_name)
+  if spans then colors[plain_name] = spans end
+end
+
+function OnScanEnd (name, line, wildcards, styles)
+  scan_active      = false
+  expecting_header = false
+  EnableTrigger("pu_scan_start", false)
+  EnableTrigger("pu_scan_item",  false)
+  EnableTrigger("pu_scan_end",   false)
+  save_data()
+  ColourNote(TC.val,"","[PortalUse] Scan complete. (matched: [" .. line .. "])")
+end
+
+function pu_scan_timeout ()
+  if scan_active then
+    scan_active      = false
+    expecting_header = false
+    EnableTrigger("pu_scan_start", false)
+    EnableTrigger("pu_scan_item",  false)
+    EnableTrigger("pu_scan_end",   false)
+    save_data()
+    ColourNote(TC.val,"","[PortalUse] Scan complete (timeout).")
+  end
+end
+
+---------------------------------------------------------
+-- Trigger: worn portal usage
+---------------------------------------------------------
+
+function OnPortalEnter (name, line, wildcards, styles)
+  local portal = clean_name(wildcards[1])
+  if portal == "" then return end
+  if ignore[portal] then return end
+  usage[portal] = (usage[portal] or 0) + 1
+  if not colors[portal] then
+    local spans = extract_name_styles(styles, portal)
+    if spans then colors[portal] = spans end
+  end
+  save_data()
+end
+
+---------------------------------------------------------
+-- portaluse / portalusage
+---------------------------------------------------------
+
+-- old output-window list; now only the fallback if the window can't open
+local function print_usage (mode)
+
+  local list = {}
+  for portal, count in pairs(usage) do
+    table.insert(list, { portal = portal, count = count })
+  end
+
+  if     mode == "alpha"  then table.sort(list, function(a,b) return a.portal < b.portal end)
+  elseif mode == "ralpha" then table.sort(list, function(a,b) return a.portal > b.portal end)
+  elseif mode == "low"    then table.sort(list, function(a,b) return a.count  < b.count  end)
+  else                         table.sort(list, function(a,b) return a.count  > b.count  end)
+  end
+
+  ColourNote(TC.hdr,"","Portal Usage (" .. mode .. ")")
+
+  local areas = show_area and load_portaldex_areas() or nil
+
+  for _, entry in ipairs(list) do
+    if not ignore[entry.portal] then          -- still honour the ignore list
+      local spans = colors[entry.portal]
+      if spans then
+        for _, sp in ipairs(spans) do
+          ColourTell(sp.fore, "", sp.text)
+        end
+      else
+        ColourTell("blue","", entry.portal)
+      end
+      if areas then
+        local a = areas[entry.portal:lower()]
+        if a then
+          if a.area then ColourTell(TC.val,"", " [" .. a.area .. "]") end
+          if a.room then ColourTell(TC.ok, "", " (" .. a.room .. ")") end
+        end
+      end
+      ColourTell(TC.hdr, "", " USES: ")
+      ColourTell(TC.num, "", tostring(entry.count))
+      Note("")
+    end
+  end
+  Note("")
+  Note("")
+end
+
+---------------------------------------------------------
+-- Usage window (portaluse)
+-- Same chrome as PupPaths / Keycheck / MarketWatch: themed_miniwindows'
+-- ThemedTextWindow with the package theme, our palette on the text only.
+-- Link text is Lua run in this plugin (text_rect.lua browseUrl ->
+-- loadstring), so the PU_* click handlers are global.
+---------------------------------------------------------
+
+local gHaveWin = pcall(require, "themed_miniwindows")
+
+local WIN_ID        = "PortalValue_usage"
+local WIN_FONT      = "Consolas"
+local WIN_FONT_SIZE = 13
+local SORT_MODES    = { "high", "low", "alpha", "ralpha" }
+
+local gWin         = nil
+local win_mode     = "high"
+local show_ignored = false
+local area_cache   = nil   -- area map for the window; nil = rebuild on next draw
+
+local gColCache = {}
+local function col (hex)
+  if not gColCache[hex] then gColCache[hex] = ColourNameToRGB(hex) end
+  return gColCache[hex]
+end
+
+-- One line of style runs plus its hyperlinks. Link positions count the
+-- VISIBLE text only, which is what TextRect indexes against.
+local function winLine (segs)
+  local styles, links, pos = {}, {}, 1
+  for _, sg in ipairs(segs) do
+    if sg.text ~= "" then
+      styles[#styles + 1] = { text = sg.text, textcolour = col(sg.colour or TC.num) }
+      if sg.code then
+        links[#links + 1] = { start = pos, stop = pos + #sg.text - 1, text = sg.code, label = sg.tip }
+      end
+      pos = pos + #sg.text
+    end
+  end
+  return styles, links
+end
+
+-- Never reuse an object the library no longer knows about (a zombie window
+-- has live hotspots and no window_map entry).
+local function ensureWin ()
+  if not gHaveWin then return false end
+  if gWin and not (ThemedWindowClass and ThemedWindowClass.window_map
+                   and ThemedWindowClass.window_map[WIN_ID]) then
+    gWin = nil
+    pcall(WindowDelete, WIN_ID)
+  end
+  if not gWin then
+    local ok, w = pcall(ThemedTextWindow,
+      WIN_ID,
+      0, 0,            -- first-run position; after that it stays where dragged
+      700, 400,        -- default size; fit_contents sizes it to the text
+      "Portal Usage",
+      "center",        -- title alignment
+      true,            -- is_temporary: gives the title-bar close button
+      false,           -- resizeable
+      true,            -- text_scrollable: the list is taller than the cap
+      false,           -- text_selectable
+      false,           -- text_copyable
+      false,           -- url_hyperlinks: ours are explicit
+      false,           -- autowrap: rows are laid out in columns
+      WIN_FONT, WIN_FONT_SIZE,   -- title font
+      WIN_FONT, WIN_FONT_SIZE,   -- text font
+      1000,            -- max lines (340+ portals already)
+      nil,             -- padding
+      true,            -- defer showing until drawn
+      false, nil,
+      "Close")
+    if not ok or not w then
+      gHaveWin = false
+      return false
+    end
+    gWin = w
+    -- Bold body text, as in Keycheck / PupPaths: redefine the TextRect's
+    -- normal font as bold so widths and link hotspots are measured with it.
+    pcall(function()
+      local tr = gWin.textrect
+      WindowFont(tr.window, tr.font, WIN_FONT, WIN_FONT_SIZE, true, false, false, false, 0)
+      tr.font_height = WindowFontInfo(tr.window, tr.font, 1)
+      tr:setLineSpacing(tr.line_spacing)
+    end)
+    local prior = gWin.do_on_delete
+    gWin.do_on_delete = function(self)
+      if prior then prior(self) end
+      if gWin == self then gWin = nil end
+    end
+  end
+  return true
+end
+
+local function sort_list (list, mode)
+  local function byname (a, b) return a.portal < b.portal end
+  if     mode == "alpha"  then table.sort(list, byname)
+  elseif mode == "ralpha" then table.sort(list, function(a,b) return a.portal > b.portal end)
+  elseif mode == "low"    then table.sort(list, function(a,b)
+           if a.count ~= b.count then return a.count < b.count end
+           return byname(a, b) end)
+  else                         table.sort(list, function(a,b)
+           if a.count ~= b.count then return a.count > b.count end
+           return byname(a, b) end)
+  end
+  return list
+end
+
+-- the portal name in its captured colours
+local function name_segs (portal)
+  local segs, len = {}, 0
+  local spans = colors[portal]
+  if spans then
+    for _, sp in ipairs(spans) do
+      segs[#segs + 1] = { text = sp.text, colour = sp.fore }
+      len = len + #sp.text
+    end
+  end
+  if len == 0 then
+    segs = { { text = portal, colour = "blue" } }
+  end
+  return segs
+end
+
+local function row_segs (entry, button, countW, areas)
+  local ref = string.format("%q", entry.portal)
+  local segs = { { text = " " } }
+  if button == "ignore" then
+    segs[#segs + 1] = { text = "[ignore]", colour = TC.val, code = "PU_Ignore(" .. ref .. ")",
+                        tip = "Ignore " .. entry.portal .. " (hide it and stop counting it)" }
+    segs[#segs + 1] = { text = " " }   -- pad to [restore]'s width, outside the link
+  else
+    segs[#segs + 1] = { text = "[restore]", colour = TC.ok, code = "PU_Restore(" .. ref .. ")",
+                        tip = "Stop ignoring " .. entry.portal }
+  end
+  local cnt = tostring(entry.count)
+  segs[#segs + 1] = { text = string.rep(" ", 2 + countW - #cnt) }
+  segs[#segs + 1] = { text = cnt, colour = TC.num }
+  segs[#segs + 1] = { text = "  " }
+  for _, sg in ipairs(name_segs(entry.portal)) do segs[#segs + 1] = sg end
+  if areas then
+    local a = areas[entry.portal:lower()]
+    if a then
+      if a.area then segs[#segs + 1] = { text = " [" .. a.area .. "]", colour = TC.val } end
+      if a.room then segs[#segs + 1] = { text = " (" .. a.room .. ")", colour = TC.ok } end
+    end
+  end
+  return segs
+end
+
+-- Draw the window. keep_scroll: a redraw of a window that is already up
+-- stays where you were reading instead of jumping back to the top.
+local function ShowWindow (keep_scroll)
+  local keep = nil
+  if keep_scroll and gWin and gWin.textrect then
+    keep = tonumber(gWin.textrect.display_start_line)
+  end
+  if not ensureWin() then
+    print_usage(win_mode)
+    return
+  end
+  gWin:clear(false)
+
+  local areas = nil
+  if show_area then
+    if not area_cache then area_cache = load_portaldex_areas() end
+    areas = area_cache
+  end
+
+  local list, total = {}, 0
+  for portal, count in pairs(usage) do
+    -- an empty name can sit in old data files; it has nothing to show or click
+    if not ignore[portal] and portal ~= "" then
+      list[#list + 1] = { portal = portal, count = count }
+      total = total + count
+    end
+  end
+  sort_list(list, win_mode)
+
+  local ign = {}
+  for portal in pairs(ignore) do
+    ign[#ign + 1] = { portal = portal, count = usage[portal] or 0 }
+  end
+  sort_list(ign, "alpha")
+
+  -- Button / status line
+  local top = { { text = " Sort: ", colour = TC.val } }
+  for _, m in ipairs(SORT_MODES) do
+    local cur = (m == win_mode)
+    top[#top + 1] = { text = cur and ("[" .. m .. "]") or m, colour = cur and TC.ok or TC.hdr,
+                      code = "PU_Sort(" .. string.format("%q", m) .. ")", tip = "Sort by " .. m }
+    top[#top + 1] = { text = " " }
+  end
+  top[#top + 1] = { text = "   Area: ", colour = TC.val }
+  top[#top + 1] = { text = show_area and "ON" or "OFF", colour = show_area and TC.ok or TC.hdr,
+                    code = "PU_ToggleArea()",
+                    tip = "Turn the destination area display " .. (show_area and "off" or "on") }
+  top[#top + 1] = { text = "   " }
+  top[#top + 1] = show_ignored
+      and { text = "[ Hide ignored ]", colour = TC.ok, code = "PU_ToggleIgnored()",
+            tip = "Hide the ignored portals" }
+      or  { text = "[ Show ignored (" .. #ign .. ") ]", colour = TC.ok, code = "PU_ToggleIgnored()",
+            tip = "List the ignored portals, with [restore] buttons" }
+  local st, lk = winLine(top)
+  gWin:add_text(st, false, lk)
+  gWin:add_text(winLine {
+    { text = " " .. #list .. " portals, " .. total .. " uses", colour = TC.val },
+  }, false, {})
+  gWin:add_text(winLine { { text = " " } }, false, {})
+
+  local countW = 4
+  for _, e in ipairs(list) do if #tostring(e.count) > countW then countW = #tostring(e.count) end end
+  for _, e in ipairs(ign)  do if #tostring(e.count) > countW then countW = #tostring(e.count) end end
+
+  if #list == 0 then
+    gWin:add_text(winLine {
+      { text = " No portal uses yet. Wear a portal and use it, or run ", colour = TC.num },
+      { text = "portalscan", colour = TC.ok },
+      { text = ".", colour = TC.num },
+    }, false, {})
+  else
+    -- " [ignore] " is 10 wide, then 2 + countW for the right-aligned count
+    gWin:add_text(winLine {
+      { text = string.rep(" ", 12 + countW - 4) .. "Uses  Portal", colour = TC.hdr },
+    }, false, {})
+    for _, e in ipairs(list) do
+      st, lk = winLine(row_segs(e, "ignore", countW, areas))
+      gWin:add_text(st, false, lk)
+    end
+  end
+
+  if show_ignored then
+    gWin:add_text(winLine { { text = " " } }, false, {})
+    gWin:add_text(winLine { { text = " Ignored portals:", colour = TC.hdr } }, false, {})
+    if #ign == 0 then
+      gWin:add_text(winLine { { text = " (none)", colour = TC.num } }, false, {})
+    else
+      for _, e in ipairs(ign) do
+        st, lk = winLine(row_segs(e, "restore", countW, areas))
+        gWin:add_text(st, false, lk)
+      end
+    end
+  end
+
+  gWin:add_text(winLine { { text = " " } }, false, {})
+  gWin:add_text(winLine {
+    { text = " [ignore]", colour = TC.val },
+    { text = " hides a portal and stops counting it.  ", colour = TC.num },
+    { text = "[restore]", colour = TC.ok },
+    { text = " brings it back.", colour = TC.num },
+  }, false, {})
+  gWin:add_text(winLine {
+    { text = " portalusetop <channel>", colour = TC.ok },
+    { text = " sends the top 5 to a channel.  ", colour = TC.num },
+    { text = "portalhelp", colour = TC.ok },
+    { text = " for all commands.", colour = TC.num },
+  }, false, {})
+
+  -- 500px tall at most; the rest scrolls (wheel or scrollbar).
+  pcall(function() gWin:fit_contents(2000, 500) end)
+  -- Scroll AFTER fitting: add_text follows the newest line like a console,
+  -- and rows above the viewport get no hotspot when drawn.
+  pcall(function() gWin:set_scroll(keep or 1) end)
+  gWin:draw()
+  gWin:show()
+  -- The layout's invisible drag bar (z 154) eats clicks on windows under it.
+  pcall(WindowSetZOrder, WIN_ID, 99999)
+  pcall(Repaint)
+end
+
+-- Redraw the window if it is up, keeping the scroll.
+-- Safe from inside a link click: no WindowDelete happens here.
+RedrawIfOpen = function ()
+  if gWin then ShowWindow(true) end
+end
+
+function PU_Ignore (portal)
+  if type(portal) ~= "string" then return end
+  ignore[portal] = true
+  save_data()   -- redraws
+end
+
+function PU_Restore (portal)
+  if type(portal) ~= "string" then return end
+  ignore[portal] = nil
+  save_data()   -- redraws
+end
+
+function PU_Sort (mode)
+  win_mode = mode or "high"
+  RedrawIfOpen()
+end
+
+function PU_ToggleArea ()
+  show_area  = not show_area
+  area_cache = nil
+  save_data()   -- redraws, which rebuilds area_cache
+  if show_area and area_cache and next(area_cache) == nil then
+    ColourNote("white","red","[PortalUse] No portal catalog found - the area display fills in from the portal catalog - id your portals, or run 'portaldex scan'.")
+  end
+end
+
+function PU_ToggleIgnored ()
+  show_ignored = not show_ignored
+  RedrawIfOpen()
+end
+
+function OnPortalUsage (name, line, wildcards)
+  local mode = string.match(line, "^%S+%s+(%S+)$")
+  mode = mode and string.lower(mode) or "high"
+  local known = false
+  for _, m in ipairs(SORT_MODES) do if m == mode then known = true end end
+  win_mode   = known and mode or "high"
+  area_cache = nil      -- typed command: re-read the catalog
+  ShowWindow(false)
+end
+
+
+---------------------------------------------------------
+-- portalusetop
+---------------------------------------------------------
+
+function OnPortalUseTop (name, line, wildcards)
+  local channel = line:match("^portalusetop%s+(%S+)$")
+  if not channel or channel == "" then
+    ColourNote("white","red","Usage: portalusetop <channel>")
+    return
+  end
+
+  local list = {}
+  for portal, count in pairs(usage) do
+    if not ignore[portal] then                 -- still honour the ignore list
+      table.insert(list, { portal = portal, count = count })
+    end
+  end
+  table.sort(list, function(a,b) return a.count > b.count end)
+
+  local areas = show_area and load_portaldex_areas() or nil
+
+  local parts = {}
+  for i = 1, math.min(5, #list) do
+    local entry = list[i]
+    local aard  = spans_to_aard(colors[entry.portal]) or entry.portal
+    local areatag = ""
+    if areas then
+      local a = areas[entry.portal:lower()]
+      if a then
+        local inner = a.area or ""
+        if a.room then inner = (inner ~= "" and (inner .. " ") or "") .. a.room end
+        if inner ~= "" then areatag = "@x045 [" .. inner .. "]@w" end
+      end
+    end
+    parts[i] = aard .. areatag .. "@w(" .. entry.count .. ")"
+  end
+
+  local msg = "Top portals: " .. table.concat(parts, "@w | ")
+  Send(channel .. " " .. msg)
+end
+
+---------------------------------------------------------
+-- portalignore
+---------------------------------------------------------
+
+function OnPortalIgnore (name, line, wildcards)
+  local arg = wildcards[1]
+  if not arg or arg == "" then
+    ColourNote("white","red","Usage: portalignore <portal> | portalignore list")
+    return
+  end
+  if string.lower(arg) == "list" then
+    ColourNote(TC.hdr,"","Ignored portals:")
+    local any = false
+    for portal in pairs(ignore) do
+      any = true
+      ColourTell("yellow","",portal)
+      Note("")
+    end
+    if not any then ColourNote(TC.num,"","(none)") end
+    return
+  end
+  local portal = clean_name(arg)
+  if ignore[portal] then
+    ignore[portal] = nil
+    ColourNote("white","red","Removed from ignore list: " .. portal)
+  else
+    ignore[portal] = true
+    ColourNote(TC.ok,"","Added to ignore list: " .. portal)
+  end
+  save_data()
+end
+
+---------------------------------------------------------
+-- portalreset
+---------------------------------------------------------
+
+function OnPortalReset (name, line, wildcards)
+  local arg = string.match(line, "^portalreset%s+(.*)$")
+  if not arg or arg == "" then
+    ColourNote("white","red","Usage: portalreset all | portalreset <portal>")
+    return
+  end
+  if string.lower(arg) == "all" then
+    usage  = {}
+    colors = {}
+    ColourNote(TC.hdr,"","All portal usage reset.")
+    save_data()
+    return
+  end
+  local portal = clean_name(arg)
+  if usage[portal] then
+    usage[portal]  = nil
+    colors[portal] = nil
+    ColourNote(TC.ok,"","Reset usage for: " .. portal)
+  else
+    ColourNote("white","red","No usage found for: " .. portal)
+  end
+  save_data()
+end
+
+---------------------------------------------------------
+-- portalscan / portalsetbag
+---------------------------------------------------------
+
+function OnPortalScan (name, line, wildcards)
+  pu_start_scan()
+end
+
+function OnPortalSetBag (name, line, wildcards)
+  local arg = wildcards[1] and wildcards[1]:match("^%s*(.-)%s*$") or ""
+  if arg == "" then
+    if bag_keyword == "" then
+      ColourNote(TC.val,"","[PortalUse] No bag keyword set. Use: portalsetbag <keyword>")
+    else
+      ColourNote(TC.val,"","[PortalUse] Current bag keyword: " .. bag_keyword)
+    end
+    return
+  end
+  bag_keyword = arg
+  ColourNote(TC.val,"","[PortalUse] Bag keyword set to: " .. bag_keyword)
+  save_data()
+end
+
+---------------------------------------------------------
+-- portalclean
+---------------------------------------------------------
+
+function OnPortalClean (name, line, wildcards)
+  local removed = 0
+  for portal, count in pairs(usage) do
+    if count == 0 then
+      usage[portal]  = nil
+      colors[portal] = nil
+      removed = removed + 1
+    end
+  end
+  save_data()
+  ColourNote(TC.val,"","[PortalUse] Removed " .. removed .. " portal(s) with 0 uses.")
+end
+
+---------------------------------------------------------
+-- portalarea
+---------------------------------------------------------
+
+function OnPortalArea (name, line, wildcards)
+  local arg = (line:match("^portalarea%s+(%S+)") or ""):lower()
+  if     arg == "on"  then show_area = true
+  elseif arg == "off" then show_area = false
+  elseif arg == ""    then show_area = not show_area
+  else ColourNote("white","red","Usage: portalarea on|off"); return end
+  area_cache = nil
+  save_data()
+  ColourNote(TC.val,"","[PortalUse] Destination area + landing room display is " .. (show_area and "ON" or "OFF") .. ".")
+  if show_area and next(load_portaldex_areas()) == nil then
+    ColourNote("white","red","  (No catalog found - this fills in from the portal catalog - id your portals, or run 'portaldex scan'.)")
+  end
+end
+
+---------------------------------------------------------
+-- portalhelp
+---------------------------------------------------------
+
+function OnPortalHelp ()
+  ColourNote(TC.hdr,"","PortalValue " .. VERSION .. " - portal usage (this was the PortalUse plugin)")
+  ColourNote(TC.val,"","Commands:")
+  ColourNote(TC.val,"","  portaluse [mode]           -- Open the usage window (sort: high, low, alpha, ralpha)")
+  ColourNote(TC.num, "","       click [ignore] on a row to ignore a portal; [ Show ignored ] to restore")
+  ColourNote(TC.val,"","  portalusetop <channel>     -- Send top 5 portals to a channel")
+  ColourNote(TC.val,"","  portalscan                 -- Refresh colours, add untracked portals with 0 uses")
+  ColourNote(TC.val,"","  portalsetbag <keyword>     -- Set the bag keyword for portalscan")
+  ColourNote(TC.val,"","  portalarea on|off          -- Show destination area + landing room per portal")
+  ColourNote(TC.num, "","       uses the portal catalog (id your portals, or portaldex scan)")
+  ColourNote(TC.num, "","       run 'portaldex rooms' there if room numbers are missing")
+  ColourNote(TC.num, "","       restrung a portal? run 'portaldex scan missing' so its new name gets an area")
+  ColourNote(TC.val,"","  portalignore <portal>      -- Toggle ignoring a portal")
+  ColourNote(TC.val,"","  portalignore list          -- Show ignored portals")
+  ColourNote(TC.val,"","  portalclean                -- Remove all portals with 0 uses")
+  ColourNote(TC.val,"","  portalreset all            -- Reset all usage")
+  ColourNote(TC.val,"","  portalreset <portal>       -- Reset one portal")
+  ColourNote(TC.val,"","  portalhelp                 -- Show this help")
+  ColourNote(TC.val,"","  portalvalue help           -- Everything PortalValue does (pathing, catalog, mapper)")
+end
+end
+
+-- =========================================================================
+-- ==========  PORTAL MAPPER  (formerly the PortalMapper plugin)  ==========
+-- =========================================================================
+do
+
+-- gmcphelper gives gmcp() and Send_GMCP_Packet().  Guarded in case a
+-- stripped down client does not ship it.
+local gHaveGmcpHelper = pcall (require, "gmcphelper")
+
+-- =====================================================================
+-- Colours - the house theme
+-- =====================================================================
+local CLR_TAG  = "#875FFF"   -- x099
+local CLR_NAME = "#00D7FF"   -- x045
+local CLR_MSG  = "#FFFFFF"   -- W
+local CLR_HI   = "#00FF87"   -- x048
+local CLR_WARN = "#FF5F00"   -- x202, used for the "cannot portal here" line
+
+local TAG = "PortalMapper"
+-- (5.0: PortalMapper's own VERSION is gone; VERSION here is PortalValue's.)
+
+local ITEM_TYPE_PORTAL = 20   -- aardwolf.com/wiki Help/Invdata
+local ENTER_TIMEOUT    = 5    -- seconds to wait for a new room after "enter"
+local SCAN_TIMEOUT     = 8    -- seconds to wait for the invdata reply
+local REC_DELAY        = 0.5  -- seconds to let the mapper answer fullportal
+local REC_RETRIES      = 3    -- attempts before giving up on one portal
+local MAPPER_ID        = "b6eae87ccedd84f510b74714"  -- Aardwolf_GMCP_Mapper
+
+-- =====================================================================
+-- Echo helpers
+-- =====================================================================
+local function echo (msg)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", msg)
+end
+
+local function echoHi (msg, hi, tail)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", msg, CLR_HI, "", hi, CLR_MSG, "", tail or "")
+end
+
+local function echoWarn (msg)
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_WARN, "", msg)
+end
+
+local function helpLine (left, right)
+  ColourNote (CLR_HI, "", string.format ("  %-30s", left), CLR_MSG, "", right)
+end
+
+-- =====================================================================
+-- State
+-- =====================================================================
+local gCfg = {
+  bag        = nil,     -- object serial of the portal bag
+  dualweapon = nil,     -- object serial re-equipped with "dual" (no-wish mode)
+  wearportal = nil,     -- object serial re-equipped with "wear" (wish mode)
+  wish       = false,
+  custom     = nil,     -- custom mode template, e.g. "take port bag;wear port;..."
+  customOn   = false,   -- custom mode wins over wish/dual while this is on
+  startbag   = nil,     -- optional: unmapped portals wait here (bag = end bag)
+}
+
+local gMapped  = {}     -- [serial] = { room = "1234", level = "50", name = "..." }
+local gDebug   = false
+
+local gRoomNum = nil    -- last room.info num, as a string
+
+local gScan    = nil    -- { want = "run"|"list", items = {}, ticks = 0 }
+local gRun     = nil    -- { queue = {}, index = 0, stopping = false }
+local gStep    = "idle" -- "idle" | "scanning" | "entering"
+local gCurrent = nil    -- portal being walked right now
+local gFromRoom= nil    -- room we entered it from
+local gTicks   = 0
+local gSawSame = false  -- room.info re-sent the SAME room while we waited
+
+local gRec     = nil    -- { portal, room, tries } while the mapper is storing an exit
+local gRecGen  = 0      -- generation counter for the delayed check
+local gRecFail = nil    -- a mapper "PORTAL ... FAILED" line seen while recording
+local gRecOk   = false  -- the mapper's "Storing ... as a portal" line was seen
+local cfgRedraw        -- set by the config window code (5.0); saveData calls it
+
+local function dbg (msg)
+  if gDebug then
+    ColourNote ("#FFAF00", "", "[" .. TAG .. " debug] " .. msg)
+  end
+end
+
+-- =====================================================================
+-- Small helpers
+-- =====================================================================
+
+-- Aardwolf item names carry @ colour codes.  Strip them for display.
+local function stripColours (s)
+  if not s then return "" end
+  s = string.gsub (s, "@x%d%d%d", "")
+  s = string.gsub (s, "@[a-zA-Z]", "")
+  s = string.gsub (s, "@@", "@")
+  return s
+end
+
+local function trim (s)
+  s = string.gsub (s or "", "^%s+", "")
+  s = string.gsub (s, "%s+$", "")
+  return s
+end
+
+local function countMapped ()
+  local n = 0
+  for _ in pairs (gMapped) do n = n + 1 end
+  return n
+end
+
+-- The separator to put between stacked commands inside the {curly braces}
+-- of "mapper fullportal".
+--
+-- The mapper stores whatever it is given and later does gsub(";", stack_char)
+-- when it turns a portal exit into a speedwalk, so what it must END UP with
+-- is single semicolons.  Execute() is processed as if typed, and with command
+-- stacking on, a doubled stack character collapses to one literal character.
+-- So we double it only when the stack character actually is ";".
+local function separator ()
+  local ok, enabled = pcall (GetOption, "enable_command_stack")
+  if ok and enabled == 1 then
+    local ok2, ch = pcall (GetAlphaOption, "command_stack_character")
+    if ok2 and ch == ";" then
+      return ";;"
+    end
+  end
+  return ";"
+end
+
+-- The one difference between the two modes.
+--
+-- TWO LAYERS HERE, AND THE DIFFERENCE MATTERS.
+--
+-- restoreToken() is the WORD that goes into the command stored in the
+-- mapper: literally "dualweapon" or "wearportal".  It is NOT an item
+-- number.  This plugin defines an alias of that exact name, so when the
+-- mapper later walks the portal the word expands to whatever weapon or
+-- portal item you are using TODAY.  Map a portal at level 50 wearing one
+-- item, re-gear at 201 with a different one, and the stored exit still
+-- works - nothing to rewrite.
+--
+-- That only works because the mapper runs portal commands through
+-- ExecuteWithWaits -> Execute (aard_GMCP_mapper.xml), which applies alias
+-- processing.  Send() would not.  If a future package version ever changes
+-- that to Send(), these words would go to the mud raw and every portal
+-- would break; that is the one thing to re-check on a package update.
+--
+-- restoreLive() is the real command, used when the word has to be turned
+-- into something the mud understands.
+--
+-- v1.5: in CUSTOM mode the "restore token" is the whole template, as
+-- "custom=<template>".  It plays exactly the same role - it is what a record
+-- remembers it was made with, so staleList / rewrite work unchanged.
+local CUSTOM_PREFIX = "custom="
+
+local function modeName ()
+  if gCfg.customOn and gCfg.custom then return "custom" end
+  if gCfg.wish then return "wish" end
+  return "dual"
+end
+
+local function restoreToken ()
+  local mode = modeName ()
+  if mode == "custom" then return CUSTOM_PREFIX .. gCfg.custom end
+  if mode == "wish" then return "wearportal" end
+  return "dualweapon"
+end
+
+-- Whole-word test / replace.  %f frontier patterns work in Lua 5.1.
+local function hasWord (s, word)
+  return string.find (s, "%f[%w]" .. word .. "%f[%W]") ~= nil
+end
+
+local function replaceWord (s, word, with)
+  return (string.gsub (s, "%f[%w]" .. word .. "%f[%W]", with))
+end
+
+-- Turn a custom template into the steps for one portal:
+--   the word  port  -> the portal's serial
+--   the word  bag   -> portalbag (the alias word that expands to your bag)
+-- Everything else is kept exactly as typed, so the result can match portals
+-- you mapped by hand.
+local function fillTemplate (tpl, serial)
+  local steps = {}
+  for raw in string.gmatch (tpl or "", "[^;]+") do
+    local s = trim (raw)
+    if s ~= "" then
+      s = replaceWord (s, "port", serial)
+      s = replaceWord (s, "bag", "portalbag")
+      table.insert (steps, s)
+    end
+  end
+  return steps
+end
+
+-- Which step goes through the portal: the first one whose first word is
+-- "enter" or an abbreviation of it (en, ent, ente).
+local function findEnter (steps)
+  for i, s in ipairs (steps) do
+    local w = string.lower (string.match (s, "^(%S+)") or "")
+    if #w >= 2 and string.sub ("enter", 1, #w) == w then
+      return i
+    end
+  end
+  return nil
+end
+
+-- Does the custom template use the bag word before / after the enter step?
+-- (Needed for startbag: that is where the start bag gets swapped in.)
+local function templateBagSides (tpl)
+  local steps = fillTemplate (tpl, "0")
+  local e = findEnter (steps)
+  if not e then return false, false end
+  local before, after = false, false
+  for i, s in ipairs (steps) do
+    if hasWord (s, "portalbag") then
+      if i < e then before = true elseif i > e then after = true end
+    end
+  end
+  return before, after
+end
+
+-- nil if the template is usable, otherwise the reason it is not.
+local function templateProblem (tpl)
+  if tpl == nil or trim (tpl) == "" then return "it is empty." end
+  if string.find (tpl, "[|{}]") then
+    return "it cannot contain | { or } (the mapper and the data file both use them)."
+  end
+  if not hasWord (tpl, "port") then
+    return "it never says 'port', so every portal would get the same command."
+  end
+  if not findEnter (fillTemplate (tpl, "0")) then
+    return "there is no 'enter' step (enter / ente / ent / en), so I cannot tell "
+           .. "which step goes through the portal."
+  end
+  return nil
+end
+
+-- Same trick for the bag: the stored command says "portalbag", never a bag
+-- number, so moving every portal into a new bag is one setting change and
+-- nothing else.  Matched by the "get <n> portalbag" / "put <n> portalbag"
+-- aliases below.
+local function bagToken ()
+  return "portalbag"
+end
+
+local function restoreLive ()
+  local mode = modeName ()
+  if mode == "custom" then
+    return "(custom command)"
+  end
+  if mode == "wish" then
+    return "wear " .. tostring (gCfg.wearportal or "<not set>")
+  end
+  return "dual " .. tostring (gCfg.dualweapon or "<not set>")
+end
+
+-- The round trip as a list of steps, plus which step is the "enter".
+-- Steps before and including it are sent, then we wait to arrive; the
+-- steps after it are the gear-back-on / back-in-the-bag part.
+--
+-- Built from bag + restore rather than read from a stored string, so that
+-- "portalmapper rewrite" can regenerate the OLD command (from what each
+-- record says was in force at the time) and the NEW one side by side.
+local function stepsFor (serial, bag, restore)
+  if string.sub (restore, 1, #CUSTOM_PREFIX) == CUSTOM_PREFIX then
+    local steps = fillTemplate (string.sub (restore, #CUSTOM_PREFIX + 1), serial)
+    return steps, findEnter (steps)
+  end
+  return {
+    "get " .. serial .. " " .. bag,
+    "wear " .. serial,
+    "enter",
+    "remove " .. serial,
+    restore,
+    "put " .. serial .. " " .. bag,
+  }, 3
+end
+
+-- The exact round trip, as recorded.
+local function portalCommandFor (serial, bag, restore)
+  local steps = stepsFor (serial, bag, restore)
+  return table.concat (steps, separator ())
+end
+
+local function portalCommand (serial)
+  return portalCommandFor (serial, bagToken (), restoreToken ())
+end
+
+-- Portals recorded with a bag or a restore step that is no longer current.
+-- Changing bags, swapping your dual weapon, or flipping wish mode makes
+-- every previously recorded exit stale, because the command string stored
+-- in the mapper still names the old items.
+local function staleList ()
+  local stale = {}
+  local restore = restoreToken ()
+  local bag     = bagToken ()
+  for serial, m in pairs (gMapped) do
+    if m.bag and m.restore and (m.bag ~= bag or m.restore ~= restore) then
+      table.insert (stale, serial)
+    end
+  end
+  table.sort (stale)
+  return stale
+end
+
+-- Is the Aardwolf mapper there to take our exits?
+local function mapperReady ()
+  if not IsPluginInstalled (MAPPER_ID) then
+    return false, "the Aardwolf mapper plugin is not installed."
+  end
+  if GetPluginInfo (MAPPER_ID, 17) == false then
+    return false, "the Aardwolf mapper plugin is disabled."
+  end
+  return true
+end
+
+-- Read-only look at the mapper's own database.
+local function openMapperDb ()
+  local name = GetPluginVariable (MAPPER_ID, "db_name")
+  if not name or name == "" then return nil end
+  local ok, db = pcall (sqlite3.open, GetInfo (66) .. name .. ".db")
+  if not ok or not db then return nil end
+  pcall (function () db:busy_timeout (200) end)
+  return db
+end
+
+-- Is this portal's exit in the mapper, the way 'mapper portals' would list
+-- it (exit from anywhere, destination room known)?  room is optional.
+-- true / false, or nil if the database could not be queried.
+--
+-- v1.5: matches the serial anywhere in the stored command, as a whole
+-- number, because a custom command need not say "wear <n>;enter".  LIKE
+-- narrows it down, then a frontier pattern stops 3828209 matching 13828209.
+local function exitInMapper (db, serial, room)
+  serial = tostring (serial or "")
+  if not string.match (serial, "^%d+$") then return nil end
+  if room and not string.match (tostring (room), "^%-?%d+$") then return nil end
+  local q = "SELECT exits.dir AS dir FROM exits LEFT OUTER JOIN rooms ON rooms.uid = exits.touid "
+         .. "WHERE exits.fromuid IN ('*','**') AND rooms.area IS NOT NULL "
+         .. "AND exits.dir LIKE '%" .. serial .. "%' "
+         .. (room and ("AND CAST(exits.touid AS TEXT) = '" .. room .. "' ") or "")
+  local ok, found = pcall (function ()
+    for row in db:nrows (q) do
+      if string.find (row.dir or "", "%f[%d]" .. serial .. "%f[%D]") then
+        return true
+      end
+    end
+    return false
+  end)
+  if not ok then return nil end
+  return found
+end
+
+-- What is still missing before a run can start?
+local function missingConfig ()
+  local missing = {}
+  if not gCfg.bag then
+    table.insert (missing, "portalmapper bag <id>   (or endbag - same thing)")
+  end
+  local mode = modeName ()
+  if mode == "custom" then
+    -- only needed if the custom command actually uses those words
+    if hasWord (gCfg.custom, "wearportal") and not gCfg.wearportal then
+      table.insert (missing, "portalmapper wearportal <id>   (your custom command uses wearportal)")
+    end
+    if hasWord (gCfg.custom, "dualweapon") and not gCfg.dualweapon then
+      table.insert (missing, "portalmapper dualweapon <id>   (your custom command uses dualweapon)")
+    end
+    if gCfg.startbag then
+      local before, after = templateBagSides (gCfg.custom)
+      if not (before and after) then
+        table.insert (missing, "a start bag needs the word 'bag' in your custom command, "
+                      .. "before AND after the enter step - or: portalmapper startbag off")
+      end
+    end
+  elseif mode == "wish" then
+    if not gCfg.wearportal then
+      table.insert (missing, "portalmapper wearportal <id>")
+    end
+  else
+    if not gCfg.dualweapon then
+      table.insert (missing, "portalmapper dualweapon <id>")
+    end
+  end
+  return missing
+end
+
+-- The bag a run looks in: the start bag if there is one, else the bag.
+local function scanBag ()
+  return gCfg.startbag or gCfg.bag
+end
+
+-- For the live run only: point the bag word at the START bag.  Used on the
+-- way in (take it out of the start bag) and when a portal fails (put it
+-- back there).  The recorded command never sees this - it always says
+-- portalbag, which is the end bag, where the portal lives once mapped.
+local function toStartBag (step)
+  if not gCfg.startbag then return step end
+  return replaceWord (step, "portalbag", gCfg.startbag)
+end
+
+-- =====================================================================
+-- Data file
+--
+-- Settings and the mapped list live together in one plain text file next
+-- to the plugin.  GetPluginInfo(id, 6) is the .xml FILE path, not the
+-- folder - gluing a name straight on silently produces
+-- "PortalMapper.xml_data.txt", so trim back to the last separator.
+-- =====================================================================
+local function dataPath ()
+  local pluginFile = GetPluginInfo (GetPluginID (), 6) or ""
+  local pluginDir  = string.match (pluginFile, "^(.*[\\/])") or ""
+  return pluginDir .. "PortalMapper_data.txt"
+end
+
+local function saveData ()
+  local path = dataPath ()
+  local f, err = io.open (path, "w")
+  if not f then
+    echoWarn ("could not write " .. path .. ": " .. tostring (err))
+    return false
+  end
+
+  f:write ("# PortalMapper data - settings and mapped portals.\n")
+  f:write ("# set <name> <value>\n")
+  f:write ("# map <serial>|<room>|<level>|<bag>|<restore step>|<name>\n")
+  f:write ("# The bag and restore step are the ones in force WHEN IT WAS RECORDED,\n")
+  f:write ("# which is how 'portalmapper rewrite' knows what to change.\n")
+  if gCfg.bag        then f:write ("set bag "        .. gCfg.bag        .. "\n") end
+  if gCfg.dualweapon then f:write ("set dualweapon " .. gCfg.dualweapon .. "\n") end
+  if gCfg.wearportal then f:write ("set wearportal " .. gCfg.wearportal .. "\n") end
+  f:write ("set wish " .. (gCfg.wish and "1" or "0") .. "\n")
+  if gCfg.startbag   then f:write ("set startbag "   .. gCfg.startbag   .. "\n") end
+  if gCfg.custom     then f:write ("set custom "     .. gCfg.custom     .. "\n") end
+  f:write ("set customon " .. (gCfg.customOn and "1" or "0") .. "\n")
+
+  local serials = {}
+  for s in pairs (gMapped) do table.insert (serials, s) end
+  table.sort (serials)
+  for _, s in ipairs (serials) do
+    local m = gMapped [s]
+    f:write (string.format ("map %s|%s|%s|%s|%s|%s\n",
+             s, m.room, m.level, m.bag or "", m.restore or "", m.name or ""))
+  end
+
+  f:close ()
+  if cfgRedraw then cfgRedraw () end
+  return true
+end
+
+local function loadData ()
+  gCfg.bag, gCfg.dualweapon, gCfg.wearportal = nil, nil, nil
+  gCfg.wish = false
+  gCfg.custom, gCfg.customOn, gCfg.startbag = nil, false, nil
+  gMapped = {}
+
+  local f = io.open (dataPath (), "r")
+  if not f then return end
+
+  for raw in f:lines () do
+    local line = trim (raw)
+    if line ~= "" and string.sub (line, 1, 1) ~= "#" then
+      local key, value = string.match (line, "^set%s+(%S+)%s+(.+)$")
+      if key then
+        if key == "wish" then
+          gCfg.wish = (value == "1")
+        elseif key == "customon" then
+          gCfg.customOn = (value == "1")
+        elseif key == "bag" or key == "dualweapon" or key == "wearportal"
+            or key == "startbag" or key == "custom" then
+          gCfg [key] = value
+        end
+      else
+        -- current format: map serial|room|level|bag|restore|name
+        local serial, room, level, bag, restore, name =
+          string.match (line,
+            "^map%s+([^|]+)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|(.*)$")
+
+        if not serial then
+          -- v1.0 format: map serial room level name.  No bag or restore was
+          -- stored, so those stay nil and "rewrite" leaves the record alone
+          -- rather than guessing what it was recorded with.
+          serial, room, level, name =
+            string.match (line, "^map%s+(%d+)%s+(%-?%d+)%s+(%d+)%s*(.*)$")
+          bag, restore = nil, nil
+        end
+
+        if serial then
+          gMapped [trim (serial)] = {
+            room    = room,
+            level   = level,
+            bag     = (bag ~= "" and bag) or nil,
+            restore = (restore ~= "" and restore) or nil,
+            name    = name,
+          }
+        end
+      end
+    end
+  end
+
+  f:close ()
+end
+
+-- =====================================================================
+-- invdata scan of the bag
+-- =====================================================================
+local function stopScanTriggers ()
+  EnableTrigger ("pm_inv_header", false)
+  EnableTriggerGroup ("pm_inv_body", false)
+end
+
+local function beginScan (want)
+  gScan = { want = want, items = {}, ticks = 0, bag = scanBag () }
+  gStep = "scanning"
+  EnableTrigger ("pm_inv_header", true)
+  EnableTimer ("pm_tick", true)
+  ResetTimer ("pm_tick")
+  SendNoEcho ("invdata " .. gScan.bag)
+end
+
+function pmInvHeader (name, line, wildcards)
+  -- Only ours: another plugin's inventory scan answers with a different
+  -- container id, or with the bare "{invdata}" header this does not match.
+  if not gScan then
+    EnableTrigger ("pm_inv_header", false)
+    return
+  end
+  if wildcards [1] ~= gScan.bag then return end
+
+  EnableTrigger ("pm_inv_header", false)
+  EnableTriggerGroup ("pm_inv_body", true)
+end
+
+function pmInvItem (name, line, wildcards)
+  if not gScan then return end
+  table.insert (gScan.items, {
+    serial = wildcards [1],
+    flags  = wildcards [2],
+    name   = stripColours (wildcards [3]),
+    level  = wildcards [4],
+    itype  = tonumber (wildcards [5]) or 0,
+  })
+end
+
+-- forward declarations
+local nextPortal, finishRun, startRun
+
+function pmInvFooter ()
+  stopScanTriggers ()
+  if not gScan then return end
+
+  local scan = gScan
+  gScan = nil
+  gStep = "idle"
+  EnableTimer ("pm_tick", false)
+
+  -- Never trust our own list over the mapper's: forget anything we think
+  -- is mapped that the mapper does not actually have.
+  do
+    local db = openMapperDb ()
+    if db then
+      local dropped = 0
+      for _, item in ipairs (scan.items) do
+        if item.itype == ITEM_TYPE_PORTAL and gMapped [item.serial]
+           and exitInMapper (db, item.serial) == false then
+          gMapped [item.serial] = nil
+          dropped = dropped + 1
+        end
+      end
+      pcall (function () db:close () end)
+      if dropped > 0 then
+        saveData ()
+        echoWarn (dropped .. " portal(s) were recorded earlier but are NOT in "
+                  .. "'mapper portals' - they will be mapped again.")
+      end
+    end
+  end
+
+  local portals, already, other = {}, 0, 0
+  local alreadyList = {}
+  for _, item in ipairs (scan.items) do
+    if item.itype ~= ITEM_TYPE_PORTAL then
+      other = other + 1
+    elseif gMapped [item.serial] then
+      already = already + 1
+      table.insert (alreadyList, item)
+    else
+      table.insert (portals, item)
+    end
+  end
+
+  local fromStart = gCfg.startbag and scan.bag == gCfg.startbag
+                    and gCfg.startbag ~= gCfg.bag
+
+  if scan.want == "list" then
+    echoHi (fromStart and "start bag " or "bag ", tostring (scan.bag),
+            " holds " .. #scan.items .. " item(s):")
+    echoHi ("  portals not yet mapped : ", tostring (#portals), "")
+    echoHi ("  portals already mapped : ", tostring (already), "")
+    echoHi ("  not portals (ignored)  : ", tostring (other), "")
+    for _, p in ipairs (portals) do
+      ColourNote (CLR_HI, "", string.format ("  %-12s", p.serial),
+                  CLR_MSG, "", "L" .. p.level .. "  " .. p.name)
+    end
+    return
+  end
+
+  -- want == "run"
+
+  -- Start bag: anything in it that is ALREADY mapped just moves across to
+  -- the end bag - no need to walk it again.
+  if fromStart and #alreadyList > 0 then
+    for _, item in ipairs (alreadyList) do
+      SendNoEcho ("get " .. item.serial .. " " .. gCfg.startbag)
+      SendNoEcho ("put " .. item.serial .. " " .. gCfg.bag)
+    end
+    echoHi ("moved ", tostring (#alreadyList),
+            " already-mapped portal(s) from the start bag to the end bag.")
+  end
+
+  if #portals == 0 then
+    if fromStart then
+      echoHi ("no unmapped portals in start bag ", tostring (scan.bag), ".")
+    elseif already > 0 then
+      echoHi ("nothing new in the bag - all ", tostring (already),
+              " portal(s) in there are already mapped.")
+    else
+      echoHi ("no unmapped portals found in bag ", tostring (scan.bag), ".")
+    end
+    return
+  end
+
+  gRun = { queue = portals, index = 0, stopping = false, done = 0, skipped = 0 }
+  echoHi ("mapping ", tostring (#portals), " portal(s)"
+          .. ((already > 0 and not fromStart) and (", skipping " .. already .. " already known") or "")
+          .. (fromStart and (" from the start bag; each goes to the end bag once mapped") or "")
+          .. ".  'portalmapper stop' halts after the current one.")
+  nextPortal ()
+end
+
+-- =====================================================================
+-- The run
+-- =====================================================================
+-- Everything after the enter step: gear back on, portal back in the bag.
+--
+-- Every step is Execute()d, not sent: the alias WORDS (dualweapon,
+-- portalbag, a custom command's own aliases) then go through exactly the
+-- path the mapper will use later, so a broken alias shows up here and not
+-- weeks from now.
+--
+-- backToStart: the portal was NOT mapped, so with a start bag it goes back
+-- there instead of into the end bag.
+local function sendRestore (backToStart)
+  for _, step in ipairs (gCurrent.post or {}) do
+    Execute (backToStart and toStartBag (step) or step)
+  end
+end
+
+function finishRun (why)
+  gStep    = "idle"
+  gCurrent = nil
+  EnableTimer ("pm_tick", false)
+
+  local run = gRun
+  gRun = nil
+  if not run then return end
+
+  echoHi (why .. " - mapped ", tostring (run.done), " portal(s)"
+          .. (run.skipped > 0 and (", skipped " .. run.skipped) or "")
+          .. ".  Total known: " .. countMapped () .. ".")
+  if (run.unverified or 0) > 0 then
+    echoWarn (run.unverified .. " portal(s) were confirmed only by the mapper's"
+              .. " message, not checked in its database - see 'mapper portals'.")
+  end
+end
+
+-- Walk the next portal in the queue.
+function nextPortal ()
+  if not gRun then return end
+
+  if gRun.stopping then
+    finishRun ("Stopped")
+    return
+  end
+
+  gRun.index = gRun.index + 1
+  if gRun.index > #gRun.queue then
+    finishRun ("Finished")
+    return
+  end
+
+  gCurrent  = gRun.queue [gRun.index]
+  gFromRoom = gRoomNum
+  gTicks    = 0
+  gSawSame  = false
+  gStep     = "entering"
+
+  dbg ("portal " .. gCurrent.serial .. " from room " .. tostring (gFromRoom))
+
+  -- Split the recorded command at its enter step: the first half is run
+  -- now, the second half once we have arrived (sendRestore).
+  local steps, enterAt = stepsFor (gCurrent.serial, bagToken (), restoreToken ())
+  gCurrent.pre, gCurrent.post = {}, {}
+  for i, step in ipairs (steps) do
+    if i <= enterAt then
+      table.insert (gCurrent.pre, step)
+    else
+      table.insert (gCurrent.post, step)
+    end
+  end
+
+  -- Execute, not Send: these go through the same aliases the mapper will
+  -- use later, so the live run is a real test of the stored command.  The
+  -- one live-only difference: with a start bag, the portal comes out of
+  -- the start bag rather than the end bag the recorded command names.
+  for _, step in ipairs (gCurrent.pre) do
+    Execute (toStartBag (step))
+  end
+
+  EnableTimer ("pm_tick", true)
+  ResetTimer ("pm_tick")
+end
+
+-- The mapper's answer was good (or at least not bad).  Keep the record.
+local function recordDone (unverified)
+  local rec = gRec
+  gRec = nil
+  if not rec then return end
+  local portal = rec.portal
+
+  gMapped [portal.serial] = {
+    room    = rec.room,
+    level   = portal.level,
+    bag     = bagToken (),
+    restore = restoreToken (),
+    name    = portal.name,
+  }
+  saveData ()
+
+  gStep = "idle"
+  if not gRun then return end
+
+  gRun.done = gRun.done + 1
+  if unverified then gRun.unverified = (gRun.unverified or 0) + 1 end
+
+  ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
+              CLR_MSG, "", string.format ("%d/%d  ", gRun.index, #gRun.queue),
+              CLR_HI, "", portal.serial,
+              CLR_MSG, "", "  L" .. portal.level .. "  " .. portal.name
+                            .. "  -> room ",
+              CLR_HI, "", rec.room,
+              CLR_WARN, "", unverified and "  (confirmed by mapper message only)" or "")
+
+  nextPortal ()
+end
+
+-- The mapper refused every attempt.  Nothing was stored - say so and halt.
+local function recordFailed ()
+  local rec = gRec
+  gRec = nil
+  gStep = "idle"
+  if not rec then return end
+
+  echoWarn ("the mapper would not store portal " .. rec.portal.serial
+            .. " (" .. rec.portal.name .. ") - it was NOT recorded.")
+
+  -- It already went into the end bag on arrival.  Not mapped, so with a
+  -- start bag it belongs back there.
+  if gCfg.startbag and gCfg.startbag ~= gCfg.bag then
+    SendNoEcho ("get " .. rec.portal.serial .. " " .. gCfg.bag)
+    SendNoEcho ("put " .. rec.portal.serial .. " " .. gCfg.startbag)
+    echo ("put it back in the start bag.")
+  end
+  echo ("mapper said: " .. tostring (gRecFail or "(nothing)"))
+  echo ("If it says the room is unknown, the mapper has no data for room "
+        .. rec.room .. ": check the mapper plugin is enabled, 'look' there, "
+        .. "then move somewhere you can portal from and: portalmapper resume")
+
+  local run = gRun
+  gRun = nil
+  gCurrent = nil
+  if run then
+    echoHi ("mapped ", tostring (run.done), " portal(s) this run.")
+  end
+end
+
+local function attemptRecord ()
+  if not gRec then return end
+  gRecFail, gRecOk = nil, false
+  gRecGen = gRecGen + 1
+
+  local cmd = portalCommand (gRec.portal.serial)
+
+  -- No "quiet": the mapper's "Storing ... as a portal" line is how we know
+  -- it worked, and its FAILED line is how we know it did not.
+  Execute ("mapper fullportal {" .. cmd .. "} {" .. gRec.room .. "} "
+           .. gRec.portal.level)
+
+  DoAfterSpecial (REC_DELAY, "pmRecCheck (" .. gRecGen .. ")", 12)
+end
+
+-- Called REC_DELAY seconds after each fullportal attempt.
+function pmRecCheck (gen)
+  if not gRec or gen ~= gRecGen then return end
+
+  local inDb = nil
+  local db = openMapperDb ()
+  if db then
+    inDb = exitInMapper (db, gRec.portal.serial, gRec.room)
+    pcall (function () db:close () end)
+  end
+
+  if inDb == true then
+    recordDone (false)
+    return
+  end
+
+  if inDb == nil and not gRecFail then
+    -- cannot read the database: trust the mapper's own confirmation line,
+    -- and nothing less.
+    if gRecOk then
+      recordDone (true)
+      return
+    end
+    gRecFail = "(no confirmation from the mapper, and its database could not be read)"
+  elseif not gRecFail then
+    gRecFail = "(the exit is not in the mapper's portal list)"
+  end
+
+  gRec.tries = gRec.tries + 1
+  if gRec.tries < REC_RETRIES then
+    dbg ("not stored (" .. gRecFail .. "), retry " .. gRec.tries)
+    attemptRecord ()
+  else
+    recordFailed ()
+  end
+end
+
+-- The mapper reports through print(), which is a Note.  Notes cannot be
+-- trigger matched but they do pass through here.
+function OnPluginScreendraw (t, log, line)
+  if not gRec or not line then return end
+  if string.find (line, "PORTAL", 1, true) and string.find (line, "FAILED", 1, true) then
+    gRecFail = line
+  elseif string.find (line, "as a portal to room", 1, true) then
+    gRecOk = true
+  end
+end
+
+-- We went somewhere.  Record it (when we can) and carry on.
+local function arrived (roomNum)
+  local portal = gCurrent
+  gStep = "idle"
+  EnableTimer ("pm_tick", false)
+
+  if roomNum == "-1" then
+    -- A real move, but the mud will not give this room a number, so the
+    -- mapper cannot hold an exit to it.  Not a failure - just skip it.
+    gRun.skipped = gRun.skipped + 1
+    echoWarn ("portal " .. portal.serial .. " leads somewhere unmappable "
+              .. "(room -1) - not recorded, carrying on.")
+    sendRestore (true)
+    nextPortal ()
+    return
+  end
+
+  -- Gear back on while we wait for the mapper; the next portal only starts
+  -- once the mapper has answered for this one.
+  gStep = "recording"
+  gRec  = { portal = portal, room = roomNum, tries = 0 }
+  sendRestore ()
+  attemptRecord ()
+end
+
+-- "enter" did nothing.  Almost always a noportal room.
+local function enterFailed ()
+  local portal = gCurrent
+  gStep = "idle"
+  EnableTimer ("pm_tick", false)
+
+  echoWarn ("Make sure you can enter portal here before typing portalmapper resume")
+  echoHi ("stopped on portal ", portal.serial,
+          " (" .. portal.name .. ") - it was NOT recorded.")
+
+  -- Honest reporting of the one case this cannot tell apart from a failure:
+  -- a portal whose destination is the room you are already standing in.
+  if gSawSame then
+    echo ("(the mud re-sent this same room while waiting - if that portal "
+          .. "leads right back here, it looks identical to a failure)")
+  end
+
+  sendRestore (true)
+
+  local run = gRun
+  gRun = nil
+  gCurrent = nil
+  if run then
+    echoHi ("mapped ", tostring (run.done), " portal(s) this run."
+            .. "  Move somewhere you can portal from, then: portalmapper resume")
+  end
+end
+
+-- =====================================================================
+-- One second watchdog - the only thing it does is give up
+-- =====================================================================
+function pmTick ()
+  if gStep == "entering" then
+    gTicks = gTicks + 1
+    if gTicks >= ENTER_TIMEOUT then
+      enterFailed ()
+    end
+    return
+  end
+
+  if gStep == "scanning" and gScan then
+    gScan.ticks = gScan.ticks + 1
+    if gScan.ticks >= SCAN_TIMEOUT then
+      local want = gScan.want
+      gScan = nil
+      gStep = "idle"
+      stopScanTriggers ()
+      EnableTimer ("pm_tick", false)
+      echoWarn ("no invdata reply for bag " .. tostring (gScan and gScan.bag or scanBag ())
+                .. " - is that the right bag id?")
+      if want == "run" then
+        echoHi ("check it with ", "portalmapper scan", "")
+      end
+    end
+    return
+  end
+
+  EnableTimer ("pm_tick", false)
+end
+
+-- =====================================================================
+-- GMCP room.info (telnet option 201)
+-- =====================================================================
+function OnPluginTelnetSubnegotiation (theType, data)
+  if theType ~= 201 then return end
+
+  local message = string.match (data, "^([%w%.%-_]+)")
+  if not message then return end
+  if string.lower (message) ~= "room.info" then return end
+
+  local num = string.match (data, '"num"%s*:%s*(%-?%d+)')
+  if not num then return end
+
+  gRoomNum = num
+
+  if gStep == "entering" and num ~= gFromRoom then
+    arrived (num)
+  elseif gStep == "entering" then
+    gSawSame = true
+    dbg ("room.info still room " .. num .. ", waiting")
+  end
+end
+
+-- Read the current room without waiting for a move.
+local function syncRoom ()
+  if gHaveGmcpHelper then
+    local ok, num = pcall (gmcp, "room.info.num")
+    if ok and num ~= nil then
+      gRoomNum = tostring (num)
+      return true
+    end
+    pcall (Send_GMCP_Packet, "request room")
+  end
+  return false
+end
+
+-- =====================================================================
+-- Alias callbacks
+-- =====================================================================
+function startRun ()
+  if gRun or gStep ~= "idle" then
+    echo ("already running - 'portalmapper stop' to halt after this portal.")
+    return
+  end
+
+  local missing = missingConfig ()
+  if #missing > 0 then
+    echoWarn ("not set up yet.  Still needed:")
+    for _, m in ipairs (missing) do
+      ColourNote (CLR_HI, "", "  " .. m)
+    end
+    echoHi ("full setup: ", "pmhelp", "")
+    return
+  end
+
+  if modeName () == "custom" then
+    local problem = templateProblem (gCfg.custom)
+    if problem then
+      echoWarn ("your custom command will not work: " .. problem)
+      echoHi ("set it again with ", "portalmapper custom <command>", "")
+      return
+    end
+  end
+
+  local ready, why = mapperReady ()
+  if not ready then
+    echoWarn (why .. "  Nothing can be recorded without it.")
+    return
+  end
+
+  syncRoom ()
+  if not gRoomNum then
+    echo ("I do not know what room you are in yet - type 'look' and try again.")
+    return
+  end
+  if gRoomNum == "-1" then
+    echoWarn ("this room has no room number, so nothing can be recorded from here.")
+    echo ("move to a normal room and try again.")
+    return
+  end
+
+  beginScan ("run")
+end
+
+function pmAliasGo ()
+  startRun ()
+end
+
+function pmAliasStop ()
+  if not gRun then
+    echo ("not running.")
+    return
+  end
+  gRun.stopping = true
+  echo ("will stop once the current portal is finished.")
+end
+
+function pmAliasScan ()
+  if gStep ~= "idle" then
+    echo ("busy right now - try again when the run has stopped.")
+    return
+  end
+  if not scanBag () then
+    echoHi ("set the bag first: ", "portalmapper bag <id>", "")
+    return
+  end
+  beginScan ("list")
+end
+
+function pmAliasList ()
+  local n = countMapped ()
+  if n == 0 then
+    echo ("no portals mapped yet.")
+    return
+  end
+
+  echoHi ("", tostring (n), " portal(s) on record:")
+  local serials = {}
+  for s in pairs (gMapped) do table.insert (serials, s) end
+  table.sort (serials)
+  local db = openMapperDb ()
+  local missing = 0
+  for _, s in ipairs (serials) do
+    local m = gMapped [s]
+    local gone = db and exitInMapper (db, s) == false
+    if gone then missing = missing + 1 end
+    ColourNote (CLR_HI, "", string.format ("  %-12s", s),
+                CLR_MSG, "", string.format ("room %-8s L%-4s %s",
+                m.room, m.level, m.name or ""),
+                CLR_WARN, "", gone and "  NOT IN MAPPER" or "")
+  end
+  if db then pcall (function () db:close () end) end
+  if missing > 0 then
+    echoWarn (missing .. " of those are not in 'mapper portals' - "
+              .. "'portalmapper go' will map them again.")
+  end
+  echoHi ("re-map one with ", "portalmapper forget <serial>", "")
+end
+
+function pmAliasForget (name, line, wildcards)
+  local serial = wildcards [1]
+  if not gMapped [serial] then
+    echoHi ("not in the mapped list: ", serial, "")
+    return
+  end
+  gMapped [serial] = nil
+  saveData ()
+  echoHi ("forgotten ", serial, " - the next 'portalmapper go' will map it again.")
+  echo ("(this does not remove the exit from the mapper - 'mapper portals' does that)")
+end
+
+function pmAliasForgetAll ()
+  local n = countMapped ()
+  gMapped = {}
+  saveData ()
+  echoHi ("cleared all ", tostring (n), " remembered portal(s).")
+  echo ("(the mapper's own portal exits are untouched)")
+end
+
+-- Say something if this change just orphaned previously recorded portals.
+local function warnIfStale ()
+  local stale = staleList ()
+  if #stale == 0 then return end
+  echoWarn (#stale .. " portal(s) already in the mapper were recorded with a "
+            .. "different command (older mode or custom command).")
+  echoHi ("fix them all with ", "portalmapper rewrite",
+          " - no re-walking, it just edits the stored commands.")
+end
+
+local function setSerial (which, label, value)
+  gCfg [which] = value
+  saveData ()
+  echoHi (label .. " set to ", value, "")
+  local missing = missingConfig ()
+  if #missing == 0 then
+    echoHi ("setup complete - run it with ", "portalmapper go", "")
+  end
+  warnIfStale ()
+end
+
+-- Re-point every already-recorded portal exit at the current bag and the
+-- current restore step, without walking anything.
+--
+-- "mapper change portal {old} {new}" does an in-place UPDATE of the exit's
+-- command, keeping its destination and level (aard_GMCP_mapper.xml,
+-- map_portal_edit).  Both strings go through Execute, so both use the same
+-- computed separator as everything else.
+function pmAliasRewrite ()
+  if gRun or gStep ~= "idle" then
+    echo ("busy right now - try again when the run has stopped.")
+    return
+  end
+
+  local missing = missingConfig ()
+  if #missing > 0 then
+    echoWarn ("set the bag and the restore item first - see pmhelp.")
+    return
+  end
+
+  local stale = staleList ()
+  if #stale == 0 then
+    local unknown = 0
+    for _, m in pairs (gMapped) do
+      if not (m.bag and m.restore) then unknown = unknown + 1 end
+    end
+    if unknown > 0 then
+      echoHi ("nothing to rewrite, but ", tostring (unknown),
+              " old record(s) predate this feature and do not say which bag "
+              .. "they used - those have to be re-walked if the bag changed.")
+      echoHi ("to re-walk them: ", "portalmapper forget all", " then portalmapper go")
+    else
+      echo ("nothing to rewrite - every recorded portal already matches your "
+            .. "current bag and restore step.")
+    end
+    return
+  end
+
+  local restore = restoreToken ()
+  local bag     = bagToken ()
+  for _, serial in ipairs (stale) do
+    local m       = gMapped [serial]
+    local oldCmd  = portalCommandFor (serial, m.bag, m.restore)
+    local newCmd  = portalCommandFor (serial, bag, restore)
+
+    Execute ("mapper change portal {" .. oldCmd .. "} {" .. newCmd .. "}")
+
+    m.bag     = bag
+    m.restore = restore
+  end
+
+  saveData ()
+  echoHi ("rewrote ", tostring (#stale),
+          " portal exit(s) to the current " .. modeName () .. " mode command.")
+  echo ("the mapper prints one confirmation line per portal above.")
+end
+
+-- "dualweapon" typed, or reached from a stored portal command.
+function pmAliasDoDual ()
+  if not gCfg.dualweapon then
+    echoWarn ("no dual weapon set - portalmapper dualweapon <id>")
+    return
+  end
+  SendNoEcho ("dual " .. gCfg.dualweapon)
+end
+
+-- "wearportal" typed, or reached from a stored portal command.
+function pmAliasDoWear ()
+  if not gCfg.wearportal then
+    echoWarn ("no wear-portal item set - portalmapper wearportal <id>")
+    return
+  end
+  SendNoEcho ("wear " .. gCfg.wearportal)
+end
+
+-- "get <serial> portalbag" / "put <serial> portalbag", from a stored
+-- portal command or typed by hand.
+local function bagOrComplain ()
+  if not gCfg.bag then
+    echoWarn ("no portal bag set - portalmapper bag <id>")
+    return nil
+  end
+  return gCfg.bag
+end
+
+-- "<verb> <serial> portalbag" - get, take, put, whatever the command says.
+function pmAliasDoBag (name, line, wildcards)
+  local bag = bagOrComplain ()
+  if bag then SendNoEcho (wildcards [1] .. " " .. wildcards [2] .. " " .. bag) end
+end
+
+function pmAliasBag (name, line, wildcards)
+  setSerial ("bag", "portal bag (end bag)", wildcards [1])
+end
+
+function pmAliasEndbag (name, line, wildcards)
+  setSerial ("bag", "end bag (portal bag)", wildcards [1])
+  echo ("mapped portals end up here, and the stored commands use it.")
+end
+
+function pmAliasStartbag (name, line, wildcards)
+  local arg = string.lower (wildcards [1] or "")
+  if arg == "off" then
+    gCfg.startbag = nil
+    saveData ()
+    echo ("start bag off - portalmapper go looks in the bag itself again.")
+    return
+  end
+  if arg == gCfg.bag then
+    echoWarn ("that is the end bag too - the start bag has to be a different bag.")
+    return
+  end
+  gCfg.startbag = arg
+  saveData ()
+  echoHi ("start bag set to ", arg, "")
+  echo ("put the portals you want mapped in it; each one moves to the end bag "
+        .. "once it is mapped, so whatever is left in the start bag is what still "
+        .. "needs doing.")
+  local missing = missingConfig ()
+  if #missing > 0 then
+    echoWarn ("still needed:")
+    for _, m in ipairs (missing) do ColourNote (CLR_HI, "", "  " .. m) end
+  end
+end
+
+-- portalmapper custom [<command> | off]
+function pmCustomSet (arg)
+  arg = trim (arg or "")
+
+  if arg == "" then
+    if not gCfg.custom then
+      echoWarn ("no custom command set yet.")
+      echoHi ("example: ", "portalmapper custom take port bag;wear port;ent port;r port;put port bag;myrewear", "")
+      echo ("'port' becomes each portal's number, 'bag' becomes portalbag (your bag).")
+      return
+    end
+    gCfg.customOn = true
+    saveData ()
+  elseif string.lower (arg) == "off" then
+    gCfg.customOn = false
+    saveData ()
+    echoHi ("custom mode ", "OFF", " - back to " .. modeName () .. " mode ("
+            .. restoreToken () .. " -> " .. restoreLive () .. ").")
+    warnIfStale ()
+    return
+  else
+    -- ";;" is what you type to get a literal ";" past command stacking.
+    -- Accept it, since the mapper needs single ones anyway.
+    arg = string.gsub (arg, ";;", ";")
+    local problem = templateProblem (arg)
+    if problem then
+      echoWarn ("not set - " .. problem)
+      return
+    end
+    gCfg.custom   = arg
+    gCfg.customOn = true
+    saveData ()
+  end
+
+  echoHi ("custom mode ", "ON", " - command: " .. gCfg.custom)
+  local sample = fillTemplate (gCfg.custom, "1234567")
+  local e = findEnter (sample)
+  echoHi ("portal 1234567 would be mapped as: ",
+          table.concat (sample, ";"), "")
+  echoHi ("the enter step is: ", sample [e] or "?",
+          "  (the plugin waits to arrive after this one)")
+  local missing = missingConfig ()
+  if #missing > 0 then
+    echoWarn ("still needed:")
+    for _, m in ipairs (missing) do ColourNote (CLR_HI, "", "  " .. m) end
+  end
+  warnIfStale ()
+end
+
+function pmAliasCustom (name, line, wildcards)
+  pmCustomSet (wildcards [1])
+end
+
+-- A custom command is typed with semicolons in it.  Command stacking would
+-- split the line at the first one before any alias saw it, and the rest
+-- (wear port, ent port, ...) would go to the mud.  This callback gets the
+-- WHOLE line first (MUSHclient sendvw.cpp: OnPluginCommandEntered runs
+-- before SendCommand), so take it here and return "\t", which tells the
+-- client to discard the line.
+function OnPluginCommandEntered (sText)
+  local t = trim (sText or "")
+  local rest = string.match (t, "^portalmapper%s+custom(.*)$")
+  if rest and (rest == "" or string.match (rest, "^%s")) then
+    pmCustomSet (rest)
+    return "\t"
+  end
+  return sText
+end
+
+function pmAliasDual (name, line, wildcards)
+  setSerial ("dualweapon", "dual weapon", wildcards [1])
+  if gCfg.wish then
+    echo ("note: wish mode is ON, so this is not currently used.")
+  end
+end
+
+function pmAliasWear (name, line, wildcards)
+  setSerial ("wearportal", "wear-portal item", wildcards [1])
+  if not gCfg.wish then
+    echo ("note: wish mode is OFF, so this is not currently used.")
+  end
+end
+
+function pmAliasWish (name, line, wildcards)
+  local arg = string.lower (trim (wildcards [1] or ""))
+
+  if arg == "" then
+    arg = gCfg.wish and "off" or "on"
+  end
+
+  gCfg.wish = (arg == "on")
+  -- Picking wish / no-wish is picking a mode, so it ends custom mode.
+  local wasCustom = gCfg.customOn
+  gCfg.customOn = false
+  saveData ()
+  if wasCustom then
+    echo ("custom mode turned off (your custom command is kept - "
+          .. "'portalmapper custom' turns it back on).")
+  end
+
+  if gCfg.wish then
+    echoHi ("portal wish ", "ON", " - restore step: wearportal -> " .. restoreLive ())
+    if not gCfg.wearportal then
+      echoHi ("still needed: ", "portalmapper wearportal <id>", "")
+    end
+  else
+    echoHi ("portal wish ", "OFF", " - restore step: dualweapon -> " .. restoreLive ())
+    if not gCfg.dualweapon then
+      echoHi ("still needed: ", "portalmapper dualweapon <id>", "")
+    end
+  end
+
+  warnIfStale ()
+end
+
+function pmAliasDebug ()
+  gDebug = not gDebug
+  echoHi ("debug ", gDebug and "ON" or "OFF",
+          gDebug and " - extra progress notes."
+                  or "")
+end
+
+function pmAliasStatus ()
+  local mode = modeName ()
+  if mode == "custom" then
+    echoHi ("mode: ", "CUSTOM", "   command: " .. gCfg.custom)
+  else
+    echoHi ("mode: ", mode == "wish" and "WISH" or "no wish",
+            "   restore step: " .. restoreToken () .. " -> " .. restoreLive ())
+    if gCfg.custom then
+      echo ("  (custom command saved but off: " .. gCfg.custom .. ")")
+    end
+  end
+  echoHi ("bag (end bag): ", tostring (gCfg.bag or "not set"), "")
+  echoHi ("start bag: ", tostring (gCfg.startbag or "off"), "")
+  echoHi ("dual weapon: ", tostring (gCfg.dualweapon or "not set"), "")
+  echoHi ("wear portal: ", tostring (gCfg.wearportal or "not set"), "")
+  echoHi ("portals mapped: ", tostring (countMapped ()), "")
+  local stale = staleList ()
+  if #stale > 0 then
+    echoWarn ("  " .. #stale .. " of them still name older gear - portalmapper rewrite")
+  end
+  echoHi ("current room: ", tostring (gRoomNum or "unknown"), "")
+
+  if gRun then
+    echoHi ("RUNNING - portal ", gRun.index .. "/" .. #gRun.queue,
+            gRun.stopping and "  (stopping after this one)" or "")
+  else
+    echo ("idle.")
+  end
+
+  local missing = missingConfig ()
+  if #missing > 0 then
+    echoWarn ("not ready yet.  Still needed:")
+    for _, m in ipairs (missing) do
+      ColourNote (CLR_HI, "", "  " .. m)
+    end
+  end
+
+  echoHi ("commands: ", "pmhelp", "    settings window: portalmapper config")
+end
+
+function pmAliasHelp ()
+  ColourNote (CLR_NAME, "", "PortalValue " .. VERSION .. " - portal mapper (this was the PortalMapper plugin)")
+  echo ("maps a whole bag of handheld portals into the Aardwolf mapper, one at a time.")
+  Note ("")
+  ColourNote (CLR_WARN, "", "  WARNING: to map a portal, PortalMapper ENTERS it.  Every unmapped")
+  ColourNote (CLR_WARN, "", "  portal in the bag gets walked through, one after another.  Be careful")
+  ColourNote (CLR_WARN, "", "  with higher level portals - they can drop you into areas far above")
+  ColourNote (CLR_WARN, "", "  you.  Check first with ", CLR_HI, "", "portalmapper scan",
+              CLR_WARN, "", " (it shows each portal's level),")
+  ColourNote (CLR_WARN, "", "  and take out anything you are not ready for - or use a start bag.")
+  Note ("")
+  ColourNote (CLR_NAME, "", "  SETTINGS - do these first, and again any time your gear changes")
+  helpLine ("portalmapper config",       "a window showing all of these - click to change")
+  helpLine ("portalwish on",             "ONLY if you have the portal wish")
+  helpLine ("portalwish off",            "turn wish mode back off")
+  helpLine ("portalwish",                "flip wish mode, whichever way it is now")
+  helpLine ("portalmapper bag <id>",     "the bag your portals live in")
+  helpLine ("portalmapper dualweapon <id>", "weapon to re-wield (no-wish mode)")
+  helpLine ("portalmapper wearportal <id>",  "item to re-wear (wish mode)")
+  Note ("")
+  ColourNote (CLR_NAME, "", "  CUSTOM MODE - write the command yourself (third mode)")
+  helpLine ("portalmapper custom <cmd>", "use your own command instead of dual/wish")
+  helpLine ("portalmapper custom",       "turn custom mode back on (saved command)")
+  helpLine ("portalmapper custom off",   "back to dual / wish mode")
+  ColourNote (CLR_MSG, "", "  In your command, the word ", CLR_HI, "", "port",
+              CLR_MSG, "", " becomes each portal's number and ", CLR_HI, "", "bag",
+              CLR_MSG, "", " becomes")
+  ColourNote (CLR_MSG, "", "  portalbag.  Everything else is sent exactly as typed, so it can match")
+  ColourNote (CLR_MSG, "", "  portals you already mapped by hand.  It needs an enter step (ent works).")
+  ColourNote (CLR_MSG, "", "  Example:")
+  ColourNote (CLR_HI,  "", "    portalmapper custom take port bag;wear port;ent port;r port;put port bag;myrewear")
+  ColourNote (CLR_MSG, "", "  maps portal 3828209 as")
+  ColourNote (CLR_HI,  "", "    take 3828209 portalbag;wear 3828209;ent 3828209;r 3828209;put 3828209 portalbag;myrewear")
+  ColourNote (CLR_MSG, "", "  Type it on one line with single semicolons - the plugin catches it")
+  ColourNote (CLR_MSG, "", "  before command stacking can split it.")
+  Note ("")
+  ColourNote (CLR_NAME, "", "  START BAG AND END BAG - map only the portals you choose")
+  helpLine ("portalmapper startbag <id>", "bag of portals waiting to be mapped")
+  helpLine ("portalmapper startbag off",  "stop using a start bag")
+  helpLine ("portalmapper endbag <id>",   "where mapped portals go (same as bag)")
+  ColourNote (CLR_MSG, "", "  Put the portals you want mapped in the start bag and type ",
+              CLR_HI, "", "portalmapper go")
+  ColourNote (CLR_MSG, "", "  Each one is taken from the start bag, mapped, and put in the end bag.")
+  ColourNote (CLR_MSG, "", "  Anything that fails goes back in the start bag, so whatever is still")
+  ColourNote (CLR_MSG, "", "  in the start bag is what still needs mapping.  The mapper always")
+  ColourNote (CLR_MSG, "", "  stores the END bag (portalbag), since that is where portals live.")
+  Note ("")
+  ColourNote (CLR_NAME, "", "  THE WORDS THE MAPPER STORES INSTEAD OF ITEM NUMBERS")
+  helpLine ("dualweapon",              "sends 'dual' + whatever you set above")
+  helpLine ("wearportal",              "sends 'wear' + whatever you set above")
+  helpLine ("<verb> <n> portalbag",    "get/take/put item n with whatever bag you set")
+  Note ("")
+  ColourNote (CLR_MSG, "", "  Your bag, weapon and portal item numbers are NOT written into")
+  ColourNote (CLR_MSG, "", "  the mapper.  The words above are, and they turn into your current")
+  ColourNote (CLR_MSG, "", "  gear every time a portal is walked.  So a portal mapped at level")
+  ColourNote (CLR_MSG, "", "  50 still works at 201 with a different weapon, and moving all")
+  ColourNote (CLR_MSG, "", "  your portals into a new bag is one setting change - change it")
+  ColourNote (CLR_MSG, "", "  above and every portal you have ever mapped follows along.")
+  Note ("")
+  ColourNote (CLR_MSG, "", "  The one thing still written in is WHICH mode was used, so switching")
+  ColourNote (CLR_MSG, "", "  wish / no-wish / custom (or changing your custom command) needs ",
+              CLR_HI, "", "portalmapper rewrite")
+  ColourNote (CLR_MSG, "", "  afterwards.  It updates every portal already mapped, no re-walking,")
+  ColourNote (CLR_MSG, "", "  and it reminds you at the time.")
+  Note ("")
+  ColourNote (CLR_NAME, "", "  RUNNING")
+  helpLine ("portalmapper go",     "map every not-yet-mapped portal in the bag")
+  helpLine ("portalmapper start",  "same as go")
+  helpLine ("portalmapper resume", "same thing - use it after a failure")
+  helpLine ("portalmapper stop",   "stop after the current portal finishes")
+  helpLine ("portalmapper scan",   "just look in the bag, map nothing")
+  Note ("")
+  ColourNote (CLR_NAME, "", "  BOOKKEEPING")
+  helpLine ("portalmapper",            "status")
+  helpLine ("portalmapper list",       "every portal mapped so far")
+  helpLine ("portalmapper forget <id>","re-map that one on the next go")
+  helpLine ("portalmapper rewrite",    "point already-mapped portals at your new gear")
+  helpLine ("portalmapper forget all", "re-map everything on the next go")
+  helpLine ("portalmapper debug",      "extra progress notes")
+  helpLine ("pmhelp",                  "this screen")
+  helpLine ("portalmapper help",       "same as pmhelp")
+  helpLine ("pmconfig",                "same as portalmapper config")
+  helpLine ("portalvalue help",        "everything PortalValue does")
+  Note ("")
+  ColourNote (CLR_MSG, "", "  Add new portals to the bag any time and type ",
+              CLR_HI, "", "portalmapper go")
+  ColourNote (CLR_MSG, "", "  again - already-mapped portals are skipped, so only the new")
+  ColourNote (CLR_MSG, "", "  ones get walked.  Chaos portals all share one name but each")
+  ColourNote (CLR_MSG, "", "  one is tracked by its own item number, so they each get their")
+  ColourNote (CLR_MSG, "", "  own destination.")
+end
+
+-- =====================================================================
+-- Config window  (portalmapper config / pmconfig)  - PortalValue 5.0
+--
+-- Same chrome as the usage window and PupPaths: a themed_miniwindows
+-- ThemedTextWindow, link text is Lua run in this plugin, so the PM_Cfg*
+-- click handlers are GLOBAL.  Every button calls the SAME function its
+-- typed command calls (pmAliasWish, pmAliasBag, pmCustomSet, ...), so the
+-- window can never get out of step with the commands: same checks, same
+-- messages, same saveData.  saveData() calls cfgRedraw, so any change -
+-- from the window or typed - shows up at once while it is open.
+-- utils.inputbox is modal, so it is opened 0.1s later with DoAfterSpecial,
+-- never inside the mousedown hotspot callback.
+-- =====================================================================
+local CFG_WIN       = "PortalValue_pmconfig"
+local CFG_FONT      = "Consolas"
+local CFG_FONT_SIZE = 13
+local gCfgHaveWin   = pcall (require, "themed_miniwindows")
+local gCfgWin       = nil
+local gCfgCol       = {}
+
+local function ccol (hex)
+  if not gCfgCol [hex] then gCfgCol [hex] = ColourNameToRGB (hex) end
+  return gCfgCol [hex]
+end
+
+-- One line of style runs plus its hyperlinks.  Link positions count the
+-- VISIBLE text only, which is what TextRect indexes against.
+local function cline (segs)
+  local styles, links, pos = {}, {}, 1
+  for _, sg in ipairs (segs) do
+    if sg.text ~= "" then
+      styles [#styles + 1] = { text = sg.text, textcolour = ccol (sg.colour or CLR_MSG) }
+      if sg.code then
+        links [#links + 1] = { start = pos, stop = pos + #sg.text - 1, text = sg.code, label = sg.tip }
+      end
+      pos = pos + #sg.text
+    end
+  end
+  return styles, links
+end
+
+-- Never reuse an object the library no longer knows about (a zombie window
+-- has live hotspots and no window_map entry).
+local function cfgEnsure ()
+  if not gCfgHaveWin then return false end
+  if gCfgWin and not (ThemedWindowClass and ThemedWindowClass.window_map
+                      and ThemedWindowClass.window_map [CFG_WIN]) then
+    gCfgWin = nil
+    pcall (WindowDelete, CFG_WIN)
+  end
+  if not gCfgWin then
+    local ok, w = pcall (ThemedTextWindow,
+      CFG_WIN,
+      0, 0,              -- first-run position; after that it stays where dragged
+      700, 400,          -- default size; fit_contents sizes it to the text
+      "PortalMapper config",
+      "center",
+      true,              -- is_temporary: title-bar close button
+      false,             -- resizeable
+      false,             -- text_scrollable: it always fits
+      false, false,      -- selectable, copyable
+      false,             -- url_hyperlinks: ours are explicit
+      false,             -- autowrap
+      CFG_FONT, CFG_FONT_SIZE,
+      CFG_FONT, CFG_FONT_SIZE,
+      100, nil, true, false, nil,
+      "Close")
+    if not ok or not w then
+      gCfgHaveWin = false
+      return false
+    end
+    gCfgWin = w
+    pcall (function ()
+      local tr = gCfgWin.textrect
+      WindowFont (tr.window, tr.font, CFG_FONT, CFG_FONT_SIZE, true, false, false, false, 0)
+      tr.font_height = WindowFontInfo (tr.window, tr.font, 1)
+      tr:setLineSpacing (tr.line_spacing)
+    end)
+    local prior = gCfgWin.do_on_delete
+    gCfgWin.do_on_delete = function (self)
+      if prior then prior (self) end
+      if gCfgWin == self then gCfgWin = nil end
+    end
+  end
+  return true
+end
+
+local function pad (s, n)
+  s = tostring (s)
+  if #s >= n then return s .. " " end
+  return s .. string.rep (" ", n - #s)
+end
+
+local function cfgShow ()
+  if not cfgEnsure () then
+    pmAliasStatus ()
+    return
+  end
+  local w = gCfgWin
+  w:clear (false)
+  local function add (segs)
+    local st, lk = cline (segs)
+    w:add_text (st, false, lk)
+  end
+  local blank = { { text = " " } }
+
+  local mode = modeName ()
+  local function modeSeg (m, label, tip)
+    local cur = (mode == m)
+    return { text = cur and ("[" .. label .. "]") or label,
+             colour = cur and CLR_HI or CLR_TAG,
+             code = "PM_CfgMode('" .. m .. "')", tip = tip }
+  end
+  add { { text = " Mode:  ", colour = CLR_NAME },
+        modeSeg ("dual",   "dual weapon", "No portal wish: re-wield your dual weapon after each portal"),
+        { text = "   " },
+        modeSeg ("wish",   "portal wish", "You have the portal wish: re-wear your wear-portal item"),
+        { text = "   " },
+        modeSeg ("custom", "custom",      "Use your own mapping command (set below)") }
+  add { { text = "        click a mode to switch to it", colour = CLR_TAG } }
+  add (blank)
+
+  local function row (label, value, key, extra)
+    local segs = {
+      { text = " " .. pad (label, 15), colour = CLR_NAME },
+      { text = pad (value, 12), colour = CLR_MSG },
+      { text = "[change]", colour = CLR_HI, code = "PM_CfgEdit('" .. key .. "')",
+        tip = "Change the " .. string.lower (label) },
+    }
+    if extra then
+      segs [#segs + 1] = { text = "  " }
+      segs [#segs + 1] = extra
+    end
+    add (segs)
+  end
+  row ("Bag (end bag)", gCfg.bag or "not set", "bag")
+  row ("Start bag", gCfg.startbag or "off", "startbag",
+       gCfg.startbag and { text = "[off]", colour = CLR_HI, code = "PM_CfgStartOff()",
+                           tip = "Stop using a start bag" } or nil)
+  row ("Dual weapon", gCfg.dualweapon or "not set", "dualweapon")
+  row ("Wear portal", gCfg.wearportal or "not set", "wearportal")
+  add (blank)
+
+  add { { text = " Custom command ", colour = CLR_NAME },
+        { text = "[change]", colour = CLR_HI, code = "PM_CfgEdit('custom')",
+          tip = "Write or edit your custom mapping command" } }
+  add { { text = "   " .. (gCfg.custom or "(none yet - click [change] to write one)"),
+          colour = gCfg.custom and CLR_MSG or CLR_TAG } }
+  add { { text = "   'port' becomes each portal's number, 'bag' becomes portalbag (your bag).",
+          colour = CLR_TAG } }
+  add { { text = "   It needs an enter step (enter / ent / en).", colour = CLR_TAG } }
+  add (blank)
+
+  local steps = stepsFor ("1234567", bagToken (), restoreToken ())
+  add { { text = " Portal 1234567 would be mapped as:", colour = CLR_NAME } }
+  add { { text = "   " .. table.concat (steps, ";"), colour = CLR_HI } }
+
+  local missing = missingConfig ()
+  if mode == "custom" then
+    local problem = templateProblem (gCfg.custom)
+    if problem then table.insert (missing, 1, "custom command: " .. problem) end
+  end
+  if #missing > 0 then
+    add (blank)
+    add { { text = " Still needed:", colour = CLR_WARN } }
+    for _, m in ipairs (missing) do add { { text = "   " .. m, colour = CLR_WARN } } end
+  end
+  add (blank)
+
+  local stale = staleList ()
+  local top = { { text = " Portals mapped: ", colour = CLR_NAME },
+                { text = tostring (countMapped ()), colour = CLR_MSG } }
+  if #stale > 0 then
+    top [#top + 1] = { text = "   " .. #stale .. " use an older command  ", colour = CLR_WARN }
+    top [#top + 1] = { text = "[ Rewrite them ]", colour = CLR_HI, code = "PM_CfgRewrite()",
+                       tip = "Update their stored commands in the mapper (no walking)" }
+  end
+  add (top)
+  add { { text = " " },
+        { text = "[ Scan bag ]", colour = CLR_HI, code = "PM_CfgRun('scan')",
+          tip = "List what is in the bag - maps nothing" },
+        { text = "   " },
+        { text = "[ List mapped ]", colour = CLR_HI, code = "PM_CfgRun('list')",
+          tip = "Every portal mapped so far" },
+        { text = "   " },
+        { text = "[ Help ]", colour = CLR_HI, code = "PM_CfgRun('help')",
+          tip = "All PortalMapper commands" } }
+  add { { text = " To map new portals type ", colour = CLR_TAG },
+        { text = "portalmapper go", colour = CLR_HI },
+        { text = "  - it ENTERS every unmapped portal in the bag.", colour = CLR_WARN } }
+
+  pcall (function () w:fit_contents (2000, 700) end)
+  pcall (function () w:set_scroll (1) end)
+  w:draw ()
+  w:show ()
+  -- The layout's invisible drag bar (z 154) eats clicks on windows under it.
+  pcall (WindowSetZOrder, CFG_WIN, 99999)
+  pcall (Repaint)
+end
+
+-- saveData calls this.  Safe inside a link click: no WindowDelete here.
+cfgRedraw = function ()
+  if gCfgWin then cfgShow () end
+end
+
+function pmAliasConfig ()
+  cfgShow ()
+end
+
+function PM_CfgMode (m)
+  if m == "dual" then
+    pmAliasWish (nil, nil, { "off" })
+  elseif m == "wish" then
+    pmAliasWish (nil, nil, { "on" })
+  elseif m == "custom" then
+    if gCfg.custom then
+      pmCustomSet ("")
+    else
+      DoAfterSpecial (0.1, "PM_CfgPrompt('custom')", 12)
+    end
+  end
+  cfgRedraw ()
+end
+
+function PM_CfgEdit (key)
+  DoAfterSpecial (0.1, "PM_CfgPrompt('" .. tostring (key) .. "')", 12)
+end
+
+local CFG_PROMPTS = {
+  bag        = "Item number of the bag your portals live in (the END bag).\n"
+               .. "Mapped portals go here, and portalbag means this bag.",
+  startbag   = "Item number of a START bag (portals waiting to be mapped),\n"
+               .. "or the word off to stop using one.",
+  dualweapon = "Item number of the weapon to re-wield after each portal\n"
+               .. "(dual weapon mode - no portal wish).",
+  wearportal = "Item number of the item to re-wear after each portal\n"
+               .. "(portal wish mode).",
+  custom     = "Your custom mapping command, steps separated by ;\n"
+               .. "'port' becomes each portal's number, 'bag' becomes portalbag.\n"
+               .. "eg: take port bag;wear port;ent port;r port;put port bag;myrewear",
+}
+
+function PM_CfgPrompt (key)
+  local msg = CFG_PROMPTS [key]
+  if not msg then return end
+  local cur = gCfg [key]
+  local v = utils.inputbox (msg, "PortalMapper config", cur and tostring (cur) or "")
+  if not v then return end
+  v = trim (v)
+  if v == "" then return end
+  if key == "custom" then
+    pmCustomSet (v)
+  elseif key == "startbag" then
+    v = string.lower (v)
+    if v == "off" or string.match (v, "^%d+$") then
+      pmAliasStartbag (nil, nil, { v })
+    else
+      echoWarn ("the start bag has to be an item number, or off.")
+    end
+  elseif not string.match (v, "^%d+$") then
+    echoWarn ("that has to be an item number (digits only) - nothing changed.")
+  elseif key == "bag" then
+    pmAliasBag (nil, nil, { v })
+  elseif key == "dualweapon" then
+    pmAliasDual (nil, nil, { v })
+  elseif key == "wearportal" then
+    pmAliasWear (nil, nil, { v })
+  end
+  cfgRedraw ()
+end
+
+function PM_CfgStartOff ()
+  pmAliasStartbag (nil, nil, { "off" })
+end
+
+function PM_CfgRewrite ()
+  pmAliasRewrite ()
+  cfgRedraw ()
+end
+
+function PM_CfgRun (what)
+  if what == "scan" then pmAliasScan ()
+  elseif what == "list" then pmAliasList ()
+  elseif what == "help" then pmAliasHelp ()
+  end
+end
+
+-- =====================================================================
+-- Lifecycle
+-- =====================================================================
+function pm_on_install ()
+  loadData ()
+
+  gRun     = nil
+  gScan    = nil
+  gCurrent = nil
+  gRec     = nil
+  gRecGen  = gRecGen + 1
+  gStep    = "idle"
+  stopScanTriggers ()
+  EnableTimer ("pm_tick", false)
+
+  if IsConnected () then
+    syncRoom ()
+  end
+
+  -- 5.0: no load line of its own; PortalValue prints one for all parts.
+  -- Setup gaps still show up on 'portalmapper' and 'portalmapper go'.
+end
+
+function OnPluginEnable ()
+  pm_on_install ()
+end
+
+local function shutdown ()
+  gRun     = nil
+  gScan    = nil
+  gCurrent = nil
+  gRec     = nil
+  gRecGen  = gRecGen + 1
+  gStep    = "idle"
+  stopScanTriggers ()
+  EnableTimer ("pm_tick", false)
+end
+
+function OnPluginDisable ()
+  shutdown ()
+end
+
+function OnPluginClose ()
+  shutdown ()
+end
+
+function OnPluginConnect ()
+  syncRoom ()
+end
+
+function OnPluginDisconnect ()
+  if gRun then
+    echoWarn ("disconnected mid-run - the rest was not mapped.")
+  end
+  shutdown ()
+end
+
+-- mapped count, for the PortalValue load line
+function pm_mapped_count ()
+  return countMapped ()
+end
+end
+
+-- =========================================================================
+-- ===============  LIFECYCLE FOR ALL PARTS  (5.0)  =========================
+-- =========================================================================
+
+-- The two plugins folded in at 5.0. If either is still loaded, both copies
+-- would count every portal use and answer every dualweapon / portalbag
+-- alias twice, so unload it. UnloadPlugin may not unload the CALLER; this
+-- unloads another plugin, which is what mpm's remove does.
+local OLD_PLUGINS = {
+   { id = "3fa92c7bd184e55a9c02b6da", name = "PortalUse" },
+   { id = "c47a1f9b6e2d80513af7c264", name = "PortalMapper" },
+}
+
+function pv_retire_old()
+   for _, p in ipairs(OLD_PLUGINS) do
+      if IsPluginInstalled(p.id) then
+         local rc = UnloadPlugin(p.id)
+         if rc == 0 then
+            pv_echo(C.hdr .. "[PortalValue] Unloaded the old " .. C.val .. p.name .. C.hdr
+                    .. " plugin - it is part of PortalValue now, and its data carried over.")
+         else
+            pv_echo(C.bad .. "[PortalValue] The old " .. p.name .. " plugin is still loaded and could not be"
+                    .. " unloaded (code " .. tostring(rc) .. "). Remove it, or every portal is handled twice.")
+         end
+      end
+   end
+end
+
+function OnPluginInstall()
+   pv_on_install()
+   pu_on_install()
+   pm_on_install()
+   local _, total = count_types()
+   pv_echo(C.hdr .. "[PortalValue] Loaded v" .. VERSION .. ". " .. C.num .. #pv_history .. C.hdr .. " result(s), "
+           .. C.num .. total .. C.hdr .. " cataloged ("
+           .. (pd_auto and (C.ok .. "auto ON") or (C.bad .. "auto OFF")) .. C.hdr .. "), "
+           .. C.num .. pu_tracked_count() .. C.hdr .. " in portaluse, "
+           .. C.num .. pm_mapped_count() .. C.hdr .. " mapped by portalmapper. Type "
+           .. C.ok .. "portalvalue help" .. C.hdr .. ".")
+   DoAfterSpecial(1, "pv_retire_old()", 12)
+   DoAfterSpecial(2, "pv_check()", 12)
+end
 ]]>
 </script>
 </muclient>
