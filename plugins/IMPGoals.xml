@@ -10,7 +10,7 @@
    purpose="Set Instinct / Mastery / Potential goals and see what it costs to reach them"
    date_written="2026-11-18"
    requires="4.73"
-   version="1.5"
+   version="1.6"
    save_state="y"
 >
 </plugin>
@@ -19,13 +19,13 @@
 IMPGoals - author Eric
 ====================================================================
 WHAT IT DOES
-  impgoals config   (or imp config) silently runs instinct, mastery and potential (none of
+  impgoals          (or impgoals config / imp config) silently runs instinct, mastery and potential (none of
                     their output shows), then opens a small window with 3
                     Instinct slots, 3 Mastery slots and 1 Potential line.
                     Click a slot's name to pick the skill / mastery type
                     from a list, click the number box to set the goal, [x]
                     to delete it. A goal you reach deletes itself.
-  impgoals          re-reads your levels silently and echoes what it costs
+  impgoals echo     re-reads your levels silently and echoes what it costs
                     to reach every goal you set.
   impgoals <chan>   the same, as ONE line to say / reply / spo / gt / ft / clan.
 
@@ -73,6 +73,8 @@ MAINTAINER NOTES
     every goal whose level is now at or past it, after each silent read
     and on each window draw, and says which. A goal at or below the current
     level is refused when typed.
+  - v1.6: bare "impgoals" opens the window like impgoals config (Eric's
+    request); the cost echo moved to "impgoals echo" (or totals).
   - Window: themed_miniwindows ThemedTextWindow, MarketWatch/Partroxshit
     pattern. Links run Lua; input box, picker and x are all run from a
     timer, not from inside the click. Scroll is pinned to the top on first open
@@ -81,8 +83,8 @@ MAINTAINER NOTES
 -->
 
 <aliases>
-  <alias match="^imp(?:goals)? +config$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_config"></alias>
-  <alias match="^impgoals$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_totals"></alias>
+  <alias match="^(?:imp(?:goals)? +config|impgoals)$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_config"></alias>
+  <alias match="^impgoals +(?:echo|totals?)$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_totals"></alias>
   <alias match="^impgoals +(say|reply|spo|gt|ft|clan)$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_channel"></alias>
   <alias match="^impgoals +clear$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_clear"></alias>
   <alias match="^impgoals +reload$" enabled="y" regexp="y" ignore_case="y" sequence="100" script="impgoals_reload"></alias>
@@ -96,7 +98,7 @@ dofile (GetInfo (60) .. "aardwolf_colors.lua")
 local gHaveCapture = pcall (require, "wrapped_captures")
 local gHaveWin     = pcall (require, "themed_miniwindows")
 
-local VERSION   = "1.5"
+local VERSION   = "1.6"
 local DIR       = GetPluginInfo (GetPluginID (), 20)
 local DATA_FILE = DIR .. "IMPGoals_data.lua"
 
@@ -434,7 +436,7 @@ end
 
 function IMPGoals_WinOpen (keep_scroll)
   if not gHaveWin or type (ThemedTextWindow) ~= "function" then
-    tag ("@x099themed_miniwindows did not load@W - no window possible. Use @x048impgoals@W instead.")
+    tag ("@x099themed_miniwindows did not load@W - no window possible. Use @x048impgoals echo@W instead.")
     return false
   end
   if gWin and not (ThemedWindowClass and ThemedWindowClass.window_map
@@ -739,12 +741,12 @@ end
 local function echo_totals ()
   local d = me ()
   if #d.levels == 0 then
-    tag ("No levels read yet - type @x048impgoals config@W first.")
+    tag ("No levels read yet - type @x048impgoals@W first.")
     return
   end
   local res = IMPGoals_Compute (d)
   if #res.items == 0 then
-    tag ("No goals left to reach. Set some with @x048impgoals config@W.")
+    tag ("No goals left to reach. Set some with @x048impgoals@W.")
     return
   end
   tag ("Cost to reach your goals @W(from your current levels; banked QP / gold / trains not taken off):")
@@ -833,7 +835,7 @@ end
 function impgoals_window (name, line, wc)
   if not core_ready () then return end
   if #me ().levels == 0 then
-    tag ("No levels read yet - type @x048impgoals config@W first.")
+    tag ("No levels read yet - type @x048impgoals@W first.")
     return
   end
   IMPGoals_WinOpen (false)
@@ -854,7 +856,7 @@ function impgoals_channel (name, line, wc)
   read_all (function (ok, err)
     if not ok then tag ("@x099" .. err .. "@W - using the levels read last time.") end
     if #me ().levels == 0 then
-      tag ("No levels read yet - type @x048impgoals config@W first.")
+      tag ("No levels read yet - type @x048impgoals@W first.")
       return
     end
     local msg = channel_line ()
@@ -889,8 +891,8 @@ function impgoals_reload (name, line, wc)
 end
 
 local HELP = {
-  { "impgoals config",    "read your levels silently and open the goals window (imp config works too)" },
-  { "impgoals",           "echo what it costs to reach your goals" },
+  { "impgoals",           "read your levels silently and open the goals window (also impgoals config)" },
+  { "impgoals echo",      "echo what it costs to reach your goals" },
   { "impgoals <channel>", "report it in one line: say reply spo gt ft clan" },
   { "impgoals clear",     "remove all your goals" },
   { "impgoals help",      "this help" },
@@ -914,7 +916,7 @@ load_db ()
 
 function OnPluginInstall ()
   if core_ready () then
-    tag ("@x048v" .. VERSION .. "@W loaded. Type @x048impgoals config@W to set goals, @x048impgoals help@W for help.")
+    tag ("@x048v" .. VERSION .. "@W loaded. Type @x048impgoals@W to set goals, @x048impgoals help@W for help.")
   end
 end
 
