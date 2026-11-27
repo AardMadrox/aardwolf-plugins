@@ -9,7 +9,7 @@
    language="Lua"
    purpose="All-around key manager: keyring window, walk-to key rooms, keyrecord, krk, warnkey"
    date_written="2026-06-18"
-   version="3.8"
+   version="3.9"
    save_state="y"
 >
 </plugin>
@@ -113,6 +113,9 @@ HISTORY
   v1.x KeyWarning: Crynn 24h spouse warning + missing-key list.
   v1.9-2.7 (2026-11-25): window, keyroom, tabs, keyrecord, own krk, Key
   Added, [remove]/[delete], warnkey, renamed Keycheck (same plugin id).
+  v3.9 (2026-11-27): [ Refresh ] link after the tabs (KW_Refresh): reads
+  keyring data again and redraws in place, same tab and scroll, with a
+  one-line "Refreshed: x of y" note instead of the keycheck summary.
   v3.8 (2026-11-25): hand edits to the data file are never saved over.
   disk_text holds the file as last read or written; Sync() (at the start
   of keycheck, keyrecord, keyroom, warnkey, [go], [delete] and every
@@ -375,7 +378,7 @@ HISTORY
 require "gmcphelper"
 
 -- Keep in step with version= above; shown on load so a reload is visible.
-local VERSION = "3.8"
+local VERSION = "3.9"
 
 -- Standard colour theme
 local CLR_TAG  = "#875FFF"   -- x099 brackets
@@ -850,6 +853,8 @@ local function TabSegs()
     end
     segs[#segs + 1] = { text = "   " }
   end
+  segs[#segs + 1] = { text = "[ Refresh ]", colour = CLR_NAME, code = "KW_Refresh()",
+                      tip = "Read your keyring again (a key you took off, new timers)" }
   return segs
 end
 
@@ -1211,6 +1216,7 @@ function KeyCheckHelp(name, line, wildcards)
   local window = {
     { "[ 201 ]  [ Sub ]", "Tabs: keys for level 201, and keys you gather below 201." },
     { "",                 "Click a tab to switch." },
+    { "[ Refresh ]",      "Read your keyring again: shows a key you took off by hand, new timers." },
     { "[go]",             "Walk there with the mapper (the key name works too)." },
     { "[remove]",         "Take that key off your keyring (it goes to your inventory)." },
     { "[delete]",         "Delete the key from Keycheck for good. Click once, it turns into" },
@@ -1700,6 +1706,20 @@ local function FinishRecord()
   RedrawIfOpen()
 end
 
+-- set by [ Refresh ]: the next keycheck result redraws in place
+local refreshing = false
+
+-- [ Refresh ] click: read the keyring again and redraw in place (same tab,
+-- same scroll), so a key taken off by hand or a timer that changed shows.
+function KW_Refresh()
+  if capture_mode then return end
+  Sync()
+  refreshing = true
+  manual_check = true
+  last_warn = os.time()
+  StartKeyringCapture("check")
+end
+
 -- Manual keycheck alias: open the tab for your level.
 function ManualKeyCheck(name, line, wildcards)
   Sync()
@@ -1831,15 +1851,20 @@ function KeyringEnd(name, line, wildcards)
   end
   last_have = have
 
+  local was_refresh = refreshing
+  refreshing = false
   local rows, short = BuildRows(cur_tab, have)
-  if #rows == 0 then
+  if was_refresh then
+    KeyNote(string.format("Refreshed: %d of %d %s keys on your keyring.", #rows - short, #rows, cur_tab),
+            short > 0 and CLR_MISS or CLR_HI)
+  elseif #rows == 0 then
     KeyNote("The " .. cur_tab .. " tab has no keys yet; keyrecord adds them.")
   elseif short == 0 then
     KeyNote(string.format("All %d %s keys present on your keyring.", #rows, cur_tab), CLR_HI)
   else
     KeyNote(string.format("MISSING %d %s key(s) -- see the Keyring window.", short, cur_tab), CLR_MISS)
   end
-  ShowKeyWindow(false)
+  ShowKeyWindow(was_refresh)
 
   -- warnkey: a watched key under MELT_HOURS gets a [Gather Keys] line in
   -- x099 / x045; a live one above that shows its time left; an expired or
