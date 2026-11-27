@@ -8,7 +8,7 @@
      language="Lua"
      purpose="Tracks worn portal usage with colour output; can show destination area from PortalDex."
      date_written="2026-06-08"
-     version="2.4"
+     version="2.5"
      save_state="y"
   >
   </plugin>
@@ -1050,7 +1050,7 @@ end
 ---------------------------------------------------------
 
 function OnPortalHelp ()
-  ColourNote(TC.hdr,"","PortalUse 2.4")
+  ColourNote(TC.hdr,"","PortalUse 2.5")
   ColourNote(TC.val,"","Commands:")
   ColourNote(TC.val,"","  portaluse [mode]           -- Open the usage window (sort: high, low, alpha, ralpha)")
   ColourNote(TC.num, "","       click [ignore] on a row to ignore a portal; [ Show ignored ] to restore")
@@ -1060,6 +1060,7 @@ function OnPortalHelp ()
   ColourNote(TC.val,"","  portalarea on|off          -- Show destination area + landing room per portal")
   ColourNote(TC.num, "","       requires PortalValue 3.3 or higher (uses its portal catalog)")
   ColourNote(TC.num, "","       run 'portaldex rooms' there if room numbers are missing")
+  ColourNote(TC.num, "","       restrung a portal? run 'portaldex scan missing' so its new name gets an area")
   ColourNote(TC.val,"","  portalignore <portal>      -- Toggle ignoring a portal")
   ColourNote(TC.val,"","  portalignore list          -- Show ignored portals")
   ColourNote(TC.val,"","  portalclean                -- Remove all portals with 0 uses")

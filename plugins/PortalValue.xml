@@ -55,7 +55,7 @@
    purpose="Find the closest saved portal + speedwalk to your room, and catalog your portals by type."
    date_written="2026-06-27"
    requires="4.73"
-   version="3.9"
+   version="4.0"
 >
 </plugin>
 
@@ -191,6 +191,20 @@ HOW THE CATALOG WORKS
   Portals catalog automatically when you "id" one (pd_auto), or in bulk
   with "portaldex scan", which walks your portal bag issuing an id per
   item.
+
+  STALE GOLDEN RECORDS (v4.0). A golden chaos portal id'd BEFORE it was
+  restrung stays in the catalog as "a golden chaos portal" (not
+  restrung), so PortalUse, which looks portals up by name, cannot find
+  its new name. "missing" never caught these: the mapper ref resolves to
+  the old record fine. Eric had 11 of them. "portaldex scan missing" now
+  also re-ids every catalogued "a golden chaos portal" that is not
+  flagged restrung (stale_golden_refs), found by an EXACT ref match
+  (refs index or the id number), never the keyword prefix fallback,
+  which could hit any golden. scan_rechecked holds the ids done this
+  scan so the auto-repeat passes never requeue them, and scan_pass_start
+  counts only the truly missing ones so the rechecks do not fake
+  progress. Bright pulsating chaos portals are NOT rechecked: there are
+  hundreds unrestrung, which would make every scan missing take ages.
 
 HOW THE PATHING WORKS
   compute_for_room does everything against the mapper's own sqlite
@@ -354,7 +368,7 @@ local MAPPER_ID = "b6eae87ccedd84f510b74714"
 local GMCP_ID   = "3e7dedbe37e44942dd46d264"
 
 -- theme colours
-local VERSION = "3.9"   -- keep in step with the version= attribute above
+local VERSION = "4.0"   -- keep in step with the version= attribute above
 
 local C = { hdr="@x099", val="@x045", num="@W", ok="@x048", bad="@R" }
 
@@ -447,6 +461,7 @@ scan_queue = scan_queue or {}
 pd_speed = pd_speed or 2.0                      -- seconds between scan steps
 scan_mode = nil                                 -- "missing" => auto-repeat
 scan_pass_start = 0
+scan_rechecked = {}                             -- stale golden ids re-id'd this scan
 pd_scan_current_ref = ""                        -- ref being scanned right now
 
 -- ---- catalog persistence: own file (survives reinstalls) ----
@@ -855,6 +870,38 @@ end
 
 function pd_rooms() pd_stamp_rooms(false) end
 
+-- Catalogued portals still named "a golden chaos portal" and not flagged
+-- restrung: id'd before a restring, so the record may hold the stock name.
+-- Exact ref matches only (refs index or the id number itself): the keyword
+-- prefix fallback in resolve_ref could land on any golden. skip = ids
+-- already rechecked this scan.
+local function stale_golden_refs(skip)
+   local path = get_db_path()
+   if not path then return {} end
+   local ok_sql, sqlite3 = pcall(require, "sqlite3")
+   if not ok_sql then return {} end
+   local db = sqlite3.open(path)
+   if not db then return {} end
+   local idx = build_ref_index()
+   local list, seen = {}, {}
+   for row in db:nrows("SELECT dir FROM exits WHERE fromuid IN ('*','**')") do
+      local ref, container = extract_ref(row.dir)
+      local bag = (pd_bag ~= "" and pd_bag) or container
+      if ref and bag then
+         local r = ref:lower()
+         local id = idx[r] or (catalog[r] and r)
+         local e = id and catalog[id]
+         if e and not seen[id] and not (skip and skip[id]) and not e.restrung
+            and (e.name or ""):lower() == "a golden chaos portal" then
+            seen[id] = true
+            list[#list+1] = { ref = ref, container = bag, recheck = id }
+         end
+      end
+   end
+   db:close()
+   return list
+end
+
 local function load_portal_refs(only_missing)
    local path, why = get_db_path()
    if not path then echo(C.hdr.."[PortalDex] "..esc(why or "no mapper db")..".") return {} end
@@ -877,6 +924,7 @@ local function load_portal_refs(only_missing)
 end
 
 function pd_scan_finish_pass()
+   local was_missing = (scan_mode == "missing")
    if scan_mode == "missing" then
       local remaining = load_portal_refs(true)
       if #remaining > 0 and #remaining < scan_pass_start then
@@ -895,6 +943,18 @@ function pd_scan_finish_pass()
    end
    pd_stamp_rooms(true)
    pd_summary()
+   if was_missing then
+      local checked, renamed = 0, 0
+      for id in pairs(scan_rechecked) do
+         checked = checked + 1
+         local e = catalog[id]
+         if e and (e.name or ""):lower() ~= "a golden chaos portal" then renamed = renamed + 1 end
+      end
+      if checked > 0 then
+         echo(C.hdr.."[PortalDex] Re-checked "..C.num..checked..C.hdr.." golden chaos portals; "
+             ..C.num..renamed..C.hdr.." had been restrung and now carry their new name.")
+      end
+   end
 end
 
 function pd_scan_step()
@@ -902,6 +962,7 @@ function pd_scan_step()
    local item = table.remove(scan_queue, 1)
    if not item then scan_active = false; pd_scan_finish_pass(); return end
    pd_scan_current_ref = (item.ref or ""):lower()
+   if item.recheck then scan_rechecked[item.recheck] = true end
    Send("take " .. item.ref .. " " .. item.container)
    Send("id "   .. item.ref)
    Send("put "  .. item.ref .. " " .. item.container)
@@ -925,10 +986,16 @@ function pd_scan(name, line, wc)
    end
 
    if arg == "missing" then
+      scan_rechecked = {}
       scan_queue = load_portal_refs(true)
+      local nmiss = #scan_queue
+      local stale = stale_golden_refs(nil)
+      for _, it in ipairs(stale) do scan_queue[#scan_queue+1] = it end
       if #scan_queue == 0 then echo(C.hdr.."[PortalDex] No missing portals to scan.") return end
-      scan_mode = "missing"; scan_pass_start = #scan_queue
-      echo(C.hdr.."[PortalDex] Scanning "..C.num..#scan_queue..C.hdr.." MISSING portals (auto-repeats until done). "..C.ok.."portaldex scan stop"..C.hdr.." to pause.")
+      scan_mode = "missing"; scan_pass_start = nmiss
+      echo(C.hdr.."[PortalDex] Scanning "..C.num..nmiss..C.hdr.." MISSING portals"
+          ..((#stale > 0) and (C.hdr.." + "..C.num..#stale..C.hdr.." golden chaos portals to re-check for a restring") or "")
+          .." (auto-repeats until done). "..C.ok.."portaldex scan stop"..C.hdr.." to pause.")
       scan_active = true; pd_scan_step()
       return
    end
@@ -1666,6 +1733,7 @@ function pv_help_all()
    pv_echo(C.hdr .. "  portaldex remove <id|name> " .. C.val .. "- remove one portal from the catalog")
    pv_echo(C.hdr .. "  portaldex clear    " .. C.val .. "- wipe the catalog")
    pv_echo(C.hdr .. "Portals also catalog automatically whenever you " .. C.ok .. "id" .. C.hdr .. " one.")
+   pv_echo(C.hdr .. "Restrung a portal? Run " .. C.ok .. "portaldex scan missing" .. C.hdr .. " (or " .. C.ok .. "id" .. C.hdr .. " it) so the catalog picks up its new name.")
    pv_echo(C.bad .. "Scan uses the LAST item id/keyword in each mapper portal command (take/get, or your custom command).")
 end
 
