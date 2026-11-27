@@ -8,7 +8,7 @@
      language="Lua"
      purpose="Tracks worn portal usage with colour output; can show destination area from PortalDex."
      date_written="2026-06-08"
-     version="2.3"
+     version="2.4"
      save_state="y"
   >
   </plugin>
@@ -122,6 +122,10 @@ WHEN EDITING
   * clean_name strips ANSI escapes and angle bracket tags before a name is
     used as a table key, so the key always matches between the scan path
     and the usage path.
+  * An EMPTY portal name is never counted or loaded (2.4). Eric's data
+    file had a "|311" usage line, a blank name with the same count as
+    "a ring of pale mushrooms"; how it got there is unknown. load_data
+    drops such lines, so the next save cleans an old file.
   * The portaluse alias regexp uses negative lookaheads so that
     "portalusetop" and "portaluse help" are not swallowed by the general
     "portaluse..." form.
@@ -398,7 +402,7 @@ local function load_data ()
     elseif line == "COLORS" then section = "colors"
     elseif section == "usage" then
       local name, count = line:match("^(.*)|(%d+)$")
-      if name and count then usage[name] = tonumber(count) end
+      if name and count and name ~= "" then usage[name] = tonumber(count) end
     elseif section == "ignore" and line ~= "" then
       ignore[line] = true
     elseif section == "bag" and line ~= "" then
@@ -506,6 +510,7 @@ end
 
 function OnPortalEnter (name, line, wildcards, styles)
   local portal = clean_name(wildcards[1])
+  if portal == "" then return end
   if ignore[portal] then return end
   usage[portal] = (usage[portal] or 0) + 1
   if not colors[portal] then
@@ -1045,7 +1050,7 @@ end
 ---------------------------------------------------------
 
 function OnPortalHelp ()
-  ColourNote(TC.hdr,"","PortalUse 2.3")
+  ColourNote(TC.hdr,"","PortalUse 2.4")
   ColourNote(TC.val,"","Commands:")
   ColourNote(TC.val,"","  portaluse [mode]           -- Open the usage window (sort: high, low, alpha, ralpha)")
   ColourNote(TC.num, "","       click [ignore] on a row to ignore a portal; [ Show ignored ] to restore")
