@@ -9,7 +9,7 @@
    language="Lua"
    purpose="All-around key manager: keyring window, walk-to key rooms, keyrecord, krk, warnkey"
    date_written="2026-06-18"
-   version="4.1"
+   version="4.2"
    save_state="y"
 >
 </plugin>
@@ -116,6 +116,11 @@ HISTORY
   v1.x KeyWarning: Crynn 24h spouse warning + missing-key list.
   v1.9-2.7 (2026-11-25): window, keyroom, tabs, keyrecord, own krk, Key
   Added, [remove]/[delete], warnkey, renamed Keycheck (same plugin id).
+  v4.2 (2026-11-27): keyrecord matched a listed key by NAME only, so a
+  Gallows Hill "a gate key" moved the Mistridge "a gate key" to Gallows.
+  Now the area must match too (SameKey: the entry's room -> mapper db
+  area vs the room you record in; no room = same source or area label).
+  A same-named key from another area is added as a new key.
   v4.1 (2026-11-27): [move] on every row: moves the key to the other tab
   (201 <-> Sub), so Sub keys gathered at 201 can live on the 201 tab.
   v4.0 (2026-11-27): [ Remove All ] after [ Refresh ]: two clicks, takes
@@ -386,7 +391,7 @@ HISTORY
 require "gmcphelper"
 
 -- Keep in step with version= above; shown on load so a reload is visible.
-local VERSION = "4.1"
+local VERSION = "4.2"
 
 -- Standard colour theme
 local CLR_TAG  = "#875FFF"   -- x099 brackets
@@ -1229,7 +1234,8 @@ local HELP = {
                                  "you by a mob. Passes count too: anything the keyring accepts is",
                                  "recorded with this room (two at once = both). New ones join the tab",
                                  "for your level and go on the keyring on every later pickup; one",
-                                 "already listed just gets this room. If Search and Destroy has seen",
+                                 "already listed from this area just gets this room (a same-named key",
+                                 "from another area is a new key). If Search and Destroy has seen",
                                  "the mob in more than one room, it gets the area's first room",
                                  "instead (marked *). Gives up after 10 minutes." },
   { "keyrecord sub / 201",       "Same, but into that tab whatever your level." },
@@ -1637,15 +1643,28 @@ local function DefaultCmd(name)
   return last and ("keyring replace " .. last) or nil
 end
 
--- Add or update one looted key on rec.tab. A name already on the tab gets
--- its room set (preferring the entry with the same source); a new name is
--- added at the end of that tab.
+-- Is list entry k the same key as one just got here? The name must match,
+-- and then the AREA decides: lots of keys share a name ("a gate key"), so
+-- one from another area is a different key, never written over. The
+-- entry's area comes from its room in the mapper db; with no room (or no
+-- db) it falls back to the same source or the same area label.
+local function SameKey(k, want, from)
+  if k.name:lower() ~= want then return false end
+  local zone = rec.zone ~= "" and RoomZone(k.room) or nil
+  if zone then return zone == rec.zone end
+  if CleanName(k.from) == CleanName(from) then return true end
+  return rec.area ~= "" and CleanName(k.area) == CleanName(rec.area)
+end
+
+-- Add or update one looted key on rec.tab. The same key (same name, same
+-- area, see SameKey) gets its room set, preferring the entry with the same
+-- source; anything else is a new key at the end of that tab.
 local function RecordKey(item, from)
   local list = keys[rec.tab]
   local want = CleanName(item)
   local hit = nil
   for i, k in ipairs(list) do
-    if k.name:lower() == want then
+    if SameKey(k, want, from) then
       if not hit then hit = i end
       if CleanName(k.from) == CleanName(from) then hit = i break end
     end
