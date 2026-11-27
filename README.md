@@ -11,7 +11,7 @@ self-contained `.xml` file in the [`plugins/`](plugins/) folder.
 | **PortalValue** | Finds the closest saved portal to a room and shows the value of a portal to it. |
 | **PortalUse** | Tracks how often you use each worn portal, with a top-usage list (`portalusetop`) and an optional destination area + landing room lookup. |
 | **FHX** | Repeatedly casts `incomp` on yourself or others until healed; `hx` casts once; queues commands typed in combat; optional auto-heal after each fight. |
-| **PupPaths** | Step-by-step pup pathing with named, saved routes. |
+| **PupPaths** | Step-by-step pup pathing with named, saved routes. `pp list` opens a window to add, edit and delete paths. |
 | **ChaosCast** | Tracks chaos-portal casts (normal vs golden). |
 | **MarketWatch** | Watches the marketplace and the live auction/market channels for items on your list and gives you a one-click bid or buyout up to a maximum price you set per item (`marketw`), optionally as a pop-up window (`marketw popup on`). |
 | **Nokfah's Dull with Epic Bonus Reward tracking** | Character development tracker (`dull`) — session/lifetime XP, gold, QP, trains, TP, epics, and per-epic lifetime reward records (`dull epic<name>`). Campaign and quest reports show your best and average time **for the level you took it at** (`[lvl 134 best 1m 32s | avg 2m 57s]`), read from Search and Destroy's history if you have it installed. Modified from Nokfah's DullTracker. |

@@ -9,13 +9,14 @@
    purpose="Step-by-step pup pathing with named routes"
    date_written="2026-06-14"
    requires="4.40"
-   version="2.1"
+   version="2.2"
+   save_state="y"
 >
 <description trim="y">
 PupPaths: Walk named paths one room at a time. Type the path keyword to advance.
 Commands:
   pp help                    - Show help
-  pp list                    - List all defined paths
+  pp list                    - Open the paths window (add / delete from there)
   pp add &lt;name&gt; &lt;dirs&gt;       - Add a path
   pp del &lt;name&gt;              - Delete a path
   pp reset &lt;name&gt;            - Reset position on a path to step 1
@@ -50,7 +51,7 @@ WHAT IT DOES
 
 COMMANDS
   pp help                show help
-  pp list                list paths, positions and recorded state
+  pp list                open the paths window (see THE PATHS WINDOW)
   pp add <name> <dirs>   add a path
   pp del <name>          delete a path
   pp reset <name>        reset a path to step 1
@@ -129,6 +130,23 @@ DATA AND STATE
   and OpenForRead still falls back to the old mangled names once if the
   proper file is missing, so nothing was lost. Do not remove that
   fallback without checking the old files are gone.
+
+THE PATHS WINDOW (v2.2)
+  pp list opens a themed_miniwindows ThemedTextWindow, same recipe as
+  Keycheck / MarketWatch: link text is Lua run in this plugin
+  (text_rect.lua browseUrl -> loadstring), so the PP_* click handlers are
+  GLOBAL. set_scroll runs AFTER fit_contents or the top rows lose their
+  hotspots, and WindowSetZOrder 99999 keeps the layout's invisible drag
+  bar (z 154) from eating clicks. save_state="y" is only there so the
+  window remembers where it was dragged (movewindow uses SetVariable).
+  Buttons: [ Add Path ] asks for a name then the dirs (utils.inputbox,
+  deferred 0.1s with DoAfterSpecial so the modal box does not open inside
+  the mousedown hotspot callback). An existing name asks to replace it and
+  pre-fills its dirs, which doubles as an edit. [delete] needs two clicks
+  ([sure?] for 5 seconds). The ON/OFF and charge words toggle. Clicking a
+  path name prints its full dirs (long ones are cut short in the window).
+  SaveData() redraws the window if it is open, so step counts stay live.
+  Falls back to the old output-window list if themed_miniwindows fails.
 
 WHEN EDITING
   * requestRoom() sends a raw telnet subnegotiation packet with SendPkt.
@@ -232,6 +250,10 @@ local YELLOW = "#875FFF"   -- @x099 : directions/commands to run, help placehold
 
 local function CN(...) ColourNote(...) end
 local function Msg(...) CN(GREEN, BG, "[PupPaths] ", ...) end
+
+-- Defined with the paths window further down; SaveData calls it so the
+-- window's step counts follow the walk.
+local RedrawIfOpen
 
 ---------------------------------------------------------
 -- GMCP access (via the standard aard GMCP handler plugin)
@@ -366,6 +388,7 @@ local function SaveData()
             .. "|" .. table.concat(roomList, ",") .. "\n")
     end
     f:close()
+    if RedrawIfOpen then RedrawIfOpen() end
 end
 
 local function LoadData()
@@ -632,7 +655,7 @@ end
 function pp.help()
     CN(GREEN,  BG, "PupPaths Help")
     CN(WHITE,  BG, "pp help                  ", CYAN,   BG, "- Show this help")
-    CN(WHITE,  BG, "pp list                  ", CYAN,   BG, "- List all paths and current position")
+    CN(WHITE,  BG, "pp list                  ", CYAN,   BG, "- Open the paths window (add or delete paths there)")
     CN(WHITE,  BG, "pp add ", YELLOW, BG, "<name> <dirs>", WHITE, BG, "      ", CYAN, BG, "- Add a path  eg: pp add skd 3e2s;op d;d2sw3s")
     CN(WHITE,  BG, "pp del ", YELLOW, BG, "<name>", WHITE, BG, "             ", CYAN, BG, "- Delete a path")
     CN(WHITE,  BG, "pp reset ", YELLOW, BG, "<name>", WHITE, BG, "           ", CYAN, BG, "- Reset position on a path back to step 1")
@@ -648,13 +671,23 @@ function pp.help()
     CN(GREEN,  BG, "Charge: ", ppCharge  and GREEN or RED, BG, ppCharge  and "ENABLED" or "DISABLED")
 end
 
-function pp.list()
+-- Path names, alphabetical, so the list never shuffles between redraws.
+local function SortedNames()
+    local names = {}
+    for pname in pairs(paths) do names[#names + 1] = pname end
+    table.sort(names)
+    return names
+end
+
+-- Output-window list: the fallback when themed_miniwindows will not load.
+local function ListNotes()
     if next(paths) == nil then
         Msg(WHITE, BG, "No paths defined. Use: pp add <name> <dirs>")
         return
     end
     CN(GREEN, BG, "PupPaths — Defined Paths")
-    for pname, p in pairs(paths) do
+    for _, pname in ipairs(SortedNames()) do
+        local p = paths[pname]
         local steps = parseDirs(p.dirs)
         local total = #steps
         CN(WHITE,  BG, pname .. "  ",
@@ -670,9 +703,314 @@ function pp.list()
     end
 end
 
+---------------------------------------------------------
+-- Paths window (pp list)
+-- Same chrome as Keycheck / MarketWatch: themed_miniwindows'
+-- ThemedTextWindow with the package theme, our palette on the text only.
+-- Link text is Lua run in this plugin (text_rect.lua browseUrl ->
+-- loadstring), so the PP_* click handlers are global.
+---------------------------------------------------------
+
+local gHaveWin = pcall(require, "themed_miniwindows")
+
+local WIN_ID        = "PupPaths_list"
+local WIN_FONT      = "Consolas"
+local WIN_FONT_SIZE = 13
+local DIRS_SHOWN    = 60     -- longer dirs are cut short; click the name for all
+
+local gWin = nil
+
+local gColCache = {}
+local function col(hex)
+    if not gColCache[hex] then gColCache[hex] = ColourNameToRGB(hex) end
+    return gColCache[hex]
+end
+
+-- One line of style runs plus its hyperlinks. Link positions count the
+-- VISIBLE text only, which is what TextRect indexes against.
+local function winLine(segs)
+    local styles, links, pos = {}, {}, 1
+    for _, s in ipairs(segs) do
+        if s.text ~= "" then
+            styles[#styles + 1] = { text = s.text, textcolour = col(s.colour or WHITE) }
+            if s.code then
+                links[#links + 1] = { start = pos, stop = pos + #s.text - 1, text = s.code, label = s.tip }
+            end
+            pos = pos + #s.text
+        end
+    end
+    return styles, links
+end
+
+local function pad(s, n)
+    if #s >= n then return s end
+    return s .. string.rep(" ", n - #s)
+end
+
+-- Never reuse an object the library no longer knows about (a zombie window
+-- has live hotspots and no window_map entry).
+local function ensureWin()
+    if not gHaveWin then return false end
+    if gWin and not (ThemedWindowClass and ThemedWindowClass.window_map
+                     and ThemedWindowClass.window_map[WIN_ID]) then
+        gWin = nil
+        pcall(WindowDelete, WIN_ID)
+    end
+    if not gWin then
+        local ok, w = pcall(ThemedTextWindow,
+            WIN_ID,
+            0, 0,            -- first-run position; after that it stays where dragged
+            700, 400,        -- default size; fit_contents sizes it to the text
+            "PupPaths",
+            "center",        -- title alignment
+            true,            -- is_temporary: gives the title-bar close button
+            false,           -- resizeable
+            true,            -- text_scrollable: the list can be taller than the cap
+            false,           -- text_selectable
+            false,           -- text_copyable
+            false,           -- url_hyperlinks: ours are explicit
+            false,           -- autowrap: rows are laid out in columns
+            WIN_FONT, WIN_FONT_SIZE,   -- title font
+            WIN_FONT, WIN_FONT_SIZE,   -- text font
+            200,             -- max lines
+            nil,             -- padding
+            true,            -- defer showing until drawn
+            false, nil,
+            "Close")
+        if not ok or not w then
+            gHaveWin = false
+            return false
+        end
+        gWin = w
+        -- Bold body text, as in Keycheck: redefine the TextRect's normal font
+        -- as bold so widths and link hotspots are measured with it too.
+        pcall(function()
+            local tr = gWin.textrect
+            WindowFont(tr.window, tr.font, WIN_FONT, WIN_FONT_SIZE, true, false, false, false, 0)
+            tr.font_height = WindowFontInfo(tr.window, tr.font, 1)
+            tr:setLineSpacing(tr.line_spacing)
+        end)
+        local prior = gWin.do_on_delete
+        gWin.do_on_delete = function(self)
+            if prior then prior(self) end
+            if gWin == self then gWin = nil end
+        end
+    end
+    return true
+end
+
+-- [delete] needs a second click: the first arms it for that path and the
+-- row shows [sure?] until it is clicked or 5 seconds pass.
+local pending_delete = nil     -- { name = <path name>, gen = <n> }
+local delete_gen = 0
+
+local function RowSegs(pname, p, nameW)
+    local total = #parseDirs(p.dirs)
+    local ref = string.format("%q", pname)
+    local arming = pending_delete and pending_delete.name == pname
+    local dirs = p.dirs
+    if #dirs > DIRS_SHOWN then dirs = dirs:sub(1, DIRS_SHOWN - 3) .. "..." end
+    local stepTxt = tostring(p.pos) .. "/" .. tostring(total)
+    return {
+        { text = " " },
+        arming
+            and { text = "[sure?] ", colour = RED, code = "PP_Delete(" .. ref .. ")",
+                  tip = "Click again to delete path " .. pname .. " for good" }
+            or  { text = "[delete]", colour = CYAN, code = "PP_Delete(" .. ref .. ")",
+                  tip = "Delete path " .. pname .. " (asks once more)" },
+        { text = "  " },
+        { text = pname, colour = WHITE, code = "PP_Show(" .. ref .. ")",
+          tip = "Print the full directions for " .. pname },
+        { text = string.rep(" ", nameW - #pname + 2) },
+        { text = "Step: ", colour = CYAN },
+        { text = stepTxt, colour = RED },
+        { text = string.rep(" ", math.max(1, 9 - #stepTxt)) },
+        p.recorded and { text = "[recorded] ", colour = GREEN }
+                    or { text = "[recording]", colour = RED },
+        { text = "  Dirs: ", colour = CYAN },
+        { text = dirs, colour = WHITE },
+    }
+end
+
+-- Draw the window. keep_scroll: a redraw of a window that is already up
+-- stays where you were reading instead of jumping back to the top.
+local function ShowWindow(keep_scroll)
+    local keep = nil
+    if keep_scroll and gWin and gWin.textrect then
+        keep = tonumber(gWin.textrect.display_start_line)
+    end
+    if not ensureWin() then
+        ListNotes()
+        return
+    end
+    gWin:clear(false)
+
+    -- Button / status line
+    local s, l = winLine {
+        { text = " " },
+        { text = "[ Add Path ]", colour = RED, code = "PP_AddClick()",
+          tip = "Add a new path (asks for a name, then the directions)" },
+        { text = "    PupPaths: ", colour = CYAN },
+        { text = ppEnabled and "ON" or "OFF", colour = ppEnabled and GREEN or RED,
+          code = "PP_ToggleOn()", tip = "Turn PupPaths " .. (ppEnabled and "off" or "on") },
+        { text = "    Charge: ", colour = CYAN },
+        { text = ppCharge and "ON" or "OFF", colour = ppCharge and GREEN or RED,
+          code = "PP_ToggleCharge()", tip = "Turn charge mode " .. (ppCharge and "off" or "on") },
+    }
+    gWin:add_text(s, false, l)
+    gWin:add_text(winLine { { text = " " } }, false, {})
+
+    local names = SortedNames()
+    if #names == 0 then
+        gWin:add_text(winLine {
+            { text = " No paths yet. Click ", colour = WHITE },
+            { text = "[ Add Path ]", colour = RED },
+            { text = " to make one.", colour = WHITE },
+        }, false, {})
+    else
+        local nameW = 4
+        for _, pname in ipairs(names) do
+            if #pname > nameW then nameW = #pname end
+        end
+        for _, pname in ipairs(names) do
+            s, l = winLine(RowSegs(pname, paths[pname], nameW))
+            gWin:add_text(s, false, l)
+        end
+    end
+
+    gWin:add_text(winLine { { text = " " } }, false, {})
+    gWin:add_text(winLine {
+        { text = " Walk a path with ", colour = CYAN },
+        { text = "pp <name>", colour = RED },
+        { text = ".  Click a name to see all its directions.", colour = CYAN },
+    }, false, {})
+    gWin:add_text(winLine {
+        { text = " ", colour = CYAN },
+        { text = "[delete]", colour = CYAN },
+        { text = " removes a path (click twice).  Adding a name that exists edits it.", colour = CYAN },
+    }, false, {})
+
+    -- 400px tall at most; the rest scrolls (wheel or scrollbar).
+    pcall(function() gWin:fit_contents(2000, 400) end)
+    -- Scroll AFTER fitting: add_text follows the newest line like a console,
+    -- and rows above the viewport get no hotspot when drawn.
+    pcall(function() gWin:set_scroll(keep or 1) end)
+    gWin:draw()
+    gWin:show()
+    -- The layout's invisible drag bar (z 154) eats clicks on windows under it.
+    pcall(WindowSetZOrder, WIN_ID, 99999)
+    pcall(Repaint)
+end
+
+-- Redraw the window if it is up, keeping the scroll.
+-- Safe from inside a link click: no WindowDelete happens here.
+RedrawIfOpen = function()
+    if gWin then ShowWindow(true) end
+end
+
+function pp.list()
+    ShowWindow(false)
+end
+
+-- [delete] click: first click arms [sure?] for 5 seconds, second deletes.
+function PP_Delete(pname)
+    if not paths[pname] then RedrawIfOpen() return end
+    if not (pending_delete and pending_delete.name == pname) then
+        delete_gen = delete_gen + 1
+        pending_delete = { name = pname, gen = delete_gen }
+        DoAfterSpecial(5, "PP_DeleteExpire(" .. delete_gen .. ")", 12)  -- 12 = sendto.script
+        RedrawIfOpen()
+        return
+    end
+    pending_delete = nil
+    pp.del(pname)   -- saves, which redraws
+end
+
+function PP_DeleteExpire(gen)
+    if pending_delete and pending_delete.gen == tonumber(gen) then
+        pending_delete = nil
+        RedrawIfOpen()
+    end
+end
+
+-- Path name click: print the whole path, since the window cuts long ones.
+function PP_Show(pname)
+    local p = paths[pname]
+    if not p then return end
+    Msg(WHITE, BG, pname, CYAN, BG, "  Dirs: ", WHITE, BG, p.dirs)
+end
+
+function PP_ToggleOn()
+    if ppEnabled then pp.off() else pp.on() end
+end
+
+function PP_ToggleCharge()
+    pp.charge()
+end
+
+-- Names the specific pp subcommands own: a path with one of these names
+-- could never be walked, because the subcommand alias is checked first.
+local RESERVED = { help = true, list = true, add = true, del = true,
+                   reset = true, on = true, off = true }
+
+-- Why a (lower-cased, trimmed) name cannot be used, or nil if it can.
+local function NameProblem(pname)
+    if pname == "" or pname:find("[%s|]") then
+        return "A path name must be one word with no | in it."
+    end
+    if RESERVED[pname] then
+        return "'" .. pname .. "' is a pp command. Pick another name."
+    end
+    return nil
+end
+
+-- [ Add Path ] click. The input boxes are modal, so open them a moment
+-- later from a timer rather than inside the mouse-down hotspot callback.
+function PP_AddClick()
+    DoAfterSpecial(0.1, "PP_AddPrompt()", 12)  -- 12 = sendto.script
+end
+
+function PP_AddPrompt()
+    local name = utils.inputbox(
+        "Name for the path (one word, eg skd).\nYou walk it with: pp <name>",
+        "PupPaths - Add Path", "")
+    if not name then return end
+    name = name:lower():match("^%s*(.-)%s*$")
+    if name == "" then return end
+    local problem = NameProblem(name)
+    if problem then Msg(RED, BG, problem) return end
+
+    local old = paths[name]
+    if old then
+        local answer = utils.msgbox(
+            "There is already a path named '" .. name .. "'.\n\n"
+            .. "Replace it? Its directions are filled in for you to edit.\n"
+            .. "Replacing it starts its room recording over.",
+            "PupPaths - Replace Path", "yesno", "?", 2)
+        if answer ~= "yes" then return end
+    end
+
+    local dirs = utils.inputbox(
+        "Directions for '" .. name .. "', segments separated by ;\n"
+        .. "eg: 3e2s;op d;d2sw3s   (commands like pull lever work inline)",
+        "PupPaths - Add Path", old and old.dirs or "")
+    if not dirs then return end
+    pp.add(name, dirs)
+end
+
 function pp.add(name, dirs)
     local pname = name:lower():match("^%s*(.-)%s*$")
     dirs = dirs:match("^%s*(.-)%s*$")
+
+    local problem = NameProblem(pname)
+    if problem then
+        Msg(RED, BG, problem)
+        return
+    end
+    if dirs:find("|", 1, true) then
+        Msg(RED, BG, "Directions cannot contain | (it is the save file's separator).")
+        return
+    end
 
     local steps = parseDirs(dirs)
     if #steps == 0 then
@@ -720,18 +1058,21 @@ function pp.charge()
     else
         Msg(WHITE, BG, "Charge mode ", RED, BG, "DISABLED", WHITE, BG, ". Directions will be sent normally.")
     end
+    RedrawIfOpen()
 end
 
 function pp.on()
     ppEnabled = true
     SaveConfig()
     Msg(WHITE, BG, "PupPaths ", GREEN, BG, "ENABLED", WHITE, BG, ".")
+    RedrawIfOpen()
 end
 
 function pp.off()
     ppEnabled = false
     SaveConfig()
     Msg(WHITE, BG, "PupPaths ", RED, BG, "DISABLED", WHITE, BG, ".")
+    RedrawIfOpen()
 end
 
 ---------------------------------------------------------
