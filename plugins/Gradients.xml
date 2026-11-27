@@ -14,7 +14,8 @@
    purpose="Create, manage, and use colorful text gradients."
    date_written="2023-05-29 13:36:58"
    requires="5.07"
-   version="1.7"
+   version="1.8"
+   save_state="y"
    >
 <description trim="y">
 <![CDATA[
@@ -57,12 +58,25 @@ a reinstall does not lose them. A brand new database gets four starter gradients
 so the help examples work; an existing database is never touched.
 getGradients returns them sorted by name, ignoring case, so grad list and
 export all come out alphabetical whatever order they were saved in.
-grad list draws each name in its own gradient (ColoursToStyles, then one
-ColourTell per style) so the Actions links can follow on the same line.
+grad list opens the Gradients miniwindow (1.8): the list page and, from its
+View buttons, a page per gradient with every edit button grad view had. Each
+name is drawn in its own gradient (ColoursToStyles into window styles). The
+window is a ThemedTextWindow like MarketWatch's watch list; save_state="y" is
+only there so it remembers where it was dragged. grad list text and
+grad view <name> text still print the old versions in the output, and they are
+also the fallback if themed_miniwindows will not load. Errors still print in
+the output, and the window shows their title on its last line.
 
 WHEN EDITING
 SetClipboard can stop the client with a modal box and gives no return code, so
 it stays on typed commands only, never a trigger or timer.
+Window buttons are text links whose text is Lua, run by text_rect on mouse
+down inside the window's own hotspot callback. They only call
+Gradients_WinClick, which waits 0.2s before running the grad command, because
+redrawing the window or opening an input box inside that callback breaks it.
+The list scrolls, so the window is scrolled explicitly before it is drawn
+(rows above the viewport get no hotspots) and raised to z-order 99999 (the
+layout's invisible drag bar sits at 154 and eats clicks under it).
 A color code reads up to 3 digits, so a short code in front of a digit must be
 written in full: @x99 before 69 is @x09969. A 3 digit code followed by a digit
 is already fine. Both the generator and the limit renderer obey this.
@@ -2389,7 +2403,7 @@ dofile(GetInfo(60) .. "aardwolf_colors.lua")
 local utils = require("utils")
 local sqlite3 = require("sqlite3")
 
-local VERSION = "1.7"
+local VERSION = "1.8"
 
 ----------------------------------------------------------
 
@@ -2636,25 +2650,30 @@ Examples:
   Manage = {
     List = {
       command = "grad list",
-      summary = "Show all saved gradients and manage them.",
-      body = [[Shows a list of all saved gradients. New gradients may be created here by
-clicking New Gradient.
+      summary = "Opens the Gradients window to see and manage your gradients.",
+      body = [[Opens a window listing every saved gradient, each name drawn in its own
+colors. New Gradient makes a new one, Import and Export All are along the
+bottom.
 
-Existing gradients may be removed by clicking on their corresponding Remove
-link. View will show the gradient settings in more detail and allow you to
-edit them.]],
+Click a name or its View button to open that gradient in the same window,
+where every setting can be changed. Back returns to the list. Remove deletes
+a gradient (it asks first). The window can be dragged and remembers where
+you put it; the [x] in its title bar closes it.
+
+grad list text prints the old list in the output instead.]],
     },
     View = {
       command = "grad view <gradient name>",
-      summary = "View details for a specific saved gradient.",
-      body = [[Views the details of the passed gradient name.
+      summary = "Opens one gradient in the Gradients window to edit it.",
+      body = [[Opens the gradient in the Gradients window, with a sample line drawn in it.
 
-Allows you to rename the gradient, edit the cycle count, and toggle
+Allows you to rename the gradient, change the cycle count, and toggle
 the reversed status.
 
-A color management table allows for the addition, removal, moving, and
-editing of colors.  All the links have tool tips and it should be fairly
-self explanatory.]]
+Each color has Up and Dn to move it, Edit, Lighten, Darken and Remove.
+Add Color puts a new one on the end. All the buttons have tool tips.
+
+grad view <gradient name> text prints it in the output instead.]]
     },
     Gradient = {
       command = "grad gradient <subcommand> <arguments>",
@@ -3424,11 +3443,16 @@ local function titledSeparator(title, reversed)
   titledRule(title, reversed)
 end
 
+-- The last error's title, shown on the window's bottom line on its next draw,
+-- since the full error prints in the output where it is easy to miss.
+local gWinStatus = nil
+
 ---Helper function to standardize error printing.
 ---@param title string
 ---@param msg string
 ---@param errorMsg string?
 local function reportError(title, msg, errorMsg)
+  gWinStatus = title
   local message = AC_MSG .. msg
 
   if errorMsg ~= nil then
@@ -4035,8 +4059,8 @@ end
 
 ----------------------------------------------------------
 
----List all Gradients
-local function gradients_list()
+---List all Gradients in the output (grad list text, and the no-window fallback)
+local function gradients_list_text()
   local gradients = getGradients()
   local headers = rightpad(" Name", 24) .. center("Cycles", 16) .. center("Reversed", 16) .. center("Actions", 24)
 
@@ -4096,9 +4120,10 @@ local function gradients_list()
   footer()
 end
 
----View a specific Gradient's details
+---View a specific Gradient's details in the output (grad view <name> text,
+---and the no-window fallback)
 ---@param args Token[]
-local function gradients_view(args)
+local function gradients_view_text(args)
   local name = args[1].value --[[@as string]]
   local gradient = getGradientByName(name)
 
@@ -4171,6 +4196,420 @@ local function gradients_view(args)
   Note("")
 
   footer()
+end
+
+----------------------------------------------------------
+
+--  Window
+
+----------------------------------------------------------
+
+-- grad list and grad view draw here. Same recipe as MarketWatch's watch list:
+-- a ThemedTextWindow, buttons are text links whose text is Lua.
+
+local gHaveWin = pcall(require, "themed_miniwindows")
+local WIN_ID = "Gradients_" .. GetPluginID()
+local WIN_FONT = "Consolas"
+local WIN_FONT_SIZE = 12
+local WIN_MAXH = 560
+local CLR_DIM = "#808080"
+local SAMPLE_TEXT = "The quick brown fox jumps over the lazy dog"
+
+local gWin = nil
+local gWinPage = { kind = "list" } -- or { kind = "view", name = <gradient name> }
+
+local gColCache = {}
+local function col(hex)
+  if not gColCache[hex] then gColCache[hex] = ColourNameToRGB(hex) end
+  return gColCache[hex]
+end
+
+---Builds one window line: style runs plus its hyperlinks. Link positions
+---count the visible text only, which is what TextRect indexes against.
+---A segment is { text, colour = "#hex" or rgb = number, back = number,
+---code = Lua to run on click, tip = tooltip }.
+local function winLine(segs)
+  local styles, links, pos = {}, {}, 1
+  for _, s in ipairs(segs) do
+    if s.text and s.text ~= "" then
+      local st = { text = s.text, length = #s.text, textcolour = s.rgb or col(s.colour or CLR_MSG) }
+      if s.back then st.backcolour = s.back end
+      styles[#styles + 1] = st
+      if s.code then
+        links[#links + 1] = { start = pos, stop = pos + #s.text - 1, text = s.code, label = s.tip }
+      end
+      pos = pos + #s.text
+    end
+  end
+  return styles, links
+end
+
+---Adds text drawn in a gradient's colors to segs, all with the same link.
+local function addGradientSegs(segs, text, colors, cycles, reversed, code, tip)
+  local hex = {}
+  for _, c in ipairs(colors) do
+    hex[#hex + 1] = type(c) == "table" and c:toHexString() or c
+  end
+  local ok, colored = pcall(function()
+    return Gradient:new():generate(text, hex, { cycles = cycles or 1, reversed = reversed or false })
+  end)
+  local added = false
+  if ok and colored then
+    local okStyles, styles = pcall(ColoursToStyles, colored)
+    if okStyles and styles then
+      for _, st in ipairs(styles) do
+        if st.text and st.text ~= "" then
+          segs[#segs + 1] = { text = st.text, rgb = st.textcolour, code = code, tip = tip }
+          added = true
+        end
+      end
+    end
+  end
+  if not added then
+    segs[#segs + 1] = { text = text, colour = CLR_MSG, code = code, tip = tip }
+  end
+end
+
+---A window button. cmd is a grad command without the word grad.
+local function winBtn(label, cmd, tip, colour)
+  return {
+    text = "[" .. label .. "]",
+    colour = colour or CLR_HI,
+    code = string.format("Gradients_WinClick(%q)", cmd),
+    tip = tip
+  }
+end
+
+---A greyed out button that does nothing (Up on the first color, and so on).
+local function winDeadBtn(label, tip)
+  return { text = "[" .. label .. "]", colour = CLR_DIM, tip = tip }
+end
+
+local function ctr(s, width)
+  s = tostring(s)
+  if #s >= width then return s end
+  local left = math.floor((width - #s) / 2)
+  return string.rep(" ", left) .. s .. string.rep(" ", width - #s - left)
+end
+
+local function rpad(s, width)
+  s = tostring(s)
+  if #s >= width then return s end
+  return s .. string.rep(" ", width - #s)
+end
+
+---Draws the list page.
+local function winBuildList(line)
+  local gradients = getGradients()
+  local nameW = 4
+
+  for _, g in ipairs(gradients) do
+    nameW = math.max(nameW, math.min(23, #g.name))
+  end
+
+  local width = 1 + nameW + 3 + 6 + 3 + 8 + 3 + 24
+  local rule = {}
+  addGradientSegs(rule, string.rep("-", width), uiGradientColors)
+
+  line { { text = " " .. rpad("Name", nameW + 3) .. "Cycles   Reversed   Actions", colour = CLR_NAME } }
+  line(rule)
+
+  if #gradients == 0 then
+    line { { text = " No gradients saved yet. Click New Gradient to make one.", colour = CLR_DIM } }
+  end
+
+  for _, g in ipairs(gradients) do
+    local name = g.name:sub(1, 23)
+    local view = "view " .. g.name
+    local segs = { { text = " " } }
+
+    addGradientSegs(segs, name, g.colors, g.cycles, g.reversed,
+      string.format("Gradients_WinClick(%q)", view), "Open " .. g.name)
+    segs[#segs + 1] = { text = string.rep(" ", nameW - #name + 3) }
+    segs[#segs + 1] = { text = ctr(g.cycles, 6), colour = CLR_MSG }
+    segs[#segs + 1] = { text = "   " }
+    segs[#segs + 1] = { text = ctr(g.reversed and "Yes" or "No", 8), colour = CLR_MSG }
+    segs[#segs + 1] = { text = "   " }
+    segs[#segs + 1] = winBtn("View", view, "Open " .. g.name .. " to change it")
+    segs[#segs + 1] = { text = " " }
+    segs[#segs + 1] = winBtn("Export", "export " .. g.name, "Print the export string for " .. g.name .. " in the output")
+    segs[#segs + 1] = { text = " " }
+    segs[#segs + 1] = winBtn("Remove", "gradient remove " .. g.name, "Delete " .. g.name .. " (asks first)", CLR_NAME)
+    line(segs)
+  end
+
+  line(rule)
+  line {
+    { text = " " },
+    winBtn("New Gradient", "gradient new prompt", "Make a new gradient (asks for its name)"),
+    { text = "   " },
+    winBtn("Import", "import prompt", "Import gradients from an export string"),
+    { text = "   " },
+    winBtn("Export All", "export all", "Print one export string for every gradient in the output"),
+  }
+end
+
+---Draws the page for one gradient.
+local function winBuildView(line, g)
+  local name = g.name
+  local m = "modify " .. name
+  local label = 11
+
+  local rule = {}
+  addGradientSegs(rule, string.rep("-", 68), uiGradientColors)
+
+  line {
+    { text = " " },
+    winBtn("< Back", "back", "Back to the list of gradients"),
+  }
+  line { { text = " " } }
+
+  local segs = { { text = rpad(" Name:", label), colour = CLR_NAME } }
+  addGradientSegs(segs, name, g.colors, g.cycles, g.reversed)
+  segs[#segs + 1] = { text = "   " }
+  segs[#segs + 1] = winBtn("Rename", m .. " rename prompt", "Give " .. name .. " a new name")
+  line(segs)
+
+  line {
+    { text = rpad(" Cycles:", label), colour = CLR_NAME },
+    g.cycles > 1 and winBtn("-", m .. " cycles decrease 1", "One cycle fewer")
+        or winDeadBtn("-", "Cycles cannot go below 1"),
+    { text = " " .. g.cycles .. " ", colour = CLR_MSG },
+    winBtn("+", m .. " cycles increase 1", "One more cycle"),
+  }
+
+  line {
+    { text = rpad(" Reversed:", label), colour = CLR_NAME },
+    { text = (g.reversed and "Yes" or "No") .. "  ", colour = CLR_MSG },
+    winBtn("Toggle", m .. " reversed toggle", "Run the colors the other way"),
+  }
+
+  segs = { { text = rpad(" Sample:", label), colour = CLR_NAME } }
+  addGradientSegs(segs, SAMPLE_TEXT, g.colors, g.cycles, g.reversed)
+  line(segs)
+
+  line(rule)
+  line { { text = "  #  Color     Swatch  Move       Actions", colour = CLR_NAME } }
+  line(rule)
+
+  local count = #g.colors
+
+  for i, c in ipairs(g.colors) do
+    local hex = c:toHexString()
+    local rgb = col(hex)
+    local cm = m .. " color " .. i
+
+    if rgb == 0 then rgb = 1 end -- TextRect skips a background of exactly 0
+
+    line {
+      { text = string.format(" %2d  ", i), colour = CLR_HI },
+      { text = rpad(hex, 10), colour = CLR_MSG },
+      { text = "      ", back = rgb },
+      { text = "  " },
+      i > 1 and winBtn("Up", cm .. " move up", "Move this color earlier")
+          or winDeadBtn("Up", "Already the first color"),
+      { text = " " },
+      i < count and winBtn("Dn", cm .. " move down", "Move this color later")
+          or winDeadBtn("Dn", "Already the last color"),
+      { text = "  " },
+      winBtn("Edit", cm .. " edit prompt", "Type a new value for this color"),
+      { text = " " },
+      winBtn("Lighten", cm .. " lighten", "Make this color lighter"),
+      { text = " " },
+      winBtn("Darken", cm .. " darken", "Make this color darker"),
+      { text = " " },
+      count > 2 and winBtn("Remove", cm .. " remove", "Remove this color (asks first)", CLR_NAME)
+          or winDeadBtn("Remove", "A gradient needs at least two colors"),
+    }
+  end
+
+  line(rule)
+  line {
+    { text = " " },
+    winBtn("Add Color", m .. " color new prompt", "Add a color on the end (asks for it)"),
+    { text = "   " },
+    winBtn("Export", "export " .. name, "Print the export string for " .. name .. " in the output"),
+    { text = "   " },
+    winBtn("Delete Gradient", "gradient remove " .. name, "Delete " .. name .. " (asks first)", CLR_NAME),
+  }
+end
+
+---Draws (or redraws) the window on its current page. keep_scroll keeps where
+---it was scrolled to. Returns false if there is no window to draw.
+local function winRefresh(keep_scroll)
+  if not gHaveWin then return false end
+
+  -- never reuse an object the library no longer knows about (zombie guard)
+  if gWin and not (ThemedWindowClass and ThemedWindowClass.window_map
+        and ThemedWindowClass.window_map[WIN_ID]) then
+    gWin = nil
+    pcall(WindowDelete, WIN_ID)
+  end
+
+  if not gWin then
+    local ok, w = pcall(ThemedTextWindow,
+      WIN_ID,
+      600, 120,        -- default left, top (first run only; it remembers a drag)
+      600, 300,        -- default size (fit_contents resizes it)
+      "Gradients",
+      "center",
+      true,            -- [x] in the title bar closes it
+      false,           -- resizeable
+      true,            -- text scrolls: the list can outgrow the window
+      false, false, false,
+      false,           -- no autowrap: the rows are laid out in columns
+      WIN_FONT, WIN_FONT_SIZE,
+      WIN_FONT, WIN_FONT_SIZE,
+      500,             -- max lines
+      nil,
+      true,            -- defer showing until drawn
+      false, nil,
+      "Close (grad list opens it again)")
+
+    if not ok or not w then
+      gHaveWin = false
+      echo("The window could not be made, so the list prints here instead. (" .. tostring(w) .. ")")
+      return false
+    end
+
+    gWin = w
+
+    if gWin.textrect and gWin.textrect.font_bold then
+      gWin.textrect.font = gWin.textrect.font_bold
+    end
+
+    local prior = gWin.do_on_delete
+    gWin.do_on_delete = function(self)
+      if prior then prior(self) end
+      if gWin == self then gWin = nil end
+    end
+
+    -- right-click Bring To Front only reaches the top slot, still under the
+    -- layout's drag bar
+    gWin.bring_to_front = function() pcall(WindowSetZOrder, WIN_ID, 99999) end
+    keep_scroll = false
+  end
+
+  local keep = nil
+  if keep_scroll and gWin.textrect then keep = tonumber(gWin.textrect.display_start_line) end
+
+  gWin:clear(false)
+
+  local function line(segs)
+    local s, l = winLine(segs)
+    if #s == 0 then s = { { text = " ", length = 1, textcolour = col(CLR_MSG) } } end
+    gWin:add_text(s, false, l)
+  end
+
+  if gWinPage.kind == "view" then
+    local g = getGradientByName(gWinPage.name)
+
+    if g then
+      winBuildView(line, g)
+    else
+      gWinPage = { kind = "list" }
+      keep = nil
+    end
+  end
+
+  if gWinPage.kind == "list" then
+    winBuildList(line)
+  end
+
+  if gWinStatus then
+    line { { text = " " } }
+    line { { text = " " .. gWinStatus .. " - details in the output.", colour = CLR_NAME } }
+    gWinStatus = nil
+  end
+
+  pcall(function() gWin:fit_contents(1000, WIN_MAXH) end)
+  pcall(function() gWin:set_scroll(keep or 1) end)
+  gWin:draw()
+  gWin:show()
+  pcall(WindowSetZOrder, WIN_ID, 99999)
+  pcall(Repaint)
+
+  return true
+end
+
+---Run by a window button. A link runs on mouse-down inside the window's own
+---hotspot callback, where redrawing the window or opening an input box goes
+---wrong, so the real work waits for a moment.
+---@param cmd string
+function Gradients_WinClick(cmd)
+  DoAfterSpecial(0.2, string.format("Gradients_WinDo(%q)", tostring(cmd)), sendto.script)
+end
+
+---@param cmd string a grad command without the word grad, or "back"
+function Gradients_WinDo(cmd)
+  if cmd == "back" then
+    gWinPage = { kind = "list" }
+    winRefresh(false)
+    return
+  end
+
+  gradients_dispatch(nil, nil, { cmd })
+
+  if cmd:match("^export ") then
+    gWinStatus = gWinStatus or "Export string printed"
+  end
+
+  -- an error or an export left a message and nothing redrew to show it
+  if gWinStatus and gWin then
+    winRefresh(true)
+  end
+end
+
+---grad list: opens the window on the list. grad list text prints it instead.
+---@param args string?
+local function gradients_list(args)
+  if type(args) == "string" and trim(args):lower() == "text" then
+    gradients_list_text()
+    return
+  end
+
+  local wasList = gWin ~= nil and gWinPage.kind == "list"
+  gWinPage = { kind = "list" }
+
+  if not winRefresh(wasList) then
+    gradients_list_text()
+  end
+end
+
+---grad view <name>: opens that gradient in the window. grad view <name> text
+---prints it instead.
+---@param args Token[]
+local function gradients_view(args)
+  local name = args[1].value --[[@as string]]
+  local asText = false
+
+  if type(name) == "string" and not getGradientByName(name) then
+    local stripped = name:match("^(.-)%s+[Tt][Ee][Xx][Tt]$")
+    if stripped and getGradientByName(stripped) then
+      name = stripped
+      asText = true
+    end
+  end
+
+  local gradient = getGradientByName(name)
+
+  if type(gradient) == "nil" then
+    reportError("Gradient Not Found", "Couldn't find a gradient with the name " .. tostring(name) .. "!")
+    if gWin then winRefresh(true) end
+    return
+  end
+
+  if asText then
+    gradients_view_text({ { type = "string", value = name } })
+    return
+  end
+
+  local same = gWin ~= nil and gWinPage.kind == "view" and gWinPage.name == name
+  gWinPage = { kind = "view", name = name }
+
+  if not winRefresh(same) then
+    gradients_view_text({ { type = "string", value = name } })
+  end
 end
 
 ---Gradient Modification Command
