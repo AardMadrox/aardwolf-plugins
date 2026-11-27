@@ -14,7 +14,7 @@
    purpose="Create, manage, and use colorful text gradients."
    date_written="2023-05-29 13:36:58"
    requires="5.07"
-   version="1.8"
+   version="1.9"
    save_state="y"
    >
 <description trim="y">
@@ -66,6 +66,15 @@ only there so it remembers where it was dragged. grad list text and
 grad view <name> text still print the old versions in the output, and they are
 also the fallback if themed_miniwindows will not load. Errors still print in
 the output, and the window shows their title on its last line.
+1.9: a third page, the color picker. Edit, a color's swatch, and Add Color
+open it: the 256 xterm colors as clickable swatches (Aard's palette, so the
+pick is exactly what the MUD shows), Lighten/Darken, Type a Color (input box
+for an exact hex, name or xterm number), Save/Cancel. Nothing is saved until
+Save. Its buttons are the window's own # commands, handled in winInternal,
+not grad commands. Add Gradient sits at the top and bottom of the list (the
+list scrolls), and a gradient made there opens straight away (gOpenNext).
+The window defaults to the upper left; grad_win_placed clears the position
+1.8 saved, once, so an existing window moves there too.
 
 WHEN EDITING
 SetClipboard can stop the client with a modal box and gives no return code, so
@@ -2403,7 +2412,7 @@ dofile(GetInfo(60) .. "aardwolf_colors.lua")
 local utils = require("utils")
 local sqlite3 = require("sqlite3")
 
-local VERSION = "1.8"
+local VERSION = "1.9"
 
 ----------------------------------------------------------
 
@@ -2652,8 +2661,8 @@ Examples:
       command = "grad list",
       summary = "Opens the Gradients window to see and manage your gradients.",
       body = [[Opens a window listing every saved gradient, each name drawn in its own
-colors. New Gradient makes a new one, Import and Export All are along the
-bottom.
+colors. Add Gradient makes a new one and opens it so you can pick its colors.
+Add Gradient, Import and Export All are at the top and bottom of the list.
 
 Click a name or its View button to open that gradient in the same window,
 where every setting can be changed. Back returns to the list. Remove deletes
@@ -2671,7 +2680,10 @@ Allows you to rename the gradient, change the cycle count, and toggle
 the reversed status.
 
 Each color has Up and Dn to move it, Edit, Lighten, Darken and Remove.
-Add Color puts a new one on the end. All the buttons have tool tips.
+Edit (or clicking the color's swatch) opens the color picker: click any of
+the 256 colors, see the sample change, then Save or Cancel. Type a Color takes
+an exact hex code, color name or xterm number. Add Color opens the same picker
+and puts the new color on the end. All the buttons have tool tips.
 
 grad view <gradient name> text prints it in the output instead.]]
     },
@@ -4216,7 +4228,10 @@ local CLR_DIM = "#808080"
 local SAMPLE_TEXT = "The quick brown fox jumps over the lazy dog"
 
 local gWin = nil
-local gWinPage = { kind = "list" } -- or { kind = "view", name = <gradient name> }
+-- { kind = "list" }, { kind = "view", name = <gradient name> }, or the color
+-- picker { kind = "pick", name, index (nil when adding), orig, hex }
+local gWinPage = { kind = "list" }
+local gOpenNext = nil -- a gradient to open in place of the list on the next grad list
 
 local gColCache = {}
 local function col(hex)
@@ -4311,11 +4326,24 @@ local function winBuildList(line)
   local rule = {}
   addGradientSegs(rule, string.rep("-", width), uiGradientColors)
 
+  -- the same buttons sit at the top and the bottom: the list scrolls, and
+  -- the bottom row is off screen until you scroll down to it
+  local buttons = {
+    { text = " " },
+    winBtn("Add Gradient", "gradient new prompt", "Make a new gradient (asks for its name)"),
+    { text = "   " },
+    winBtn("Import", "import prompt", "Import gradients from an export string"),
+    { text = "   " },
+    winBtn("Export All", "export all", "Print one export string for every gradient in the output"),
+  }
+
+  line(buttons)
+  line { { text = " " } }
   line { { text = " " .. rpad("Name", nameW + 3) .. "Cycles   Reversed   Actions", colour = CLR_NAME } }
   line(rule)
 
   if #gradients == 0 then
-    line { { text = " No gradients saved yet. Click New Gradient to make one.", colour = CLR_DIM } }
+    line { { text = " No gradients saved yet. Click Add Gradient to make one.", colour = CLR_DIM } }
   end
 
   for _, g in ipairs(gradients) do
@@ -4339,14 +4367,7 @@ local function winBuildList(line)
   end
 
   line(rule)
-  line {
-    { text = " " },
-    winBtn("New Gradient", "gradient new prompt", "Make a new gradient (asks for its name)"),
-    { text = "   " },
-    winBtn("Import", "import prompt", "Import gradients from an export string"),
-    { text = "   " },
-    winBtn("Export All", "export all", "Print one export string for every gradient in the output"),
-  }
+  line(buttons)
 end
 
 ---Draws the page for one gradient.
@@ -4360,7 +4381,7 @@ local function winBuildView(line, g)
 
   line {
     { text = " " },
-    winBtn("< Back", "back", "Back to the list of gradients"),
+    winBtn("< Back", "#back", "Back to the list of gradients"),
   }
   line { { text = " " } }
 
@@ -4404,7 +4425,8 @@ local function winBuildView(line, g)
     line {
       { text = string.format(" %2d  ", i), colour = CLR_HI },
       { text = rpad(hex, 10), colour = CLR_MSG },
-      { text = "      ", back = rgb },
+      { text = "      ", back = rgb, code = string.format("Gradients_WinClick(%q)", "#pick " .. i),
+        tip = "Pick a new color for this one" },
       { text = "  " },
       i > 1 and winBtn("Up", cm .. " move up", "Move this color earlier")
           or winDeadBtn("Up", "Already the first color"),
@@ -4412,7 +4434,7 @@ local function winBuildView(line, g)
       i < count and winBtn("Dn", cm .. " move down", "Move this color later")
           or winDeadBtn("Dn", "Already the last color"),
       { text = "  " },
-      winBtn("Edit", cm .. " edit prompt", "Type a new value for this color"),
+      winBtn("Edit", "#pick " .. i, "Pick a new color for this one"),
       { text = " " },
       winBtn("Lighten", cm .. " lighten", "Make this color lighter"),
       { text = " " },
@@ -4426,11 +4448,120 @@ local function winBuildView(line, g)
   line(rule)
   line {
     { text = " " },
-    winBtn("Add Color", m .. " color new prompt", "Add a color on the end (asks for it)"),
+    winBtn("Add Color", "#add", "Pick a color to add on the end"),
     { text = "   " },
     winBtn("Export", "export " .. name, "Print the export string for " .. name .. " in the output"),
     { text = "   " },
     winBtn("Delete Gradient", "gradient remove " .. name, "Delete " .. name .. " (asks first)", CLR_NAME),
+  }
+end
+
+---One palette swatch: two blank characters on the color, a link that picks it.
+---The one matching the color being picked shows <> on it.
+local function pickSwatch(index, current)
+  local hex = Colr.xtermIndices[index]
+  local rgb = col(hex)
+  local mark = hex:lower() == current
+  local text, fg = "  ", CLR_MSG
+
+  if mark then
+    text = "<>"
+    fg = Colr:new(hex):isDark() and "#FFFFFF" or "#000000"
+  end
+  if rgb == 0 then rgb = 1 end -- TextRect skips a background of exactly 0
+
+  return {
+    text = text,
+    colour = fg,
+    back = rgb,
+    code = string.format("Gradients_WinClick(%q)", "#set " .. index),
+    tip = "x" .. index .. "  " .. hex
+  }
+end
+
+---Draws the color picker: the 256 xterm colors as swatches, Aard's own
+---palette, so what you pick is exactly what the MUD shows.
+local function winBuildPick(line, g, page)
+  local current = page.hex:lower()
+  local label = 9
+
+  -- the gradient as it would look with the picked color in place
+  local colors = {}
+  for i, c in ipairs(g.colors) do colors[i] = c:toHexString() end
+  if page.index then colors[page.index] = page.hex else colors[#colors + 1] = page.hex end
+
+  local rule = {}
+  addGradientSegs(rule, string.rep("-", 73), uiGradientColors)
+
+  local function swatch(hex)
+    local rgb = col(hex)
+    if rgb == 0 then rgb = 1 end
+    return { text = "      ", back = rgb }
+  end
+
+  line { { text = " " }, winBtn("< Cancel", "#cancel", "Back to " .. g.name .. " without changing anything") }
+  line { { text = " " } }
+
+  local title = { { text = " " } }
+  if page.index then
+    title[#title + 1] = { text = "Pick color " .. page.index .. " of ", colour = CLR_NAME }
+  else
+    title[#title + 1] = { text = "Pick a color to add to ", colour = CLR_NAME }
+  end
+  addGradientSegs(title, g.name, g.colors, g.cycles, g.reversed)
+  line(title)
+  line { { text = " " } }
+
+  local now = {}
+  if page.orig then
+    now[#now + 1] = { text = rpad(" Was:", label), colour = CLR_NAME }
+    now[#now + 1] = { text = rpad(page.orig, 9), colour = CLR_MSG }
+    now[#now + 1] = swatch(page.orig)
+    now[#now + 1] = { text = "     " }
+    now[#now + 1] = { text = "Now: ", colour = CLR_NAME }
+  else
+    now[#now + 1] = { text = rpad(" New:", label), colour = CLR_NAME }
+  end
+  now[#now + 1] = { text = rpad(page.hex, 9), colour = CLR_MSG }
+  now[#now + 1] = swatch(page.hex)
+  line(now)
+
+  local sample = { { text = rpad(" Sample:", label), colour = CLR_NAME } }
+  addGradientSegs(sample, SAMPLE_TEXT, colors, g.cycles, g.reversed)
+  line(sample)
+
+  line(rule)
+  line { { text = " Click a color:", colour = CLR_NAME } }
+
+  local segs = { { text = " " } }
+  for i = 0, 15 do segs[#segs + 1] = pickSwatch(i, current) end
+  line(segs)
+  line { { text = " " } }
+
+  -- the 6x6x6 cube, one row per red level
+  for r = 0, 5 do
+    segs = { { text = " " } }
+    for gb = 0, 35 do segs[#segs + 1] = pickSwatch(16 + r * 36 + gb, current) end
+    line(segs)
+  end
+  line { { text = " " } }
+
+  segs = { { text = " " } }
+  for i = 232, 255 do segs[#segs + 1] = pickSwatch(i, current) end
+  line(segs)
+
+  line(rule)
+  line {
+    { text = " " },
+    winBtn("Lighten", "#light", "Make the picked color lighter"),
+    { text = " " },
+    winBtn("Darken", "#dark", "Make the picked color darker"),
+    { text = " " },
+    winBtn("Type a Color", "#type", "Type a hex code, a color name or an xterm number"),
+    { text = "      " },
+    winBtn("Save", "#save", page.index and "Use this color" or "Add this color to the end"),
+    { text = " " },
+    winBtn("Cancel", "#cancel", "Back without changing anything", CLR_NAME),
   }
 end
 
@@ -4447,9 +4578,18 @@ local function winRefresh(keep_scroll)
   end
 
   if not gWin then
+    -- 1.9 moved the window to the upper left. movewindow keeps the last
+    -- dragged spot in these variables and only uses the default when they
+    -- are missing, so clear them once to move a window placed by 1.8.
+    if GetVariable("grad_win_placed") ~= "upperleft" then
+      DeleteVariable("mw_" .. WIN_ID .. "_windowx")
+      DeleteVariable("mw_" .. WIN_ID .. "_windowy")
+      SetVariable("grad_win_placed", "upperleft")
+    end
+
     local ok, w = pcall(ThemedTextWindow,
       WIN_ID,
-      600, 120,        -- default left, top (first run only; it remembers a drag)
+      0, 0,            -- default left, top: upper left (it remembers a drag)
       600, 300,        -- default size (fit_contents resizes it)
       "Gradients",
       "center",
@@ -4501,14 +4641,16 @@ local function winRefresh(keep_scroll)
     gWin:add_text(s, false, l)
   end
 
-  if gWinPage.kind == "view" then
+  if gWinPage.kind == "view" or gWinPage.kind == "pick" then
     local g = getGradientByName(gWinPage.name)
 
-    if g then
-      winBuildView(line, g)
-    else
+    if not g then
       gWinPage = { kind = "list" }
       keep = nil
+    elseif gWinPage.kind == "pick" then
+      winBuildPick(line, g, gWinPage)
+    else
+      winBuildView(line, g)
     end
   end
 
@@ -4540,11 +4682,104 @@ function Gradients_WinClick(cmd)
   DoAfterSpecial(0.2, string.format("Gradients_WinDo(%q)", tostring(cmd)), sendto.script)
 end
 
----@param cmd string a grad command without the word grad, or "back"
-function Gradients_WinDo(cmd)
-  if cmd == "back" then
+---Turns typed color input into a hex string: an xterm number 0-255, a hex
+---code or a color name. Returns nil if it is not a color.
+local function parseColorInput(value)
+  value = trim(value or "")
+  if #value == 0 then return nil end
+
+  local n = tonumber(value)
+  if n and n >= 0 and n < 256 and math.floor(n) == n then
+    return Colr.xtermIndices[n]
+  end
+
+  local ok, c = pcall(function() return Colr:new(value) end)
+  if ok and c and c._ok then return c:toHexString() end
+  return nil
+end
+
+---The window's own buttons: picking colors, and moving between pages.
+---Everything else is an ordinary grad command.
+local function winInternal(cmd)
+  local page = gWinPage
+  local word, arg = cmd:match("^#(%S+)%s*(.*)$")
+
+  if word == "back" then
     gWinPage = { kind = "list" }
     winRefresh(false)
+    return
+  end
+
+  if word == "pick" or word == "add" then
+    local g = page.name and getGradientByName(page.name)
+    if not g then
+      gWinPage = { kind = "list" }
+      winRefresh(false)
+      return
+    end
+
+    local index = tonumber(arg)
+    if word == "pick" and index and g.colors[index] then
+      local hex = g.colors[index]:toHexString()
+      gWinPage = { kind = "pick", name = g.name, index = index, orig = hex, hex = hex }
+    else
+      gWinPage = { kind = "pick", name = g.name, hex = g.colors[#g.colors]:toHexString() }
+    end
+    winRefresh(false)
+    return
+  end
+
+  if page.kind ~= "pick" then
+    winRefresh(true)
+    return
+  end
+
+  if word == "set" then
+    local hex = Colr.xtermIndices[tonumber(arg) or -1]
+    if hex then page.hex = hex end
+  elseif word == "light" or word == "dark" then
+    local c = Colr:new(page.hex)
+    c = (word == "light") and c:lighten() or c:darken()
+    page.hex = c:toHexString()
+  elseif word == "type" then
+    local value = utils.inputbox(
+      "Type a color: a hex code like #ff8800, a name like orange, or an xterm number like 208.",
+      "Pick a Color", page.hex)
+    if value then
+      local hex = parseColorInput(value)
+      if hex then
+        page.hex = hex
+      else
+        gWinStatus = "Not a color I know: " .. value
+      end
+    end
+  elseif word == "save" then
+    local g = getGradientByName(page.name)
+    if g then
+      if page.index and g.colors[page.index] then
+        g.colors[page.index] = Colr:new(page.hex)
+      else
+        table.insert(g.colors, Colr:new(page.hex))
+      end
+      upsertGradient(g)
+    end
+    gWinPage = { kind = "view", name = page.name }
+    winRefresh(false)
+    return
+  elseif word == "cancel" then
+    gWinPage = { kind = "view", name = page.name }
+    winRefresh(false)
+    return
+  end
+
+  winRefresh(true)
+end
+
+---@param cmd string a grad command without the word grad, or one of the
+---window's own, which start with #
+function Gradients_WinDo(cmd)
+  if cmd:sub(1, 1) == "#" then
+    winInternal(cmd)
     return
   end
 
@@ -4566,6 +4801,16 @@ local function gradients_list(args)
   if type(args) == "string" and trim(args):lower() == "text" then
     gradients_list_text()
     return
+  end
+
+  -- a gradient just made from the window opens straight away, ready for colors
+  if gOpenNext then
+    local name = gOpenNext
+    gOpenNext = nil
+    if getGradientByName(name) then
+      gWinPage = { kind = "view", name = name }
+      if winRefresh(false) then return end
+    end
   end
 
   local wasList = gWin ~= nil and gWinPage.kind == "list"
@@ -5007,6 +5252,7 @@ local function gradients_gradient(args)
             reportError("Duplicate Gradient Name", "Sorry, all gradients must have a unique name.")
           else
             upsertGradient(newGradient)
+            gOpenNext = response -- the window opens it, ready for its colors
           end
 
           gradients_list()
