@@ -19,7 +19,8 @@
        marketw lc on|off              last chance when an item has minutes left
        marketw auc debug              DEBUG: echo every Auction:/Market: line
        marketw probe <num>            DEBUG: dump the raw 'lbid <num>' box
-       marketw win [on|off]           the watch-list window (edit / bids / mode)
+       marketw list | config          the watch-list window (edit / bids / mode)
+       marketw win [on|off]           open / close that window
 
      Design notes:
        * 'market list' truncates the item description to 28 characters, and a
@@ -43,7 +44,7 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="5.3"
+   version="5.4"
    save_state="y"
 >
 </plugin>
@@ -261,6 +262,9 @@ WATCH-LIST WINDOW (v5.3)
     click time, so a list changed by a typed command cannot misdirect a click.
   * every command that changes gWatch or the channel switches calls
     mgrRefresh (true) after saveData - add new ones the same way.
+  * v5.4: it NEVER opens on load (OnPluginInstall sets gCfg.win false).
+    marketw list / marketw config / marketw win open it; the text list
+    is only a fallback when no window can be made.  The [x] closes it.
   * gCfg.win: the title-bar [x] turns it off (do_on_delete), marketw win
     brings it back.  OnPluginClose calls mgrClose FIRST so the library's own
     delete-all does not look like a click on [x].
@@ -414,7 +418,7 @@ WHEN EDITING
   <alias match="^(?:marketw|marketwatch) help$"       enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Help"   sequence="90"></alias>
   <alias match="^(?:marketw|marketwatch|market) add (.+)$"  enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Add"    sequence="90"></alias>
   <alias match="^(?:marketw|marketwatch|market) (?:del|delete|remove|rem) (.+)$" enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Del" sequence="90"></alias>
-  <alias match="^(?:marketw|marketwatch) (?:list|watch)$"   enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_List"   sequence="90"></alias>
+  <alias match="^(?:marketw|marketwatch) (?:list|watch|config|cfg)$"   enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_List"   sequence="90"></alias>
   <alias match="^market watch$"                  enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_List"   sequence="90"></alias>
   <alias match="^(?:marketw|marketwatch) clear$"      enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Clear"  sequence="90"></alias>
   <alias match="^(?:marketw|marketwatch) deep$"       enabled="y" regexp="y" ignore_case="y" script="MW_Cmd_Deep"   sequence="90"></alias>
@@ -643,7 +647,7 @@ gCfg = {
   mkt         = true,                        -- watch the market channel too
   aucdebug    = false,
   popup        = true,    -- pop a window up for act-now opportunities
-  win          = true,    -- the watch-list window is open (v5.3)
+  win          = false,   -- the watch-list window is open (opened by marketw list/config)
   withdraw     = false,   -- pull gold from the bank when a bid falls short
   withdrawroom = 0,       -- only ever do that in this room (0 = unset)
   deep        = false,    -- probe EVERY truncated row, not just likely ones
@@ -3006,7 +3010,7 @@ mgrRefresh = function (keep_scroll)
       nil,
       true,            -- defer showing until drawn
       false, nil,
-      "Close the watch list (marketw win brings it back)")
+      "Close the watch list (marketw list brings it back)")
     if not ok or not w then
       dbg ("watch-list window unavailable: " .. tostring (w))
       return
@@ -3023,7 +3027,7 @@ mgrRefresh = function (keep_scroll)
       gMgr = nil
       gCfg.win = false
       saveData ()
-      echoHi ("watch-list window closed.  Type ", "marketw win", " to bring it back.")
+      echoHi ("watch-list window closed.  Type ", "marketw list", " to bring it back.")
     end
     keep_scroll = false
   end
@@ -3375,6 +3379,13 @@ function MW_Cmd_Del (name, line, wildcards)
 end
 
 function MW_Cmd_List ()
+  -- v5.4: list / config open the watch-list window.  The text list below
+  -- is only the fallback for when no window can be made.
+  if gHaveWin then
+    gCfg.win = true
+    mgrRefresh (false)
+    if gMgr then return end
+  end
   if #gWatch == 0 then echo ("watch list is empty.") return end
   echoHi ("watching ", tostring (#gWatch), " item(s):")
   Note ("")
@@ -3623,7 +3634,7 @@ function MW_Cmd_Help ()
   helpLine ("market add <name> bid <m1> [m2 [m3]] [auc|mark]", "watch an item; no mode = both")
   helpLine ("marketw add <name> <max>",     "same thing, if 'market add' clashes")
   helpLine ("marketw / marketwatch",        "scan the market now")
-  helpLine ("marketw list",                 "show the watch list")
+  helpLine ("marketw list / config",        "open the watch-list window: edit items, bids and mode")
   helpLine ("marketw del <n|text>",         "remove a watch entry")
   helpLine ("marketw clear",                "remove them all")
   Note ("")
@@ -3634,7 +3645,7 @@ function MW_Cmd_Help ()
   helpLine ("marketw lc on|off",            "last chance when an item has minutes left, any mode")
   helpLine ("marketw lc <mins>",            "how large a closing warning still counts")
   helpLine ("marketw popup on|off",         "live listings pop up in a window, not the output")
-  helpLine ("marketw win [on|off]",         "the watch-list window: edit items, bids and mode")
+  helpLine ("marketw win [on|off]",         "open or close that window")
   helpLine ("(market bids)",                "a bid line for a watched item pops up the lowest max that beats it; outbid -> next max")
   helpLine ("marketw mode <n|text> <m>",    "per item: both (default), auc = auction only, mark = market only")
   helpLine ("marketw set <n> <m1> [m2 [m3]] [mode]", "redo an item's amounts / mode by its list number")
@@ -3877,7 +3888,8 @@ function OnPluginInstall ()
   ColourNote (CLR_TAG, "", "[", CLR_NAME, "", TAG, CLR_TAG, "", "] ",
               CLR_MSG, "", "v" .. GetPluginInfo (GetPluginID (), 19) .. " loaded. Type ",
               CLR_HI, "", "marketw help", CLR_MSG, "", " for help.")
-  if gCfg.win then mgrRefresh (false) end
+  -- never opens by itself (v5.4): marketw list / config / win open it
+  gCfg.win = false
 end
 
 function OnPluginSaveState ()
