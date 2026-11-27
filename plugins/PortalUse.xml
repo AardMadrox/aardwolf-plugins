@@ -8,7 +8,7 @@
      language="Lua"
      purpose="Tracks worn portal usage with colour output; can show destination area from PortalDex."
      date_written="2026-06-08"
-     version="2.1"
+     version="2.2"
   >
   </plugin>
 
@@ -68,6 +68,13 @@ HOW IT WORKS
   entries can share a name (plain chaos portals), so when building the
   name to area map it PREFERS an entry that has a landing room over one
   that only has an area.
+
+  The catalog stores the LONG area name ("Leads to"). Since 2.2 the
+  display shows the area KEYWORD instead, looked up read-only in the
+  mapper's sqlite db (area_keywords): first the landing room's own area
+  (rooms.area), then the long name matched against areas.name (case
+  insensitive). If the mapper or its db is missing, or neither lookup
+  hits, it falls back to the long name, so nothing ever goes blank.
 
 DATA AND STATE
   Everything is in PortalUse.dat: the usage counts, the ignore list, the
@@ -166,6 +173,38 @@ local TC = { hdr = "#875fff", val = "#00d7ff", num = "#ffffff", ok = "#00ff87" }
 -- Read the portal catalog written by PortalValue 3.0 (PortalDex folded in) and
 -- return a map of lowercased portal name -> destination area ("Leads to").
 -- Returns {} if PortalValue 3.0 isn't installed / hasn't scanned.
+-- Area keyword lookup from the GMCP mapper's sqlite db (read only).
+-- Returns room_area[uid] = keyword and name_kw[lowercased long name] = keyword,
+-- or two empty tables if the mapper / db / sqlite3 isn't available.
+local MAPPER_ID = "b6eae87ccedd84f510b74714"
+local function area_keywords ()
+  local room_area, name_kw = {}, {}
+  if not IsPluginInstalled(MAPPER_ID) then return room_area, name_kw end
+  local db_name = GetPluginVariable(MAPPER_ID, "db_name")
+  if not db_name or db_name == "" then
+    db_name = (WorldName() or ""):gsub("[^%w%s()_-]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+  end
+  if db_name == "" then return room_area, name_kw end
+  local path = GetInfo(66) .. db_name .. ".db"
+  local fh = io.open(path, "rb")
+  if not fh then return room_area, name_kw end
+  fh:close()
+  local ok_sql, sqlite3 = pcall(require, "sqlite3")
+  if not ok_sql then return room_area, name_kw end
+  local db = sqlite3.open(path)
+  if not db then return room_area, name_kw end
+  pcall(function ()
+    for row in db:nrows("SELECT uid, name FROM areas") do
+      if row.uid and row.name then name_kw[row.name:lower()] = row.uid end
+    end
+    for row in db:nrows("SELECT uid, area FROM rooms") do
+      if row.uid and row.area then room_area[tostring(row.uid)] = row.area end
+    end
+  end)
+  db:close()
+  return room_area, name_kw
+end
+
 local function load_portaldex_areas ()
   local f = io.open(GetInfo(66) .. "PortalDex_data.lua", "r")
   if not f then return {} end
@@ -183,6 +222,15 @@ local function load_portaldex_areas ()
       if (not cur) or (e.room and not cur.room) then
         map[key] = { area = area, room = e.room }
       end
+    end
+  end
+  -- swap the long area name for the area keyword where the mapper knows it
+  if next(map) ~= nil then
+    local room_area, name_kw = area_keywords()
+    for _, v in pairs(map) do
+      local kw = (v.room and room_area[tostring(v.room)])
+              or (v.area and name_kw[v.area:lower()])
+      if kw then v.area = kw end
     end
   end
   return map
