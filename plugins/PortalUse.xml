@@ -8,7 +8,8 @@
      language="Lua"
      purpose="Tracks worn portal usage with colour output; can show destination area from PortalDex."
      date_written="2026-06-08"
-     version="2.2"
+     version="2.3"
+     save_state="y"
   >
   </plugin>
 
@@ -22,8 +23,8 @@ WHAT IT DOES
   PortalValue / PortalDex's catalog.
 
 COMMANDS
-  portaluse [mode]         show usage. Modes: high (default), low,
-                           alpha, ralpha
+  portaluse [mode]         open the usage window. Modes: high (default),
+                           low, alpha, ralpha
   portalusetop <channel>   send the top 5 to a channel, in colour
   portalscan               re read the bag to refresh colours and add
                            untracked portals at 0 uses
@@ -86,7 +87,30 @@ DATA AND STATE
   format uses pipes, colons and commas as separators, so encoding is what
   keeps the file parseable.
 
-  save_state is not set, and none of this uses plugin variables.
+  save_state="y" (since 2.3) is ONLY there so the usage window remembers
+  where it was dragged (movewindow uses SetVariable). The data itself
+  never uses plugin variables.
+
+THE USAGE WINDOW (2.3)
+  portaluse opens a themed_miniwindows ThemedTextWindow, same recipe as
+  PupPaths / Keycheck / MarketWatch: link text is Lua run in this plugin
+  (text_rect.lua browseUrl -> loadstring), so the PU_* click handlers are
+  GLOBAL. set_scroll runs AFTER fit_contents or the top rows lose their
+  hotspots, and WindowSetZOrder 99999 keeps the layout's invisible drag
+  bar (z 154) from eating clicks. Max lines is 1000 because the list is
+  already 340+ portals.
+  Top line: sort words (high/low/alpha/ralpha), the Area ON/OFF toggle
+  and [ Show ignored ]. Each row has [ignore] (one click, no confirm,
+  because the ignored section's [restore] undoes it). Portal names keep
+  their captured colours.
+  save_data() calls RedrawIfOpen, so a portal use, scan or command
+  updates the window live, keeping the scroll position.
+  area_cache holds the area map for the window: building it reads the
+  280KB PortalDex file plus the whole mapper rooms table, too slow to do
+  on every portal use. It is rebuilt when portaluse is typed or the area
+  display is toggled, and reused by live redraws.
+  Falls back to the old output-window list (print_usage) if
+  themed_miniwindows fails to load.
 
 WHEN EDITING
   * data_file is the bare string "PortalUse.dat" with NO directory, so it
@@ -165,6 +189,7 @@ local data_file  = "PortalUse.dat"
 local bag_keyword = ""
 local scan_active = false
 local show_area   = false   -- show destination area (from PortalValue 3.0's catalog)
+local RedrawIfOpen          -- set by the usage window code further down
 
 -- theme colours (RGB hex of @x099 / @x045 / @W / @x048) for our own output;
 -- portal NAME rendering keeps its own captured colours and is never changed.
@@ -355,6 +380,7 @@ local function save_data ()
     f:write(hex_enc(portal) .. "|" .. table.concat(parts, ",") .. "\n")
   end
   f:close()
+  if RedrawIfOpen then RedrawIfOpen() end
 end
 
 local function load_data ()
@@ -493,9 +519,8 @@ end
 -- portaluse / portalusage
 ---------------------------------------------------------
 
-function OnPortalUsage (name, line, wildcards)
-  local mode = string.match(line, "^%S+%s+(%S+)$")
-  mode = mode and string.lower(mode) or "high"
+-- old output-window list; now only the fallback if the window can't open
+local function print_usage (mode)
 
   local list = {}
   for portal, count in pairs(usage) do
@@ -537,6 +562,324 @@ function OnPortalUsage (name, line, wildcards)
   Note("")
   Note("")
 end
+
+---------------------------------------------------------
+-- Usage window (portaluse)
+-- Same chrome as PupPaths / Keycheck / MarketWatch: themed_miniwindows'
+-- ThemedTextWindow with the package theme, our palette on the text only.
+-- Link text is Lua run in this plugin (text_rect.lua browseUrl ->
+-- loadstring), so the PU_* click handlers are global.
+---------------------------------------------------------
+
+local gHaveWin = pcall(require, "themed_miniwindows")
+
+local WIN_ID        = "PortalUse_list"
+local WIN_FONT      = "Consolas"
+local WIN_FONT_SIZE = 13
+local SORT_MODES    = { "high", "low", "alpha", "ralpha" }
+
+local gWin         = nil
+local win_mode     = "high"
+local show_ignored = false
+local area_cache   = nil   -- area map for the window; nil = rebuild on next draw
+
+local gColCache = {}
+local function col (hex)
+  if not gColCache[hex] then gColCache[hex] = ColourNameToRGB(hex) end
+  return gColCache[hex]
+end
+
+-- One line of style runs plus its hyperlinks. Link positions count the
+-- VISIBLE text only, which is what TextRect indexes against.
+local function winLine (segs)
+  local styles, links, pos = {}, {}, 1
+  for _, sg in ipairs(segs) do
+    if sg.text ~= "" then
+      styles[#styles + 1] = { text = sg.text, textcolour = col(sg.colour or TC.num) }
+      if sg.code then
+        links[#links + 1] = { start = pos, stop = pos + #sg.text - 1, text = sg.code, label = sg.tip }
+      end
+      pos = pos + #sg.text
+    end
+  end
+  return styles, links
+end
+
+-- Never reuse an object the library no longer knows about (a zombie window
+-- has live hotspots and no window_map entry).
+local function ensureWin ()
+  if not gHaveWin then return false end
+  if gWin and not (ThemedWindowClass and ThemedWindowClass.window_map
+                   and ThemedWindowClass.window_map[WIN_ID]) then
+    gWin = nil
+    pcall(WindowDelete, WIN_ID)
+  end
+  if not gWin then
+    local ok, w = pcall(ThemedTextWindow,
+      WIN_ID,
+      0, 0,            -- first-run position; after that it stays where dragged
+      700, 400,        -- default size; fit_contents sizes it to the text
+      "Portal Usage",
+      "center",        -- title alignment
+      true,            -- is_temporary: gives the title-bar close button
+      false,           -- resizeable
+      true,            -- text_scrollable: the list is taller than the cap
+      false,           -- text_selectable
+      false,           -- text_copyable
+      false,           -- url_hyperlinks: ours are explicit
+      false,           -- autowrap: rows are laid out in columns
+      WIN_FONT, WIN_FONT_SIZE,   -- title font
+      WIN_FONT, WIN_FONT_SIZE,   -- text font
+      1000,            -- max lines (340+ portals already)
+      nil,             -- padding
+      true,            -- defer showing until drawn
+      false, nil,
+      "Close")
+    if not ok or not w then
+      gHaveWin = false
+      return false
+    end
+    gWin = w
+    -- Bold body text, as in Keycheck / PupPaths: redefine the TextRect's
+    -- normal font as bold so widths and link hotspots are measured with it.
+    pcall(function()
+      local tr = gWin.textrect
+      WindowFont(tr.window, tr.font, WIN_FONT, WIN_FONT_SIZE, true, false, false, false, 0)
+      tr.font_height = WindowFontInfo(tr.window, tr.font, 1)
+      tr:setLineSpacing(tr.line_spacing)
+    end)
+    local prior = gWin.do_on_delete
+    gWin.do_on_delete = function(self)
+      if prior then prior(self) end
+      if gWin == self then gWin = nil end
+    end
+  end
+  return true
+end
+
+local function sort_list (list, mode)
+  local function byname (a, b) return a.portal < b.portal end
+  if     mode == "alpha"  then table.sort(list, byname)
+  elseif mode == "ralpha" then table.sort(list, function(a,b) return a.portal > b.portal end)
+  elseif mode == "low"    then table.sort(list, function(a,b)
+           if a.count ~= b.count then return a.count < b.count end
+           return byname(a, b) end)
+  else                         table.sort(list, function(a,b)
+           if a.count ~= b.count then return a.count > b.count end
+           return byname(a, b) end)
+  end
+  return list
+end
+
+-- the portal name in its captured colours
+local function name_segs (portal)
+  local segs, len = {}, 0
+  local spans = colors[portal]
+  if spans then
+    for _, sp in ipairs(spans) do
+      segs[#segs + 1] = { text = sp.text, colour = sp.fore }
+      len = len + #sp.text
+    end
+  end
+  if len == 0 then
+    segs = { { text = portal, colour = "blue" } }
+  end
+  return segs
+end
+
+local function row_segs (entry, button, countW, areas)
+  local ref = string.format("%q", entry.portal)
+  local segs = { { text = " " } }
+  if button == "ignore" then
+    segs[#segs + 1] = { text = "[ignore]", colour = TC.val, code = "PU_Ignore(" .. ref .. ")",
+                        tip = "Ignore " .. entry.portal .. " (hide it and stop counting it)" }
+    segs[#segs + 1] = { text = " " }   -- pad to [restore]'s width, outside the link
+  else
+    segs[#segs + 1] = { text = "[restore]", colour = TC.ok, code = "PU_Restore(" .. ref .. ")",
+                        tip = "Stop ignoring " .. entry.portal }
+  end
+  local cnt = tostring(entry.count)
+  segs[#segs + 1] = { text = string.rep(" ", 2 + countW - #cnt) }
+  segs[#segs + 1] = { text = cnt, colour = TC.num }
+  segs[#segs + 1] = { text = "  " }
+  for _, sg in ipairs(name_segs(entry.portal)) do segs[#segs + 1] = sg end
+  if areas then
+    local a = areas[entry.portal:lower()]
+    if a then
+      if a.area then segs[#segs + 1] = { text = " [" .. a.area .. "]", colour = TC.val } end
+      if a.room then segs[#segs + 1] = { text = " (" .. a.room .. ")", colour = TC.ok } end
+    end
+  end
+  return segs
+end
+
+-- Draw the window. keep_scroll: a redraw of a window that is already up
+-- stays where you were reading instead of jumping back to the top.
+local function ShowWindow (keep_scroll)
+  local keep = nil
+  if keep_scroll and gWin and gWin.textrect then
+    keep = tonumber(gWin.textrect.display_start_line)
+  end
+  if not ensureWin() then
+    print_usage(win_mode)
+    return
+  end
+  gWin:clear(false)
+
+  local areas = nil
+  if show_area then
+    if not area_cache then area_cache = load_portaldex_areas() end
+    areas = area_cache
+  end
+
+  local list, total = {}, 0
+  for portal, count in pairs(usage) do
+    -- an empty name can sit in old data files; it has nothing to show or click
+    if not ignore[portal] and portal ~= "" then
+      list[#list + 1] = { portal = portal, count = count }
+      total = total + count
+    end
+  end
+  sort_list(list, win_mode)
+
+  local ign = {}
+  for portal in pairs(ignore) do
+    ign[#ign + 1] = { portal = portal, count = usage[portal] or 0 }
+  end
+  sort_list(ign, "alpha")
+
+  -- Button / status line
+  local top = { { text = " Sort: ", colour = TC.val } }
+  for _, m in ipairs(SORT_MODES) do
+    local cur = (m == win_mode)
+    top[#top + 1] = { text = cur and ("[" .. m .. "]") or m, colour = cur and TC.ok or TC.hdr,
+                      code = "PU_Sort(" .. string.format("%q", m) .. ")", tip = "Sort by " .. m }
+    top[#top + 1] = { text = " " }
+  end
+  top[#top + 1] = { text = "   Area: ", colour = TC.val }
+  top[#top + 1] = { text = show_area and "ON" or "OFF", colour = show_area and TC.ok or TC.hdr,
+                    code = "PU_ToggleArea()",
+                    tip = "Turn the destination area display " .. (show_area and "off" or "on") }
+  top[#top + 1] = { text = "   " }
+  top[#top + 1] = show_ignored
+      and { text = "[ Hide ignored ]", colour = TC.ok, code = "PU_ToggleIgnored()",
+            tip = "Hide the ignored portals" }
+      or  { text = "[ Show ignored (" .. #ign .. ") ]", colour = TC.ok, code = "PU_ToggleIgnored()",
+            tip = "List the ignored portals, with [restore] buttons" }
+  local st, lk = winLine(top)
+  gWin:add_text(st, false, lk)
+  gWin:add_text(winLine {
+    { text = " " .. #list .. " portals, " .. total .. " uses", colour = TC.val },
+  }, false, {})
+  gWin:add_text(winLine { { text = " " } }, false, {})
+
+  local countW = 4
+  for _, e in ipairs(list) do if #tostring(e.count) > countW then countW = #tostring(e.count) end end
+  for _, e in ipairs(ign)  do if #tostring(e.count) > countW then countW = #tostring(e.count) end end
+
+  if #list == 0 then
+    gWin:add_text(winLine {
+      { text = " No portal uses yet. Wear a portal and use it, or run ", colour = TC.num },
+      { text = "portalscan", colour = TC.ok },
+      { text = ".", colour = TC.num },
+    }, false, {})
+  else
+    -- " [ignore] " is 10 wide, then 2 + countW for the right-aligned count
+    gWin:add_text(winLine {
+      { text = string.rep(" ", 12 + countW - 4) .. "Uses  Portal", colour = TC.hdr },
+    }, false, {})
+    for _, e in ipairs(list) do
+      st, lk = winLine(row_segs(e, "ignore", countW, areas))
+      gWin:add_text(st, false, lk)
+    end
+  end
+
+  if show_ignored then
+    gWin:add_text(winLine { { text = " " } }, false, {})
+    gWin:add_text(winLine { { text = " Ignored portals:", colour = TC.hdr } }, false, {})
+    if #ign == 0 then
+      gWin:add_text(winLine { { text = " (none)", colour = TC.num } }, false, {})
+    else
+      for _, e in ipairs(ign) do
+        st, lk = winLine(row_segs(e, "restore", countW, areas))
+        gWin:add_text(st, false, lk)
+      end
+    end
+  end
+
+  gWin:add_text(winLine { { text = " " } }, false, {})
+  gWin:add_text(winLine {
+    { text = " [ignore]", colour = TC.val },
+    { text = " hides a portal and stops counting it.  ", colour = TC.num },
+    { text = "[restore]", colour = TC.ok },
+    { text = " brings it back.", colour = TC.num },
+  }, false, {})
+  gWin:add_text(winLine {
+    { text = " portalusetop <channel>", colour = TC.ok },
+    { text = " sends the top 5 to a channel.  ", colour = TC.num },
+    { text = "portalhelp", colour = TC.ok },
+    { text = " for all commands.", colour = TC.num },
+  }, false, {})
+
+  -- 500px tall at most; the rest scrolls (wheel or scrollbar).
+  pcall(function() gWin:fit_contents(2000, 500) end)
+  -- Scroll AFTER fitting: add_text follows the newest line like a console,
+  -- and rows above the viewport get no hotspot when drawn.
+  pcall(function() gWin:set_scroll(keep or 1) end)
+  gWin:draw()
+  gWin:show()
+  -- The layout's invisible drag bar (z 154) eats clicks on windows under it.
+  pcall(WindowSetZOrder, WIN_ID, 99999)
+  pcall(Repaint)
+end
+
+-- Redraw the window if it is up, keeping the scroll.
+-- Safe from inside a link click: no WindowDelete happens here.
+RedrawIfOpen = function ()
+  if gWin then ShowWindow(true) end
+end
+
+function PU_Ignore (portal)
+  if type(portal) ~= "string" then return end
+  ignore[portal] = true
+  save_data()   -- redraws
+end
+
+function PU_Restore (portal)
+  if type(portal) ~= "string" then return end
+  ignore[portal] = nil
+  save_data()   -- redraws
+end
+
+function PU_Sort (mode)
+  win_mode = mode or "high"
+  RedrawIfOpen()
+end
+
+function PU_ToggleArea ()
+  show_area  = not show_area
+  area_cache = nil
+  save_data()   -- redraws, which rebuilds area_cache
+  if show_area and area_cache and next(area_cache) == nil then
+    ColourNote("white","red","[PortalUse] No portal catalog found - the area display needs PortalValue 3.3 or higher, with a 'portaldex scan' done.")
+  end
+end
+
+function PU_ToggleIgnored ()
+  show_ignored = not show_ignored
+  RedrawIfOpen()
+end
+
+function OnPortalUsage (name, line, wildcards)
+  local mode = string.match(line, "^%S+%s+(%S+)$")
+  mode = mode and string.lower(mode) or "high"
+  local known = false
+  for _, m in ipairs(SORT_MODES) do if m == mode then known = true end end
+  win_mode   = known and mode or "high"
+  area_cache = nil      -- typed command: re-read the catalog
+  ShowWindow(false)
+end
+
 
 ---------------------------------------------------------
 -- portalusetop
@@ -689,6 +1032,7 @@ function OnPortalArea (name, line, wildcards)
   elseif arg == "off" then show_area = false
   elseif arg == ""    then show_area = not show_area
   else ColourNote("white","red","Usage: portalarea on|off"); return end
+  area_cache = nil
   save_data()
   ColourNote(TC.val,"","[PortalUse] Destination area + landing room display is " .. (show_area and "ON" or "OFF") .. ".")
   if show_area and next(load_portaldex_areas()) == nil then
@@ -701,9 +1045,10 @@ end
 ---------------------------------------------------------
 
 function OnPortalHelp ()
-  ColourNote(TC.hdr,"","PortalUse 2.1")
+  ColourNote(TC.hdr,"","PortalUse 2.3")
   ColourNote(TC.val,"","Commands:")
-  ColourNote(TC.val,"","  portaluse [mode]           -- Show usage (high, low, alpha, ralpha)")
+  ColourNote(TC.val,"","  portaluse [mode]           -- Open the usage window (sort: high, low, alpha, ralpha)")
+  ColourNote(TC.num, "","       click [ignore] on a row to ignore a portal; [ Show ignored ] to restore")
   ColourNote(TC.val,"","  portalusetop <channel>     -- Send top 5 portals to a channel")
   ColourNote(TC.val,"","  portalscan                 -- Refresh colours, add untracked portals with 0 uses")
   ColourNote(TC.val,"","  portalsetbag <keyword>     -- Set the bag keyword for portalscan")
