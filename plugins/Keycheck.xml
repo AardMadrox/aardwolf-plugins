@@ -9,7 +9,7 @@
    language="Lua"
    purpose="All-around key manager: keyring window, walk-to key rooms, keyrecord, krk, warnkey"
    date_written="2026-06-18"
-   version="3.9"
+   version="4.0"
    save_state="y"
 >
 </plugin>
@@ -63,7 +63,9 @@ THE WINDOW
   on the world's show_bold. Redraws after a click keep the scroll.
   Rows: [go] (mapper goto), [remove] (keyring get <object id>, only for
   keys on the ring), [delete] (two clicks: [sure?] for 5s, then gone
-  from the data file; no undo). Missing = bright red, on the ring but
+  from the data file; no undo). [ Remove All ] in the tab bar: two
+  clicks, keyring get for every ring key of the open tab, then a
+  refresh. Deliberately no delete-all. Missing = bright red, on the ring but
   melting within MELT_HOURS (20) = x200 pink. "1 of 2?" = a doubled
   name where you hold one; the keyring cannot say which.
 
@@ -113,6 +115,9 @@ HISTORY
   v1.x KeyWarning: Crynn 24h spouse warning + missing-key list.
   v1.9-2.7 (2026-11-25): window, keyroom, tabs, keyrecord, own krk, Key
   Added, [remove]/[delete], warnkey, renamed Keycheck (same plugin id).
+  v4.0 (2026-11-27): [ Remove All ] after [ Refresh ]: two clicks, takes
+  every key on the open tab off the keyring, then re-reads it. No delete
+  all, on purpose.
   v3.9 (2026-11-27): [ Refresh ] link after the tabs (KW_Refresh): reads
   keyring data again and redraws in place, same tab and scroll, with a
   one-line "Refreshed: x of y" note instead of the keycheck summary.
@@ -378,7 +383,7 @@ HISTORY
 require "gmcphelper"
 
 -- Keep in step with version= above; shown on load so a reload is visible.
-local VERSION = "3.9"
+local VERSION = "4.0"
 
 -- Standard colour theme
 local CLR_TAG  = "#875FFF"   -- x099 brackets
@@ -800,6 +805,8 @@ end
 -- row shows [sure?] until it is clicked or 5 seconds pass.
 local pending_delete = nil     -- { key = <entry>, gen = <n> }
 local delete_gen = 0
+-- [ Remove All ] also needs a second click: { tab = <tab>, gen = <n> }
+local pending_removeall = nil
 
 -- One window row. The [go] link and the key name both walk to the room.
 -- [remove] (only for a key on the keyring) takes it off the keyring;
@@ -855,6 +862,14 @@ local function TabSegs()
   end
   segs[#segs + 1] = { text = "[ Refresh ]", colour = CLR_NAME, code = "KW_Refresh()",
                       tip = "Read your keyring again (a key you took off, new timers)" }
+  segs[#segs + 1] = { text = "   " }
+  if pending_removeall and pending_removeall.tab == cur_tab then
+    segs[#segs + 1] = { text = "[ sure? ]", colour = CLR_MISS, code = "KW_RemoveAll()",
+                        tip = "Click again to take every " .. cur_tab .. " key off your keyring" }
+  else
+    segs[#segs + 1] = { text = "[ Remove All ]", colour = CLR_WARN, code = "KW_RemoveAll()",
+                        tip = "Take every " .. cur_tab .. " key off your keyring (asks once more; Keycheck keeps the list)" }
+  end
   return segs
 end
 
@@ -947,6 +962,11 @@ local function ShowKeyWindow(keep_scroll)
   }, false, {})
   gWin:add_text(winLine {
     { text = " ", colour = CLR_TAG },
+    { text = "[ Remove All ]", colour = CLR_WARN },
+    { text = " takes every key on this tab off your keyring (click twice).", colour = CLR_TAG },
+  }, false, {})
+  gWin:add_text(winLine {
+    { text = " ", colour = CLR_TAG },
     { text = "keyrecord", colour = CLR_HI },
     { text = " in the room a key comes from, then get it, adds it here.", colour = CLR_TAG },
   }, false, {})
@@ -984,6 +1004,7 @@ function KW_Tab(tab)
   tab = TabFromWord(tab)
   if not tab or tab == cur_tab then return end
   cur_tab = tab
+  pending_removeall = nil
   ShowKeyWindow(false)
 end
 
@@ -1217,6 +1238,7 @@ function KeyCheckHelp(name, line, wildcards)
     { "[ 201 ]  [ Sub ]", "Tabs: keys for level 201, and keys you gather below 201." },
     { "",                 "Click a tab to switch." },
     { "[ Refresh ]",      "Read your keyring again: shows a key you took off by hand, new timers." },
+    { "[ Remove All ]",   "Take every key on the open tab off your keyring. Click twice; the list stays." },
     { "[go]",             "Walk there with the mapper (the key name works too)." },
     { "[remove]",         "Take that key off your keyring (it goes to your inventory)." },
     { "[delete]",         "Delete the key from Keycheck for good. Click once, it turns into" },
@@ -1718,6 +1740,42 @@ function KW_Refresh()
   manual_check = true
   last_warn = os.time()
   StartKeyringCapture("check")
+end
+
+-- [ Remove All ] click: first click arms [ sure? ] for 5 seconds, the
+-- second sends keyring get <id> for every key of the open tab that is on
+-- the ring, then re-reads the keyring so the window shows what the game
+-- really took off. Keycheck's list is untouched (no delete all).
+function KW_RemoveAll()
+  if capture_mode or not last_have then return end
+  local tab = cur_tab
+  if not (pending_removeall and pending_removeall.tab == tab) then
+    delete_gen = delete_gen + 1
+    pending_removeall = { tab = tab, gen = delete_gen }
+    DoAfterSpecial(5, "KW_RemoveAllExpire(" .. delete_gen .. ")", sendto.script)
+    RedrawIfOpen()
+    return
+  end
+  pending_removeall = nil
+  local ids = {}
+  for _, r in ipairs((BuildRows(tab, last_have))) do
+    if r.ring and r.ring.id then ids[#ids + 1] = r.ring.id end
+  end
+  if #ids == 0 then
+    KeyNote("No " .. tab .. " keys on your keyring to take off.")
+    RedrawIfOpen()
+    return
+  end
+  for _, id in ipairs(ids) do SendNoEcho("keyring get " .. id) end
+  KeyNote(string.format("Taking %d %s key(s) off your keyring.", #ids, tab))
+  KW_Refresh()
+end
+
+function KW_RemoveAllExpire(gen)
+  if pending_removeall and pending_removeall.gen == tonumber(gen) then
+    pending_removeall = nil
+    RedrawIfOpen()
+  end
 end
 
 -- Manual keycheck alias: open the tab for your level.
