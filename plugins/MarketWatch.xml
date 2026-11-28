@@ -44,7 +44,7 @@
    purpose="Watch the market and auction channel for wanted items; one-click bids."
    date_written="2026-08-21"
    requires="4.73"
-   version="5.4"
+   version="5.5"
    save_state="y"
 >
 </plugin>
@@ -269,6 +269,9 @@ WATCH-LIST WINDOW (v5.3)
     brings it back.  OnPluginClose calls mgrClose FIRST so the library's own
     delete-all does not look like a click on [x].
   * save_state="y" was added so the dragged position survives a restart.
+  * v5.5: default spot MGR_LEFT/MGR_TOP = 4,145 (top left, below the layout's
+    drag bar).  gCfg.winpos < MGR_POS_VER deletes the saved mw_..._windowx/y
+    once, since movewindow prefers a saved position to the default.
 
 WHEN EDITING
   * keep_evaluating is essential on the channel triggers. MUSHclient stops
@@ -648,6 +651,7 @@ gCfg = {
   aucdebug    = false,
   popup        = true,    -- pop a window up for act-now opportunities
   win          = false,   -- the watch-list window is open (opened by marketw list/config)
+  winpos       = 0,       -- bumped when the default spot moves; resets a saved one (v5.5)
   withdraw     = false,   -- pull gold from the bank when a bid falls short
   withdrawroom = 0,       -- only ever do that in this room (0 = unset)
   deep        = false,    -- probe EVERY truncated row, not just likely ones
@@ -2783,6 +2787,11 @@ end
 -- "marketw win" brings it back.
 local MGR_ID   = "MarketWatch_list"
 local MGR_MAXH = 520
+-- Top left of the main text area, just BELOW the layout's invisible 15px
+-- drag bar (aard_layout add_title_dragger, y 126-141 on Eric's screen),
+-- which would otherwise swallow clicks on whichever row lay across it.
+local MGR_LEFT, MGR_TOP = 4, 145
+local MGR_POS_VER = 1     -- bump to push everyone's window back to the default
 local gMgr     = nil
 local gMgrRows = {}       -- row number -> the watch entry drawn on it
 
@@ -2993,9 +3002,18 @@ mgrRefresh = function (keep_scroll)
   end
 
   if not gMgr then
+    -- v5.5: the default spot moved to the top left of the main text area.
+    -- movewindow prefers a SAVED position over the default, so forget the
+    -- old one once; after that a drag is remembered as usual.
+    if (tonumber (gCfg.winpos) or 0) < MGR_POS_VER then
+      pcall (DeleteVariable, "mw_" .. MGR_ID .. "_windowx")
+      pcall (DeleteVariable, "mw_" .. MGR_ID .. "_windowy")
+      gCfg.winpos = MGR_POS_VER
+      saveData ()
+    end
     local ok, w = pcall (ThemedTextWindow,
       MGR_ID,
-      640, 160,        -- default left, top (first run only; it remembers a drag)
+      MGR_LEFT, MGR_TOP,  -- default left, top (it remembers a drag)
       600, 300,        -- default size (fit_contents resizes it)
       "MarketWatch - watch list",
       "center",
