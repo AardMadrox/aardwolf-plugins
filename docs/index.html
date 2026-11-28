@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<!--
+  Madrox's Aardwolf Plugins - GitHub Pages site (served from the docs/ folder).
+  To add a screenshot to a plugin: put the image in docs/images/ and add
+    <img class="shot" src="images/NAME.jpg" alt="..." loading="lazy">
+  as the first thing inside that plugin's <article class="card">.
+  Clicking any .shot opens it full size.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Madrox's Aardwolf Plugins</title>
+<meta name="description" content="Free MUSHclient plugins for the Aardwolf MUD: maze solvers, portal tools, market watching, key management, crafting and more.">
+<style>
+  :root {
+    --bg: #0e0c14;
+    --panel: #17141f;
+    --panel-2: #1e1a29;
+    --line: #2c2639;
+    --text: #e8e6ee;
+    --muted: #a39db3;
+    --purple: #a66bff;
+    --cyan: #00d7ff;
+    --green: #00ff87;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  a { color: var(--cyan); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    font: 0.88em/1.4 ui-monospace, "Cascadia Code", Consolas, monospace;
+    color: var(--green);
+    background: #0b0a10;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 5px;
+    white-space: nowrap;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px; }
+
+  header {
+    padding: 64px 0 40px;
+    border-bottom: 1px solid var(--line);
+    background: radial-gradient(ellipse at top, #241a3a 0%, var(--bg) 70%);
+  }
+  .tag { color: var(--purple); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; font-size: .8rem; }
+  h1 { margin: 6px 0 10px; font-size: clamp(2rem, 5vw, 3rem); line-height: 1.15; }
+  h1 .name { color: var(--cyan); }
+  .lead { color: var(--muted); max-width: 640px; font-size: 1.1rem; margin: 0 0 24px; }
+  .buttons { display: flex; gap: 12px; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 10px 18px; border-radius: 8px; font-weight: 600;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+  }
+  .btn:hover { text-decoration: none; border-color: var(--cyan); }
+  .btn.primary { background: var(--purple); border-color: var(--purple); color: #fff; }
+  .btn.primary:hover { filter: brightness(1.1); }
+
+  section { padding: 40px 0 8px; }
+  h2 { font-size: 1.5rem; margin: 0 0 6px; }
+  h2 .bracket { color: var(--purple); }
+  .section-note { color: var(--muted); margin: 0 0 20px; }
+
+  .start {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px;
+  }
+  .start h3 { margin: 0 0 10px; color: var(--cyan); font-size: 1.1rem; }
+  .start ol, .start ul { margin: 0; padding-left: 20px; }
+  .start li { margin: 6px 0; }
+  .start ul { list-style: none; padding-left: 0; }
+
+  .toolbar {
+    position: sticky; top: 0; z-index: 5;
+    background: rgba(14, 12, 20, .94); backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--line); padding: 12px 0;
+  }
+  .toolbar .wrap { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .chip {
+    font-size: .88rem; padding: 4px 12px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); background: var(--panel);
+  }
+  .chip:hover { color: var(--text); border-color: var(--purple); text-decoration: none; }
+  #search {
+    margin-left: auto; min-width: 220px; padding: 7px 12px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; font-size: .92rem;
+  }
+  #search:focus { outline: none; border-color: var(--cyan); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 20px; display: flex; flex-direction: column; min-width: 0;
+  }
+  .card:hover { border-color: #3d3550; }
+  .card.wide { grid-column: 1 / -1; }
+  .card h3 { margin: 0 0 2px; font-size: 1.15rem; color: var(--cyan); }
+  .credit { color: var(--muted); font-size: .85rem; margin: 0 0 8px; }
+  .card p { margin: 6px 0 10px; }
+  .card ul { margin: 0 0 14px; padding-left: 18px; color: var(--muted); }
+  .card li { margin: 4px 0; }
+  .card li strong { color: var(--text); font-weight: 600; }
+  .card .links { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); font-size: .9rem; }
+  .warn { color: #ffb86b; font-size: .9rem; }
+  .empty { display: none; color: var(--muted); padding: 20px 0; }
+
+  /* Screenshots */
+  .shot {
+    display: block; width: 100%; height: auto; margin: -4px 0 14px;
+    border: 1px solid var(--line); border-radius: 8px; background: #000;
+    cursor: zoom-in; transition: border-color .15s;
+  }
+  .shot:hover { border-color: var(--cyan); }
+  .shot.tall { max-height: 300px; object-fit: cover; object-position: top; }
+  .shots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 4px 0 16px; }
+  .shots figure { margin: 0; }
+  .shots .shot { margin: 0; height: 190px; object-fit: cover; object-position: top left; }
+  .shots figcaption { color: var(--muted); font-size: .82rem; margin-top: 6px; }
+  .wide-body { display: grid; grid-template-columns: 1fr 1fr; gap: 0 28px; }
+
+  #lightbox {
+    position: fixed; inset: 0; z-index: 50; display: none;
+    align-items: center; justify-content: center; padding: 24px;
+    background: rgba(5, 4, 8, .92); cursor: zoom-out;
+  }
+  #lightbox.open { display: flex; }
+  #lightbox img { max-width: 100%; max-height: 100%; border: 1px solid var(--line); border-radius: 8px; }
+
+  footer { margin-top: 48px; padding: 28px 0 40px; border-top: 1px solid var(--line); color: var(--muted); font-size: .92rem; }
+  footer p { margin: 6px 0; }
+
+  @media (max-width: 760px) {
+    .start, .wide-body { grid-template-columns: 1fr; }
+    .shots { grid-template-columns: 1fr; }
+    .shots .shot { height: auto; }
+    #search { margin-left: 0; width: 100%; }
+    code { white-space: normal; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="tag">MUSHclient plugins for Aardwolf</div>
+    <h1><span class="name">Madrox's</span> Aardwolf Plugins</h1>
+    <p class="lead">Free plugins for the Aardwolf MUD: maze solvers, portal tools, a market watcher, a key manager,
+      crafting batches and more. Install one manager and get all of them from inside the game.</p>
+    <div class="buttons">
+      <a class="btn primary" href="#start">Get started</a>
+      <a class="btn" href="https://github.com/AardMadrox/aardwolf-plugins">View on GitHub</a>
+    </div>
+  </div>
+</header>
+
+<section id="start">
+  <div class="wrap">
+    <h2><span class="bracket">[</span> Start here: the Plugin Manager <span class="bracket">]</span></h2>
+    <p class="section-note">Install the Madrox Plugin Manager once, then install, update and remove every other plugin
+      from inside the MUD. No downloading files by hand.</p>
+    <div class="start">
+      <div>
+        <h3>Install it</h3>
+        <ol>
+          <li>Open <a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/Madrox_PluginManager.xml">Madrox_PluginManager.xml</a>
+            on GitHub and click the <strong>Download raw file</strong> button.</li>
+          <li>Put it in your MUSHclient plugins folder, usually <code>C:\MUSHclient\worlds\plugins\</code></li>
+          <li>In MUSHclient open <strong>File &rarr; Plugins...</strong>, click <strong>Add</strong>, and pick the file.</li>
+          <li>Type <code>mpm</code> in the game.</li>
+        </ol>
+      </div>
+      <div>
+        <h3>Use it</h3>
+        <ul>
+          <li><code>mpm</code> &mdash; clickable list of every plugin with <strong>Install / Update / Reload / Remove</strong> buttons</li>
+          <li><code>mpm updateall</code> &mdash; update everything that's out of date</li>
+          <li><code>mpm selfupdate</code> &mdash; update the manager itself</li>
+          <li><code>mpm check</code> &mdash; re-read the list from GitHub</li>
+          <li><code>mpm help</code> &mdash; every command</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<nav class="toolbar" aria-label="Plugin categories">
+  <div class="wrap">
+    <a class="chip" href="#travel">Portals &amp; Travel</a>
+    <a class="chip" href="#epics">Epics</a>
+    <a class="chip" href="#combat">Combat &amp; PK</a>
+    <a class="chip" href="#loot">Loot, Items &amp; Market</a>
+    <a class="chip" href="#progress">Progress &amp; Stats</a>
+    <a class="chip" href="#utility">Crafting &amp; Utility</a>
+    <input id="search" type="search" placeholder="Search plugins..." aria-label="Search plugins">
+  </div>
+</nav>
+
+<main>
+
+<section id="travel" class="cat">
+  <div class="wrap">
+    <h2><span class="bracket">[</span> Portals &amp; Travel <span class="bracket">]</span></h2>
+    <div class="grid">
+
+      <article class="card wide">
+        <h3>PortalValue</h3>
+        <p>One stop for everything portal. PortalUse and PortalMapper are now built in, and your usage counts and mapped portals carry over.</p>
+        <div class="shots">
+          <figure>
+            <img class="shot" src="images/portalvalue.jpg" alt="PortalValue pv output: nearest portal, speedwalk, recall walk and Worth it" loading="lazy">
+            <figcaption><code>pv</code> &mdash; nearest portal and what one here is worth</figcaption>
+          </figure>
+          <figure>
+            <img class="shot" src="images/portaluse.jpg" alt="Portal Usage window with sort buttons and ignore links" loading="lazy">
+            <figcaption><code>portaluse</code> &mdash; usage window</figcaption>
+          </figure>
+          <figure>
+            <img class="shot" src="images/portalmapper.jpg" alt="PortalMapper config window with mode, bags and custom command" loading="lazy">
+            <figcaption><code>portalmapper config</code> &mdash; mapper settings</figcaption>
+          </figure>
+        </div>
+        <div class="wide-body">
+          <ul>
+            <li><strong>Pathing:</strong> <code>pv</code> finds the closest saved portal to your room, the speedwalk, and what a portal here would be worth for the mobs you kill in this area</li>
+            <li><strong>Catalog:</strong> <code>portaldex</code> sorts your portals by type from <code>id</code></li>
+          </ul>
+          <ul>
+            <li><strong>Usage window:</strong> <code>portaluse</code> shows how often you use each worn portal, with sort buttons and <code>[ignore]</code> per portal</li>
+            <li><strong>Mapper:</strong> <code>portalmapper go</code> walks a bag of portals and saves each one to the mapper; <code>portalmapper config</code> opens a settings window</li>
+          </ul>
+        </div>
+        <p class="warn">The mapper enters every portal, so mind the high-level ones.</p>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/PortalValue.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>MazeMobber</h3>
+        <p>Solves the shuffling mazes in twenty-two areas and walks you to what matters in them &mdash; Prosper, Gauntlet, Nenukon, Xylmos, Infamy, Darklight, Astral, Gold Rush and more.</p>
+        <ul>
+          <li><code>mm</code> &mdash; clickable list of mobs and rooms for the area you're in; click one and it walks the whole way</li>
+          <li><code>mmr</code> &mdash; resume after a fight or warded door</li>
+          <li><code>mmout</code> &mdash; leave by the nearest way out</li>
+          <li>Scrolling window that opens on arrival and closes when you leave</li>
+          <li>Never walks into a wall or out of the maze</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/MazeMobber.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <img class="shot" src="images/puppaths.jpg" alt="PupPaths window listing saved paths with step counts" loading="lazy">
+        <h3>PupPaths</h3>
+        <p>Step-by-step pup pathing with named, saved routes.</p>
+        <ul>
+          <li><code>pp &lt;name&gt;</code> &mdash; advance one step each time you type it</li>
+          <li><code>pp list</code> &mdash; window to add, edit and delete paths</li>
+          <li>Once a path is recorded, <code>pp &lt;name&gt;</code> from anywhere walks you to its start</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/PupPaths.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>Partroxis</h3>
+        <p>Walks you through the Partroxis maze.</p>
+        <ul>
+          <li><code>psx</code> at the maze door opens a clickable window of every room and its mob</li>
+          <li>Walks one exit at a time, learning wrong exits and doubling back</li>
+          <li>Casts any missing invis / sneak / hide before it sets off</li>
+          <li>Stops if you're attacked; <code>psxgo</code> carries on</li>
+        </ul>
+        <p class="credit">Room and mob data from Galaban's Partroxis plugin.</p>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/Partroxis.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>ChaosCast</h3>
+        <p>Tracks your chaos-portal casts, normal vs golden.</p>
+        <ul>
+          <li><code>chaoscast</code> &mdash; cast stats; add a channel to share them</li>
+          <li><code>chaoscast rooms</code> &mdash; mapper rooms the last portal could lead to</li>
+          <li><code>bcp &lt;number&gt;</code> &mdash; cast chaos blank that many times</li>
+          <li><code>ravitrack</code> &mdash; stats for Ravi portal purchases</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/ChaosCast.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>RetreatFnSucks</h3>
+        <p>Retreat in one direction and keep retrying it on every <em>"You FAIL to retreat!"</em></p>
+        <ul>
+          <li><code>re</code> <code>rw</code> <code>rn</code> <code>rs</code> <code>ru</code> <code>rd</code> &mdash; retreat that way</li>
+          <li><code>ret</code> toggles it, <code>rstop</code> cancels, <code>retsilent</code> for quiet mode</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/RetreatFnSucks.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<section id="epics" class="cat">
+  <div class="wrap">
+    <h2><span class="bracket">[</span> Epics <span class="bracket">]</span></h2>
+    <div class="grid">
+
+      <article class="card">
+        <h3>BlackClawCrag</h3>
+        <p class="credit">Modified from Castiel's.</p>
+        <p>Helper for the Black Claw Crag solo epic.</p>
+        <ul>
+          <li><code>bcc find</code> &mdash; walks the mist rooms, stops the moment it sees the mist, and enters (needs the mapper)</li>
+          <li>Mini window with run data; breath announcements on/off</li>
+          <li><code>bcc report &lt;channel&gt;</code>, plus optional auto-report after each run</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/BlackClawCrag.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<section id="combat" class="cat">
+  <div class="wrap">
+    <h2><span class="bracket">[</span> Combat &amp; PK <span class="bracket">]</span></h2>
+    <div class="grid">
+
+      <article class="card">
+        <img class="shot" src="images/target.jpg" alt="Target Report line: enemy, HP, area, room and vnum" loading="lazy">
+        <h3>Target</h3>
+        <p>Reports where you are and what you're fighting to a channel: the mob, its HP %, area, room and vnum, all read live from GMCP.</p>
+        <ul>
+          <li><code>target say</code> / <code>gt</code> / <code>ft</code> / <code>clan</code> / <code>reply</code> / <code>spo</code></li>
+          <li>Out of combat it sends just your location</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/Target.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>FHX</h3>
+        <p>Healing helper built around incomp.</p>
+        <ul>
+          <li><code>fhx [name]</code> &mdash; keeps casting incomp until you or they are healed</li>
+          <li><code>hx</code> &mdash; casts once</li>
+          <li>Queues commands you type mid-combat</li>
+          <li>Optional auto-heal after each fight, including the group leader</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/FHX.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>PKReport</h3>
+        <p>A PK alert for when you can't fight your own battles.</p>
+        <ul>
+          <li>Reports who attacked you, the area and the room to spouse, group and/or clan chat</li>
+          <li><code>pkr spo on</code>, <code>pkr gt on</code>, <code>pkr clan on</code></li>
+          <li>Anyone else running PKReport gets your alert as a link that walks them straight to you</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/PKReport.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<section id="loot" class="cat">
+  <div class="wrap">
+    <h2><span class="bracket">[</span> Loot, Items &amp; Market <span class="bracket">]</span></h2>
+    <div class="grid">
+
+      <article class="card">
+        <img class="shot tall" src="images/reportid.jpg" alt="ReportID one-line item report sent to spouse channel" loading="lazy">
+        <h3>ReportID</h3>
+        <p class="credit">Rewritten from Nokfah's Report Identify (remove that one first).</p>
+        <p>Reports an item's identify stats on one line, to yourself or any channel.</p>
+        <ul>
+          <li><code>rid &lt;item&gt; [channel]</code> &mdash; level, slot, damage, stats, DR, HP</li>
+          <li>Weapons show damage above (green) or below (red) an aard weapon of the same level</li>
+          <li><code>rid bag &lt;bag id&gt;</code> &mdash; report a whole bag</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/ReportID.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>MarketWatch</h3>
+        <p>Watches the marketplace and the auction/market channels for items on your list.</p>
+        <ul>
+          <li>One-click bid or buyout up to the max price you set per item</li>
+          <li>Watch-list window (<code>marketw list</code>): edit items, set three max bids, pick market, auction or both</li>
+          <li>Optional pop-up window for live listings</li>
+          <li>Last-chance alerts and bank top-up when a bid falls short</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/MarketWatch.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>Keycheck</h3>
+        <p>All-around key manager for your keyring.</p>
+        <ul>
+          <li><code>keycheck</code> &mdash; window of every key: missing in red, melting soon in pink, time left on each</li>
+          <li><code>[go]</code> walks you to where each key comes from</li>
+          <li>201 and Sub tabs; opens the one for your level</li>
+          <li><code>keyrecord</code> &mdash; get a key and it's added with that room</li>
+          <li><code>warnkey &lt;#&gt;</code> &mdash; repeating warning when a key is under 20 hours</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/Keycheck.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>BlootReport</h3>
+        <p>Bloot tracker and keeper.</p>
+        <ul>
+          <li>Turn each bloot tier on or off (<code>blootreport tiers</code>)</li>
+          <li>Kept tiers show in a mini window with Keep / Unkeep / Report buttons</li>
+          <li>Tally per tier, sent to any channel</li>
+          <li>Uses ID wish, or the identify spell if you don't have it</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/BlootReport.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<section id="progress" class="cat">
+  <div class="wrap">
+    <h2><span class="bracket">[</span> Progress &amp; Stats <span class="bracket">]</span></h2>
+    <div class="grid">
+
+      <article class="card">
+        <img class="shot" src="images/impgoals.jpg" alt="IMPGoals window with Instinct, Mastery and Potential goals and costs" loading="lazy">
+        <h3>IMPGoals</h3>
+        <p>Set goals for Instinct, Mastery and Potential and see what they cost.</p>
+        <ul>
+          <li><code>impgoals config</code> &mdash; window with 3 Instinct slots, 3 Mastery slots and your Potential</li>
+          <li>Pick each skill from a list, set a goal, <code>[x]</code> to delete</li>
+          <li>Goals you reach delete themselves</li>
+          <li><code>impgoals &lt;channel&gt;</code> &mdash; total QP, gold and trains in one line</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/IMPGoals.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>Nokfah's Dull with Epic Bonus Reward tracking</h3>
+        <p class="credit">Modified from Nokfah's DullTracker.</p>
+        <p>Character development tracker (<code>dull</code>).</p>
+        <ul>
+          <li>Session and lifetime XP, gold, QP, trains, TP and epics</li>
+          <li>Per-epic lifetime reward records</li>
+          <li>Best and average campaign/quest times for the level you took it at</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/Nok3_DullTracker.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>RankTracker</h3>
+        <p>Finds you (or anyone) in the Aardwolf top 100 rankings.</p>
+        <ul>
+          <li><code>top [d|w|m|y]</code> &mdash; your daily, weekly, monthly or yearly ranks</li>
+          <li>Who's around you, and the top 10 in each rank</li>
+          <li>Works on channels too</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/RankTracker.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<section id="utility" class="cat">
+  <div class="wrap">
+    <h2><span class="bracket">[</span> Crafting &amp; Utility <span class="bracket">]</span></h2>
+    <div class="grid">
+
+      <article class="card">
+        <img class="shot tall" src="images/gradients.jpg" alt="Gradients list window, each gradient name drawn in its own colors" loading="lazy">
+        <h3>Gradients</h3>
+        <p class="credit">Reworked from Orphean's Gradients.</p>
+        <p>Make and save color gradients and send them to any channel or tell.</p>
+        <ul>
+          <li><code>grad100 send &lt;gradient&gt; say &lt;text&gt;</code> &mdash; keeps the whole string to 100 characters, color codes included</li>
+          <li><code>grad list</code> &mdash; window of your gradients, each drawn in its own colors</li>
+          <li>Pick colors from a palette of all 256 Aard colors</li>
+          <li>Comes with four starter gradients</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/Gradients.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>PotAndPapers</h3>
+        <p class="credit">Replaces Nok3_Alchemist (remove that one first).</p>
+        <p>Scribe scrolls and brew potions in batches from saved profiles.</p>
+        <ul>
+          <li><code>pnp config</code> &mdash; window to set each profile's command, spell, 1x&ndash;4x and batch size</li>
+          <li>Type a profile's command to make a batch</li>
+          <li>Retries lost concentration; sleeps when out of mana and carries on when you wake</li>
+          <li>Results per batch, per session and lifetime</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/PotAndPapers.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card">
+        <h3>Finger Notes</h3>
+        <p>Keep your own note on any player and see it at the bottom of their <code>finger</code>, online or offline.</p>
+        <ul>
+          <li><code>fnote &lt;player&gt; &lt;note&gt;</code> &mdash; add or replace</li>
+          <li><code>fnote list</code> &mdash; see them all</li>
+        </ul>
+        <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/FNotes.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><p class="empty" id="empty">No plugins match that search.</p></div>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>Written for <a href="https://www.aardwolf.com/">Aardwolf MUD</a> under <a href="https://www.gammon.com.au/mushclient/">MUSHclient</a>.
+      They rely on Aardwolf's GMCP data, so they won't work as-is on other MUDs.</p>
+    <p>Free under the MIT License. Source, issues and the full README are on
+      <a href="https://github.com/AardMadrox/aardwolf-plugins">GitHub</a>.</p>
+  </div>
+</footer>
+
+<div id="lightbox" role="dialog" aria-label="Screenshot"><img alt=""></div>
+
+<script>
+  (function () {
+    // Search filter
+    var box = document.getElementById('search');
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
+    var cats = Array.prototype.slice.call(document.querySelectorAll('.cat'));
+    var empty = document.getElementById('empty');
+    box.addEventListener('input', function () {
+      var q = box.value.trim().toLowerCase();
+      var shown = 0;
+      cards.forEach(function (c) {
+        var hit = !q || c.textContent.toLowerCase().indexOf(q) !== -1;
+        c.style.display = hit ? '' : 'none';
+        if (hit) shown++;
+      });
+      cats.forEach(function (s) {
+        var any = s.querySelectorAll('.card:not([style*="none"])').length;
+        s.style.display = any ? '' : 'none';
+      });
+      empty.style.display = shown ? 'none' : 'block';
+    });
+
+    // Click a screenshot to see it full size
+    var lb = document.getElementById('lightbox');
+    var lbImg = lb.querySelector('img');
+    document.addEventListener('click', function (e) {
+      var t = e.target;
+      if (t.classList && t.classList.contains('shot')) {
+        lbImg.src = t.src; lbImg.alt = t.alt; lb.classList.add('open');
+      } else if (lb.classList.contains('open') && lb.contains(t)) {
+        lb.classList.remove('open');
+      }
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') lb.classList.remove('open');
+    });
+  })();
+</script>
+</body>
+</html>
