@@ -94,7 +94,7 @@
   }
   #search:focus { outline: none; border-color: var(--cyan); }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(330px, 100%), 1fr)); gap: 16px; }
   .card {
     background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
     padding: 20px; display: flex; flex-direction: column; min-width: 0;
@@ -124,6 +124,9 @@
   .shots .shot { margin: 0; height: 190px; object-fit: cover; object-position: top left; }
   .shots figcaption { color: var(--muted); font-size: .82rem; margin-top: 6px; }
   .wide-body { display: grid; grid-template-columns: 1fr 1fr; gap: 0 28px; }
+  .card.side { flex-direction: row; gap: 18px; align-items: flex-start; }
+  .card.side .shot { width: 96px; flex: none; margin: 0; }
+  .side-body { display: flex; flex-direction: column; min-width: 0; align-self: stretch; }
 
   #lightbox {
     position: fixed; inset: 0; z-index: 50; display: none;
@@ -140,6 +143,7 @@
     .start, .wide-body { grid-template-columns: 1fr; }
     .shots { grid-template-columns: 1fr; }
     .shots .shot { height: auto; }
+    .toolbar { position: static; }
     #search { margin-left: 0; width: 100%; }
     code { white-space: normal; }
   }
@@ -241,6 +245,7 @@
       </article>
 
       <article class="card">
+        <img class="shot tall" src="images/mazemobber.jpg" alt="MazeMobber window listing every Nenukon mob and how many rooms it uses" loading="lazy">
         <h3>MazeMobber</h3>
         <p>Solves the shuffling mazes in twenty-two areas and walks you to what matters in them &mdash; Prosper, Gauntlet, Nenukon, Xylmos, Infamy, Darklight, Astral, Gold Rush and more.</p>
         <ul>
@@ -399,6 +404,7 @@
       </article>
 
       <article class="card">
+        <img class="shot" src="images/keycheck.jpg" alt="Keycheck keyring window with go, remove and delete links and time left on each key" loading="lazy">
         <h3>Keycheck</h3>
         <p>All-around key manager for your keyring.</p>
         <ul>
@@ -502,6 +508,22 @@
           <li>Results per batch, per session and lifetime</li>
         </ul>
         <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/PotAndPapers.xml">View on GitHub &rarr;</a></div>
+      </article>
+
+      <article class="card side">
+        <img class="shot" src="images/madbutt.jpg" alt="MadButt button window: XCP, NX, KK, CPR, HT, directions and more" loading="lazy">
+        <div class="side-body">
+          <h3>MadButt</h3>
+          <p class="credit">Written by Kelaire.</p>
+          <p>A window of clickable command buttons, with 40 button sets you can switch between (<code>mb1</code> to <code>mb40</code>).</p>
+          <ul>
+            <li>A new install comes ready with <strong>mb2 Default</strong>: quest and campaign buttons (<code>xcp</code>, <code>nx</code>, <code>kk</code>, <code>cpr</code>, <code>ht</code>), walking, and spots for your own aliases</li>
+            <li><strong>mb1</strong> is a menu that jumps to sets 2&ndash;20</li>
+            <li><code>mb config</code> &mdash; edit a whole set in a window</li>
+            <li><code>madbutt copyset 2 5</code> copies a set; <code>madbutt setname</code> names one</li>
+          </ul>
+          <div class="links"><a href="https://github.com/AardMadrox/aardwolf-plugins/blob/main/plugins/madbutt.xml">View on GitHub &rarr;</a></div>
+        </div>
       </article>
 
       <article class="card">
